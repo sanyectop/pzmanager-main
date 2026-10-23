@@ -1,0 +1,52 @@
+[package]
+name = "pz_overlay"
+version = "0.1.0"
+description = "Project Zomboid overlay probe DLL: hooks wglSwapBuffers and tints the game window red for 5 seconds."
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+# 必须是 cdylib，才能作为 DLL 被注入到游戏进程。
+name = "pz_overlay"
+crate-type = ["cdylib"]
+
+[dependencies]
+# JNI 绑定：拿 JNIEnv 时用它而不是手写虚表——实测手写虚表会在
+# AttachCurrentThread 上抛 0xC0000005 崩进程（见 docs/architecture.md §6.3）。
+# 不开 invocation feature：那会要求构建机链接 libjvm。
+jni = "0.21"
+# MinHook 封装。内部通过 cc crate 静态编译 MinHook 的 C 源码，
+# 因此构建机必须有 MSVC 的 C 编译器（cl.exe，随 Visual Studio / Build Tools 安装）。
+minhook = "0.9.0"
+
+# Win32 API：模块查找、导出表查询、DLL 生命周期、模块枚举。
+# 只开必要 feature，避免拖入整套 Windows 绑定。
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+] }
+
+# MSVC 的 C 编译器在给命令线加上 `-Z7`（调试信息）时编译 minhook 的 C 源码
+# 可能报 D8050（无法执行 c1.dll）。这里保留 Rust 侧的 debug info，
+# 只让第三方 minhook 包以 debug = false 编译，规避该故障。
+[profile.dev.package.minhook]
+debug = false
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+# 故意使用 unwind（默认行为，这里显式写出）：
+# 万一初始化线程发生 panic，只有该线程结束，游戏进程仍然存活；
+# 若改成 abort，任何 panic 都会直接杀掉游戏进程。
+panic = "unwind"

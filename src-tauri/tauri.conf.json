@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "pzmanager",
+  "version": "0.1.0",
+  "identifier": "com.sanyesama.pzmanager",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:10002",
+    "beforeBuildCommand": "npm run build:all",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "pzmanager",
+        "width": 970,
+        "height": 600,
+        "minWidth": 970,
+        "minHeight": 564,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../overlay-dll/target/x86_64-pc-windows-msvc/release/pz_overlay.dll": "pz_overlay.dll"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

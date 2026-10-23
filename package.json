@@ -1,0 +1,38 @@
+{
+  "name": "pzmanager",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:overlay": "cargo build --release --target x86_64-pc-windows-msvc --manifest-path overlay-dll/Cargo.toml",
+    "build:all": "npm run build:overlay && npm run build",
+    "preview": "vite preview",
+    "test": "node --test \"tests/*.test.ts\"",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@chakra-ui/react": "^3.37.0",
+    "@emotion/react": "^11.14.0",
+    "@fortawesome/fontawesome-svg-core": "^7.3.1",
+    "@fortawesome/free-solid-svg-icons": "^7.3.1",
+    "@fortawesome/react-fontawesome": "^3.5.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-clipboard-manager": "^2.4.1",
+    "@tauri-apps/plugin-dialog": "^2.8.1",
+    "@tauri-apps/plugin-opener": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.3",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
+  }
+}
