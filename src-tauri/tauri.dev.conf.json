@@ -1,0 +1,17 @@
+{
+  "$schema": "./gen/schemas/desktop-schema.json",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "pzmanager",
+        "width": 970,
+        "height": 600,
+        "minWidth": 970,
+        "minHeight": 564,
+        "decorations": false,
+        "additionalBrowserArgs": "--remote-debugging-port=10001"
+      }
+    ]
+  }
+}

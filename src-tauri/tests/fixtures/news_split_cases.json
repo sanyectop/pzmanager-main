@@ -1,0 +1,1201 @@
+[
+ {
+  "text": "Hello world. This is a test! Is it working? Yes.",
+  "pieces": [
+   [
+    "text",
+    "Hello world"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " This is a test"
+   ],
+   [
+    "punct",
+    "!"
+   ],
+   [
+    "text",
+    " Is it working"
+   ],
+   [
+    "punct",
+    "?"
+   ],
+   [
+    "text",
+    " Yes."
+   ]
+  ]
+ },
+ {
+  "text": "Build 42.21.1 is out. Check 1.5x speed.",
+  "pieces": [
+   [
+    "text",
+    "Build 42.21.1 is out"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Check 1.5x speed"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Version 42. found. 3.5 released.",
+  "pieces": [
+   [
+    "text",
+    "Version 42. found"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " 3.5 released"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Dr. Smith went to Washington. He arrived at 3.30 p.m.",
+  "pieces": [
+   [
+    "text",
+    "Dr. Smith went to Washington"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " He arrived at 3.30 p"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "m."
+   ]
+  ]
+ },
+ {
+  "text": "Wait... what?! Really???",
+  "pieces": [
+   [
+    "text",
+    "Wait... what"
+   ],
+   [
+    "punct",
+    "?!"
+   ],
+   [
+    "text",
+    " Really???"
+   ]
+  ]
+ },
+ {
+  "text": "First line\nSecond line\n\nThird paragraph.",
+  "pieces": [
+   [
+    "text",
+    "First line"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "text",
+    "Second line"
+   ],
+   [
+    "punct",
+    "\n\n"
+   ],
+   [
+    "text",
+    "Third paragraph"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "No punctuation here just text",
+  "pieces": [
+   [
+    "text",
+    "No punctuation here just text"
+   ]
+  ]
+ },
+ {
+  "text": "Short. A. B. C. Longer sentence follows.",
+  "pieces": [
+   [
+    "text",
+    "Short. A"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " B. C. Longer sentence follows"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "[img]http://example.com/a.png[/img] Caption text. Next one.",
+  "pieces": [
+   [
+    "skip",
+    "[img]"
+   ],
+   [
+    "text",
+    "http://example"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "com/a.png"
+   ],
+   [
+    "skip",
+    "[/img]"
+   ],
+   [
+    "text",
+    " Caption text"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Next one"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "[b]Bold[/b] and [i]italic[/i] mixed. Done.",
+  "pieces": [
+   [
+    "skip",
+    "[b]"
+   ],
+   [
+    "text",
+    "Bold"
+   ],
+   [
+    "skip",
+    "[/b]"
+   ],
+   [
+    "text",
+    " and "
+   ],
+   [
+    "skip",
+    "[i]"
+   ],
+   [
+    "text",
+    "italic"
+   ],
+   [
+    "skip",
+    "[/i]"
+   ],
+   [
+    "text",
+    " mixed. Done"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Check https://example.com/page.html for info. Also see http://a.b/c.",
+  "pieces": [
+   [
+    "text",
+    "Check https://example"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "com/page"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "html for info"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Also see http://a"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "b/c."
+   ]
+  ]
+ },
+ {
+  "text": "1. First item\n2. Second item\n3. Third item",
+  "pieces": [
+   [
+    "text",
+    "1. First item"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "text",
+    "2. Second item"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "text",
+    "3. Third item"
+   ]
+  ]
+ },
+ {
+  "text": "The price is $3.99 or maybe $4.50 today.",
+  "pieces": [
+   [
+    "text",
+    "The price is $3.99 or maybe $4.50 today"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "   ",
+  "pieces": [
+   [
+    "punct",
+    "   "
+   ]
+  ]
+ },
+ {
+  "text": "A",
+  "pieces": [
+   [
+    "text",
+    "A"
+   ]
+  ]
+ },
+ {
+  "text": "中文测试。这是一句话！还有一句？结束。",
+  "pieces": [
+   [
+    "text",
+    "中文测试。这是一句话！还有一句？结束。"
+   ]
+  ]
+ },
+ {
+  "text": "Mixed 中文 and English. 中文句子。Next English sentence!",
+  "pieces": [
+   [
+    "text",
+    "Mixed 中文 and English"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " 中文句子。Next English sentence"
+   ],
+   [
+    "punct",
+    "!"
+   ]
+  ]
+ },
+ {
+  "text": "Multiple    spaces   between.  Words.",
+  "pieces": [
+   [
+    "text",
+    "Multiple    spaces   between"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "  Words."
+   ]
+  ]
+ },
+ {
+  "text": "Trailing punctuation only...",
+  "pieces": [
+   [
+    "text",
+    "Trailing punctuation only"
+   ],
+   [
+    "punct",
+    "..."
+   ]
+  ]
+ },
+ {
+  "text": "...leading ellipsis and text.",
+  "pieces": [
+   [
+    "punct",
+    "..."
+   ],
+   [
+    "text",
+    "leading ellipsis and text"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "U.S.A. is a country. U.K. too.",
+  "pieces": [
+   [
+    "text",
+    "U.S.A. is a country"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " U.K. too"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "He said \"Stop.\" Then left.",
+  "pieces": [
+   [
+    "text",
+    "He said \"Stop"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "\" Then left"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Ends with newline.\n",
+  "pieces": [
+   [
+    "text",
+    "Ends with newline"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "punct",
+    "\n"
+   ]
+  ]
+ },
+ {
+  "text": "\n\nStarts with newlines.",
+  "pieces": [
+   [
+    "punct",
+    "\n\n"
+   ],
+   [
+    "text",
+    "Starts with newlines"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Tab\tseparated. Value\t2.",
+  "pieces": [
+   [
+    "text",
+    "Tab\tseparated"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Value\t2."
+   ]
+  ]
+ },
+ {
+  "text": "Emoji 😀 here. Done 😀.",
+  "pieces": [
+   [
+    "text",
+    "Emoji 😀 here"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Done 😀."
+   ]
+  ]
+ },
+ {
+  "text": "e.g. this and i.e. that.",
+  "pieces": [
+   [
+    "text",
+    "e.g. this and i"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "e. that."
+   ]
+  ]
+ },
+ {
+  "text": "A.B.C. letters.",
+  "pieces": [
+   [
+    "text",
+    "A.B.C. letters"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Final sentence without punctuation",
+  "pieces": [
+   [
+    "text",
+    "Final sentence without punctuation"
+   ]
+  ]
+ },
+ {
+  "text": "One. Two. Three. Four. Five. Six. Seven. Eight.",
+  "pieces": [
+   [
+    "text",
+    "One. Two"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Three. Four"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Five. Six"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Seven. Eight"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Arabic digits ١.٢ stay together. Next!",
+  "pieces": [
+   [
+    "text",
+    "Arabic digits ١.٢ stay together"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Next!"
+   ]
+  ]
+ },
+ {
+  "text": "Superscript ².3 and Ⅳ.5 markers.",
+  "pieces": [
+   [
+    "text",
+    "Superscript ².3 and Ⅳ.5 markers"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Superscript ². Then text.",
+  "pieces": [
+   [
+    "text",
+    "Superscript ²"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Then text"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Roman numeral Ⅳ. Then text.",
+  "pieces": [
+   [
+    "text",
+    "Roman numeral Ⅳ"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Then text"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Fraction ½. Then text.",
+  "pieces": [
+   [
+    "text",
+    "Fraction ½"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Then text"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Ratio 1:2.5 vs 3:4.75 end. Done.",
+  "pieces": [
+   [
+    "text",
+    "Ratio 1:2.5 vs 3:4.75 end"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Done."
+   ]
+  ]
+ },
+ {
+  "text": "IP 192.168.0.1 and port 8080.",
+  "pieces": [
+   [
+    "text",
+    "IP 192.168.0.1 and port 8080."
+   ]
+  ]
+ },
+ {
+  "text": "See http://x.y/?a=1&b=2 now. Then stop.",
+  "pieces": [
+   [
+    "text",
+    "See http://x"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "y/?a=1&b=2 now"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Then stop"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Price 1,234.56 USD. Cheap!",
+  "pieces": [
+   [
+    "text",
+    "Price 1,234.56 USD"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Cheap!"
+   ]
+  ]
+ },
+ {
+  "text": "v1.2.3-beta.4 released.",
+  "pieces": [
+   [
+    "text",
+    "v1.2.3-beta.4 released"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "[]empty brackets[] here. Next.",
+  "pieces": [
+   [
+    "skip",
+    "[]"
+   ],
+   [
+    "text",
+    "empty brackets"
+   ],
+   [
+    "skip",
+    "[]"
+   ],
+   [
+    "text",
+    " here. Next"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "[B42] tagged title. Body follows.",
+  "pieces": [
+   [
+    "skip",
+    "[B42]"
+   ],
+   [
+    "text",
+    " tagged title"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Body follows"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Nested [a[b]c] outer. Done.",
+  "pieces": [
+   [
+    "text",
+    "Nested "
+   ],
+   [
+    "skip",
+    "[a[b]"
+   ],
+   [
+    "text",
+    "c] outer"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Done."
+   ]
+  ]
+ },
+ {
+  "text": "Unclosed [bracket here. Still text.",
+  "pieces": [
+   [
+    "text",
+    "Unclosed [bracket here"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Still text"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Trailing bracket] only. Fine.",
+  "pieces": [
+   [
+    "text",
+    "Trailing bracket] only"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Fine."
+   ]
+  ]
+ },
+ {
+  "text": "Adjacent[brackets][here] joined. Done.",
+  "pieces": [
+   [
+    "text",
+    "Adjacent"
+   ],
+   [
+    "skip",
+    "[brackets]"
+   ],
+   [
+    "skip",
+    "[here]"
+   ],
+   [
+    "text",
+    " joined. Done"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Line one.\r\nLine two.\r\n\r\nLine three.",
+  "pieces": [
+   [
+    "text",
+    "Line one"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "punct",
+    "\r"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "text",
+    "Line two"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "punct",
+    "\r"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "punct",
+    "\r"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "text",
+    "Line three"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Tabs\tand\nnewlines\nmix. Done.",
+  "pieces": [
+   [
+    "text",
+    "Tabs\tand"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "text",
+    "newlines"
+   ],
+   [
+    "punct",
+    "\n"
+   ],
+   [
+    "text",
+    "mix. Done"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "Ends with two newlines.\n\n",
+  "pieces": [
+   [
+    "text",
+    "Ends with two newlines"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "punct",
+    "\n\n"
+   ]
+  ]
+ },
+ {
+  "text": "   Leading spaces then text.  Trailing   ",
+  "pieces": [
+   [
+    "text",
+    "   Leading spaces then text"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "  Trailing   "
+   ]
+  ]
+ },
+ {
+  "text": "更新 [B42] 版本。New build is out!",
+  "pieces": [
+   [
+    "text",
+    "更新 "
+   ],
+   [
+    "skip",
+    "[B42]"
+   ],
+   [
+    "text",
+    " 版本。New build is out"
+   ],
+   [
+    "punct",
+    "!"
+   ]
+  ]
+ },
+ {
+  "text": "中文没有英文句号，但是有！感叹号？问号。",
+  "pieces": [
+   [
+    "text",
+    "中文没有英文句号，但是有！感叹号？问号。"
+   ]
+  ]
+ },
+ {
+  "text": "MixedCJK中文English text.下一句.",
+  "pieces": [
+   [
+    "text",
+    "MixedCJK中文English text"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    "下一句."
+   ]
+  ]
+ },
+ {
+  "text": "What?! No way!!! Really...? Yes.",
+  "pieces": [
+   [
+    "text",
+    "What?! No way"
+   ],
+   [
+    "punct",
+    "!!!"
+   ],
+   [
+    "text",
+    " Really...? Yes"
+   ],
+   [
+    "punct",
+    "."
+   ]
+  ]
+ },
+ {
+  "text": "....",
+  "pieces": [
+   [
+    "punct",
+    "...."
+   ]
+  ]
+ },
+ {
+  "text": "?!?!",
+  "pieces": [
+   [
+    "punct",
+    "?!?!"
+   ]
+  ]
+ },
+ {
+  "text": "Only punctuation .!?",
+  "pieces": [
+   [
+    "text",
+    "Only punctuation "
+   ],
+   [
+    "punct",
+    ".!?"
+   ]
+  ]
+ },
+ {
+  "text": "A. B. C. D. E. F. G. H. I. J.",
+  "pieces": [
+   [
+    "text",
+    "A. B. C. D"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " E. F. G. H"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " I. J."
+   ]
+  ]
+ },
+ {
+  "text": "Short fragments. Go. Now. Run. Fast.",
+  "pieces": [
+   [
+    "text",
+    "Short fragments"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Go. Now. Run"
+   ],
+   [
+    "punct",
+    "."
+   ],
+   [
+    "text",
+    " Fast."
+   ]
+  ]
+ }
+]

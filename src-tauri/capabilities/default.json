@@ -1,0 +1,30 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-is-maximized",
+    "core:window:allow-minimize",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "steam://url/CommunityFilePage/*"
+        },
+        {
+          "url": "steam://openurl/https://steamcommunity.com/sharedfiles/filedetails/?id=*"
+        }
+      ]
+    },
+    "dialog:allow-open",
+    "clipboard-manager:allow-write-image",
+    "clipboard-manager:allow-write-text"
+  ]
+}
