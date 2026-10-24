@@ -4,6 +4,8 @@ type FallbackImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src" | "onE
   src: string;
   /** 主地址加载失败后尝试的备用地址（如官方源），为空时直接显示占位。 */
   fallbackSrc?: string | null;
+  /** 主地址与备用地址都加载失败后回调，供上层做换源重搜等进一步兜底。 */
+  onFail?: () => void;
 };
 
 /** 记录某个 src 当前走到了哪一步：primary → fallback → failed。 */
@@ -39,7 +41,7 @@ function BrokenImageIcon() {
  *
  * 状态按具体 src 记录：换了地址会从头开始，不会沿用上一张图的失败结果。
  */
-export function FallbackImage({ src, fallbackSrc, alt = "", className, ...rest }: FallbackImageProps) {
+export function FallbackImage({ src, fallbackSrc, onFail, alt = "", className, ...rest }: FallbackImageProps) {
   const [loadStage, setLoadStage] = useState<LoadStage | null>(null);
   const stage = loadStage?.src === src ? loadStage.stage : null;
   const hasFallback = !!fallbackSrc && fallbackSrc !== src;
@@ -68,6 +70,7 @@ export function FallbackImage({ src, fallbackSrc, alt = "", className, ...rest }
           setLoadStage({ src, stage: "fallback" });
         } else {
           setLoadStage({ src, stage: "failed" });
+          onFail?.();
         }
       }}
       src={usingFallback && fallbackSrc ? fallbackSrc : src}
