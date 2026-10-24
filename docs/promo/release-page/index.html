@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PZManager — Project Zomboid 启动器与模组管理器</title>
+<meta name="description" content="PZManager:Project Zomboid Windows 桌面启动器 + 模组管理器。一键启动、模组管理、创意工坊下载、游戏内覆盖层。" />
+<script>
+  // 提前应用主题,避免闪烁;未设置过时默认亮色
+  document.documentElement.dataset.theme =
+    localStorage.getItem("pzm-theme") || "light";
+</script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --bg-soft: #eff1f4;
+    --panel: rgba(17, 24, 39, 0.03);
+    --panel-strong: rgba(17, 24, 39, 0.06);
+    --border: rgba(17, 24, 39, 0.1);
+    --text: #1a1d23;
+    --text-dim: #5c6470;
+    --accent: #2b7de0;
+    --accent-soft: rgba(43, 125, 224, 0.1);
+    --nav-bg: rgba(247, 248, 250, 0.82);
+    --shadow: 0 10px 30px rgba(17, 24, 39, 0.08);
+  }
+  html[data-theme="dark"] {
+    --bg: #0c0e12;
+    --bg-soft: #14171d;
+    --panel: rgba(255, 255, 255, 0.04);
+    --panel-strong: rgba(255, 255, 255, 0.07);
+    --border: rgba(255, 255, 255, 0.09);
+    --text: #e8eaf0;
+    --text-dim: #9aa1ad;
+    --accent: #4da3ff;
+    --accent-soft: rgba(77, 163, 255, 0.14);
+    --nav-bg: rgba(12, 14, 18, 0.8);
+    --shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    transition: background 0.3s ease, color 0.3s ease;
+  }
+  img { display: block; max-width: 100%; }
+  a { color: inherit; text-decoration: none; }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- Top nav ---------- */
+  .topnav {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--nav-bg);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    animation: navIn 0.5s ease both;
+  }
+  @keyframes navIn { from { transform: translateY(-100%); } to { transform: none; } }
+  .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .nav-brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 700; letter-spacing: 3px; font-size: 15px;
+  }
+  .nav-brand img { width: 28px; height: 28px; border-radius: 7px; }
+  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; }
+  .nav-links a { color: var(--text-dim); transition: color 0.15s ease; }
+  .nav-links a:hover { color: var(--accent); }
+  .nav-cta {
+    background: var(--accent); color: #fff !important;
+    padding: 7px 18px; border-radius: 9px; font-weight: 600;
+    transition: transform 0.15s ease, filter 0.15s ease;
+  }
+  .nav-cta:hover { transform: translateY(-1px); filter: brightness(1.08); }
+  .theme-btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text-dim);
+    width: 34px; height: 34px; border-radius: 9px; cursor: pointer;
+    font-size: 15px; transition: color 0.15s ease, border-color 0.15s ease, transform 0.3s ease;
+  }
+  .theme-btn:hover { color: var(--accent); border-color: var(--accent); transform: rotate(20deg); }
+
+  /* ---------- Hero ---------- */
+  .hero {
+    position: relative;
+    overflow: hidden;
+    padding: 88px 0 72px;
+    text-align: center;
+    background:
+      radial-gradient(600px 320px at 50% -80px, rgba(43, 125, 224, 0.12), transparent 70%),
+      radial-gradient(900px 480px at 80% 10%, rgba(120, 80, 200, 0.07), transparent 70%),
+      var(--bg);
+  }
+  html[data-theme="dark"] .hero {
+    background:
+      radial-gradient(600px 320px at 50% -80px, rgba(77, 163, 255, 0.16), transparent 70%),
+      radial-gradient(900px 480px at 80% 10%, rgba(120, 80, 200, 0.08), transparent 70%),
+      var(--bg);
+  }
+  .logo-row { display: flex; align-items: center; justify-content: center; gap: 14px; }
+  .logo {
+    width: 52px; height: 52px; border-radius: 12px;
+    box-shadow: var(--shadow);
+    animation: floaty 4s ease-in-out infinite;
+  }
+  @keyframes floaty {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+  }
+  .brand { font-size: 34px; font-weight: 700; letter-spacing: 4px; }
+  .tagline {
+    margin: 18px auto 0; max-width: 620px;
+    font-size: 18px; color: var(--text-dim);
+  }
+  .chips {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;
+    margin-top: 22px;
+  }
+  .chip {
+    font-size: 13px; color: var(--text-dim);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 5px 14px;
+  }
+
+  .downloads {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 16px;
+    margin-top: 36px;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 13px 26px; border-radius: 12px;
+    font-size: 16px; font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--panel-strong);
+    transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .btn:hover {
+    transform: translateY(-3px);
+    border-color: var(--accent);
+    box-shadow: var(--shadow);
+  }
+  .btn i { font-size: 18px; }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn small { display: block; font-size: 11px; font-weight: 400; opacity: 0.75; text-align: left; }
+  .dl-note { margin-top: 14px; font-size: 13px; color: var(--text-dim); }
+
+  /* ---------- 入场动画 ---------- */
+  .fade-in { opacity: 0; animation: fadeUp 0.7s ease forwards; }
+  .d1 { animation-delay: 0.05s; } .d2 { animation-delay: 0.15s; }
+  .d3 { animation-delay: 0.25s; } .d4 { animation-delay: 0.35s; }
+  .d5 { animation-delay: 0.45s; } .d6 { animation-delay: 0.55s; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: none; }
+  }
+  /* 滚动渐入 */
+  .reveal {
+    opacity: 0; transform: translateY(28px);
+    transition: opacity 0.6s ease, transform 0.6s ease;
+  }
+  .reveal.in { opacity: 1; transform: none; }
+
+  /* ---------- Sections ---------- */
+  section { padding: 64px 0; }
+  .section-title { font-size: 26px; font-weight: 700; text-align: center; }
+  .section-sub {
+    text-align: center; color: var(--text-dim);
+    margin: 10px auto 0; max-width: 560px; font-size: 15px;
+  }
+
+  /* ---------- Features ---------- */
+  .features {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px; margin-top: 44px;
+  }
+  .feature {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px 24px 22px;
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+  }
+  .feature:hover { background: var(--panel-strong); border-color: var(--accent); transform: translateY(-4px); }
+  .feature .icon {
+    width: 46px; height: 46px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--accent-soft); color: var(--accent); font-size: 19px;
+    transition: transform 0.25s ease;
+  }
+  .feature:hover .icon { transform: scale(1.1) rotate(-6deg); }
+  .feature h3 { font-size: 16px; font-weight: 600; margin: 14px 0 8px; }
+  .feature p { font-size: 14px; color: var(--text-dim); }
+
+  /* ---------- Screenshots ---------- */
+  .shots { display: grid; gap: 28px; margin-top: 44px; }
+  .shot {
+    border-radius: 14px; overflow: hidden; border: 1px solid var(--border);
+    background: var(--bg-soft); box-shadow: var(--shadow);
+  }
+  .shot img { width: 100%; height: auto; }
+  .shot figcaption {
+    padding: 12px 18px; font-size: 14px; color: var(--text-dim);
+    border-top: 1px solid var(--border);
+  }
+  .shot figcaption b { color: var(--text); font-weight: 600; margin-right: 8px; }
+
+  /* ---------- Docs ---------- */
+  .doc-cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px; margin-top: 44px;
+  }
+  .doc-card {
+    display: block;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 22px;
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .doc-card:hover {
+    background: var(--panel-strong); border-color: var(--accent);
+    transform: translateY(-3px); box-shadow: var(--shadow);
+  }
+  .doc-card h3 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  .doc-card h3 i { color: var(--accent); }
+  .doc-card p { font-size: 13.5px; color: var(--text-dim); margin-top: 6px; }
+  .doc-card .go { margin-top: 12px; font-size: 13px; color: var(--accent); }
+  .doc-card:hover .go i { animation: slideRight 0.6s ease infinite; }
+  @keyframes slideRight {
+    0%, 100% { transform: translateX(0); }
+    50% { transform: translateX(4px); }
+  }
+
+  /* ---------- Footer ---------- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 36px 0 48px; text-align: center;
+    color: var(--text-dim); font-size: 13px;
+  }
+  footer .links { display: flex; flex-wrap: wrap; justify-content: center; gap: 24px; margin-bottom: 14px; }
+  footer .links a:hover { color: var(--accent); }
+
+  @media (max-width: 640px) {
+    .hero { padding: 64px 0 48px; }
+    .brand { font-size: 26px; }
+    .btn { width: 100%; justify-content: center; }
+    .downloads { flex-direction: column; align-items: stretch; }
+    .nav-links a:not(.nav-cta) { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= Top nav ================= -->
+<nav class="topnav">
+  <div class="wrap nav-inner">
+    <a class="nav-brand" href="#"><img src="pzm-logo.png" alt="" />PZMANAGER</a>
+    <div class="nav-links">
+      <a href="#screenshots">界面</a>
+      <a href="#features">功能</a>
+      <a href="#docs">文档</a>
+      <!-- TODO: 替换为实际仓库地址 -->
+      <a href="#" title="GitHub"><i class="fa-brands fa-github"></i> GitHub</a>
+      <button class="theme-btn" id="themeBtn" title="切换主题"><i class="fa-solid fa-moon"></i></button>
+      <a class="nav-cta" href="#downloads">下载</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ================= Hero ================= -->
+<header class="hero" id="downloads">
+  <div class="wrap">
+    <div class="logo-row fade-in d1">
+      <img class="logo" src="pzm-logo.png" alt="PZManager Logo" />
+      <div class="brand">PZMANAGER</div>
+    </div>
+    <p class="tagline fade-in d2">Project Zomboid 桌面启动器 + 模组管理器——一键启动、模组与光影管理、创意工坊浏览下载、游戏内加载覆盖层,一个应用全搞定。</p>
+
+    <div class="chips fade-in d3">
+      <span class="chip">Windows x64</span>
+      <span class="chip">Tauri 2 · Rust · React</span>
+      <span class="chip">免费使用</span>
+    </div>
+
+    <div class="downloads fade-in d4">
+      <!-- TODO: 发布后替换为 GitHub Releases 实际链接 -->
+      <a class="btn btn-primary" href="#" title="下载链接待发布">
+        <i class="fa-brands fa-github"></i>
+        <span>GitHub Releases<small>最新版本 · 稳定渠道</small></span>
+      </a>
+      <!-- TODO: 发布后替换为 123 云盘分享实际链接 -->
+      <a class="btn" href="#" title="下载链接待发布">
+        <i class="fa-solid fa-cloud-arrow-down"></i>
+        <span>123 云盘<small>国内直连 · 备用渠道</small></span>
+      </a>
+      <a class="btn" href="docs.html">
+        <i class="fa-solid fa-book-open"></i>
+        <span>阅读文档<small>快速上手 · 常见问题</small></span>
+      </a>
+    </div>
+    <p class="dl-note fade-in d5">下载链接待发布,敬请期待。当前版本:<!-- TODO: 填入版本号 -->v0.0.0</p>
+  </div>
+</header>
+
+<!-- ================= Features ================= -->
+<section id="features">
+  <div class="wrap">
+    <h2 class="section-title reveal">功能一览</h2>
+    <p class="section-sub reveal">不只是启动器,更是 Project Zomboid 的全套桌面工具箱。</p>
+
+    <div class="features">
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-rocket"></i></div>
+        <h3>一键启动</h3>
+        <p>自动探测 Steam 环境与游戏路径,内存上限、启动参数、启动背景都在一页调好,启动时长自动记录并与上次对比。</p>
+      </div>
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-puzzle-piece"></i></div>
+        <h3>模组管理</h3>
+        <p>Lua 与 JAR 模组统一启停、依赖前置、冲突分析,还能把模组组合保存为预设,一键切换整合包。</p>
+      </div>
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-cloud-arrow-down"></i></div>
+        <h3>资源下载</h3>
+        <p>直接浏览 Steam 创意工坊,光影资源从 Modrinth / CurseForge 检索下载并自动镜像回退,进度收进全局任务中心。</p>
+      </div>
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-language"></i></div>
+        <h3>新闻翻译</h3>
+        <p>开发者动态与创意工坊说明自动翻译成中文,更新公告、模组介绍第一时间看懂。</p>
+      </div>
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-image"></i></div>
+        <h3>截图与光影</h3>
+        <p>Viewpoint 3D 截图集中预览、一键复制到剪贴板;光影包拖拽导入、随手管理。</p>
+      </div>
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-gamepad"></i></div>
+        <h3>游戏内覆盖层</h3>
+        <p>注入 DLL + Hook OpenGL,在游戏加载时叠加进度界面,等待不再是黑屏干瞪眼。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= Screenshots ================= -->
+<section id="screenshots" style="background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="wrap">
+    <h2 class="section-title reveal">界面一览</h2>
+    <p class="section-sub reveal">亚克力质感的深色界面,背景、模糊度、字体对比度都可以随喜好调整。</p>
+
+    <div class="shots">
+      <figure class="shot reveal">
+        <img src="shots/01-launch.jpg" alt="PZManager 启动页" loading="lazy" />
+        <figcaption><b>一眼启动</b>自动检查 Steam 游戏库,选好内存与背景,点击即玩。</figcaption>
+      </figure>
+      <figure class="shot reveal">
+        <img src="shots/02-menus.jpg" alt="启动设置菜单" loading="lazy" />
+        <figcaption><b>启动设置</b>调整内存、切换内置 / 自定义背景,还能直达创意工坊订阅。</figcaption>
+      </figure>
+      <figure class="shot reveal">
+        <img src="shots/03-settings.jpg" alt="设置面板" loading="lazy" />
+        <figcaption><b>该调的都能调</b>翻译语言、字体对比度、模糊强度等,细节尽在设置面板。</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ================= Docs ================= -->
+<section id="docs">
+  <div class="wrap">
+    <h2 class="section-title reveal">文档中心</h2>
+    <p class="section-sub reveal">从安装到进阶用法,文档覆盖每个功能的细节与常见问题的排查。</p>
+
+    <div class="doc-cards">
+      <a class="doc-card reveal" href="docs.html#quick-start">
+        <h3><i class="fa-solid fa-box-open"></i>快速上手</h3>
+        <p>环境要求、安装步骤与首次启动,三分钟跑起来。</p>
+        <div class="go">阅读 <i class="fa-solid fa-arrow-right"></i></div>
+      </a>
+      <a class="doc-card reveal" href="docs.html#launch">
+        <h3><i class="fa-solid fa-rocket"></i>启动游戏</h3>
+        <p>内存上限、启动参数、账户面板与启动背景的设置说明。</p>
+        <div class="go">阅读 <i class="fa-solid fa-arrow-right"></i></div>
+      </a>
+      <a class="doc-card reveal" href="docs.html#support-mods">
+        <h3><i class="fa-solid fa-puzzle-piece"></i>支持库与模组</h3>
+        <p>ZombieBuddy、PZ Optimization、Viewpoint 3D 与 Lua / JAR 模组管理。</p>
+        <div class="go">阅读 <i class="fa-solid fa-arrow-right"></i></div>
+      </a>
+      <a class="doc-card reveal" href="docs.html#resources">
+        <h3><i class="fa-solid fa-cloud-arrow-down"></i>资源中心</h3>
+        <p>创意工坊浏览订阅、光影下载、开发者新闻与任务中心。</p>
+        <div class="go">阅读 <i class="fa-solid fa-arrow-right"></i></div>
+      </a>
+      <a class="doc-card reveal" href="docs.html#settings">
+        <h3><i class="fa-solid fa-sliders"></i>设置详解</h3>
+        <p>通用、翻译器、控制台、下载器、模组加载器与启动设置逐项说明。</p>
+        <div class="go">阅读 <i class="fa-solid fa-arrow-right"></i></div>
+      </a>
+      <a class="doc-card reveal" href="docs.html#faq">
+        <h3><i class="fa-solid fa-circle-question"></i>常见问题</h3>
+        <p>检测不到游戏、模组不生效、覆盖层未出现等问题的排查方法。</p>
+        <div class="go">阅读 <i class="fa-solid fa-arrow-right"></i></div>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ================= Footer ================= -->
+<footer>
+  <div class="wrap">
+    <div class="links">
+      <a href="docs.html">文档</a>
+      <!-- TODO: 替换为实际仓库地址 -->
+      <a href="#">GitHub 仓库</a>
+      <a href="#">问题反馈</a>
+      <a href="#">123 云盘</a>
+    </div>
+    <p>PZManager © 2026 叁葉 · 本工具为社区作品,与 Project Zomboid 及 The Indie Stone 无官方关联。</p>
+  </div>
+</footer>
+
+<script>
+  // 主题切换(默认亮色)
+  const themeBtn = document.getElementById("themeBtn");
+  const themeIcon = themeBtn.querySelector("i");
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    localStorage.setItem("pzm-theme", t);
+    themeIcon.className = t === "dark" ? "fa-solid fa-sun" : "fa-solid fa-moon";
+  }
+  applyTheme(document.documentElement.dataset.theme);
+  themeBtn.addEventListener("click", () => {
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  });
+
+  // 滚动渐入 + 卡片错峰
+  document.querySelectorAll(".features .reveal, .doc-cards .reveal").forEach((el, i) => {
+    el.style.transitionDelay = (i % 3) * 0.08 + "s";
+  });
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (e.isIntersecting) {
+        e.target.classList.add("in");
+        io.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.12 });
+  document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+</script>
+
+</body>
+</html>

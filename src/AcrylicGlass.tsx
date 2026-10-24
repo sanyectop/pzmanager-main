@@ -20,7 +20,7 @@ const SUPPORTS_PATH_CLIP =
 export type AcrylicGlassProps = {
   /** 当前背景图（自定义 / 创意工坊 / 内置）；四季壁纸时是 null。 */
   backgroundUrl: string | null;
-  /** 是否四季动态壁纸：它由 DOM 图层逐秒重绘，靠再渲染一次 <SeasonalWallpaper> 复制。 */
+  /** 是否四季壁纸：它由 DOM 图层逐秒重绘，靠再渲染一次 <SeasonalWallpaper> 复制。 */
   seasonal: boolean;
   effect: WallpaperEffect;
 };

@@ -16,6 +16,6 @@ const config = JSON.parse(
   };
 };
 
-test("sets the minimum window width to 970 DIP", () => {
-  assert.equal(config.app.windows[0]?.minWidth, 970);
+test("sets the minimum window width to 840 DIP", () => {
+  assert.equal(config.app.windows[0]?.minWidth, 840);
 });

@@ -12,8 +12,7 @@ const MAX_TEXT_LEN: usize = 2000;
 const TIMEOUT: Duration = Duration::from_secs(8);
 const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(5);
 const GOOGLE_URL: &str = "https://translate.googleapis.com/translate_a/single";
-const YANDEX_DETECT_URL: &str = "https://translate.yandex.net/api/v1/tr.json/detect";
-const YANDEX_URL: &str = "https://translate.yandex.net/api/v1/tr.json/translate";
+const MYMEMORY_URL: &str = "https://api.mymemory.translated.net/get";
 static CACHE: OnceLock<Mutex<HashMap<(String, String), (String, String)>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,12 +39,66 @@ fn normalize_language(language: &str) -> String {
     }
 }
 
-fn yandex_lang(language: &str) -> &str {
-    if language == "zh-CN" || language == "zh-TW" {
-        "zh"
-    } else {
-        language
+/// MyMemory 不做语言检测（Google 才有 auto），回退源按文字系统猜源语言，
+/// 覆盖新闻 / 创意工坊文本的常见语种，混合文本以先命中的文字系统为准。
+fn guess_source_lang(text: &str) -> &'static str {
+    for ch in text.chars() {
+        let c = ch as u32;
+        if (0x3040..=0x30FF).contains(&c) {
+            return "ja";
+        }
+        if (0xAC00..=0xD7AF).contains(&c) {
+            return "ko";
+        }
+        if (0x0400..=0x04FF).contains(&c) {
+            return "ru";
+        }
+        if (0x0E00..=0x0E7F).contains(&c) {
+            return "th";
+        }
+        if (0x0600..=0x06FF).contains(&c) {
+            return "ar";
+        }
+        if (0x0900..=0x097F).contains(&c) {
+            return "hi";
+        }
+        if (0x4E00..=0x9FFF).contains(&c) {
+            return "zh-CN";
+        }
     }
+    "en"
+}
+
+async fn mymemory(client: &Client, text: &str, language: &str) -> Option<String> {
+    let langpair = format!("{}|{}", guess_source_lang(text), language);
+    let value: Value = client
+        .get(MYMEMORY_URL)
+        .timeout(TRANSLATION_TIMEOUT)
+        .query(&[("q", text), ("langpair", langpair.as_str())])
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    parse_mymemory(&value)
+}
+
+/// 免费配额耗尽时接口仍返回 200，把警告文本塞进译文里，这类响应视为失败。
+fn parse_mymemory(value: &Value) -> Option<String> {
+    if value.get("responseStatus")?.as_i64()? != 200 {
+        return None;
+    }
+    let translated = value
+        .get("responseData")?
+        .get("translatedText")?
+        .as_str()?;
+    let healthy = !translated.is_empty()
+        && !translated.contains("MYMEMORY WARNING")
+        && !translated.contains("QUERY LENGTH LIMIT");
+    healthy.then(|| translated.to_string())
 }
 
 fn batches(jobs: &[TranslationJob]) -> Vec<Vec<TranslationJob>> {
@@ -320,54 +373,12 @@ async fn google(client: &Client, text: &str, language: &str) -> Option<String> {
         .collect::<String>();
     (!value.is_empty()).then_some(value)
 }
-async fn yandex(client: &Client, text: &str, language: &str) -> Option<String> {
-    let sample = text.chars().take(500).collect::<String>();
-    let detect: Value = client
-        .get(YANDEX_DETECT_URL)
-        .timeout(TRANSLATION_TIMEOUT)
-        .query(&[
-            ("srv", "android"),
-            ("text", sample.as_str()),
-            ("sid", "pzmanager"),
-        ])
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let source = detect.get("lang")?.as_str().unwrap_or("en");
-    let target = yandex_lang(language);
-    if source == target {
-        return Some(text.into());
-    }
-    let value: Value = client
-        .post(YANDEX_URL)
-        .timeout(TRANSLATION_TIMEOUT)
-        .query(&[("id", "pzmanager-0-0"), ("srv", "android")])
-        .form(&[
-            ("source_lang", source),
-            ("target_lang", target),
-            ("text", text),
-        ])
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    value.get("text")?.get(0)?.as_str().map(str::to_string)
-}
 async fn translate_one(client: &Client, text: &str, language: &str) -> (String, String) {
     if let Some(value) = google(client, text, language).await {
         return (value, "google".into());
     }
-    if let Some(value) = yandex(client, text, language).await {
-        return (value, "yandex".into());
+    if let Some(value) = mymemory(client, text, language).await {
+        return (value, "mymemory".into());
     }
     (text.into(), "none".into())
 }
@@ -458,6 +469,34 @@ pub(crate) async fn translate_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guesses_source_lang_by_script() {
+        assert_eq!(guess_source_lang("hello world"), "en");
+        assert_eq!(guess_source_lang("こんにちは、世界"), "ja");
+        assert_eq!(guess_source_lang("안녕하세요"), "ko");
+        assert_eq!(guess_source_lang("Привет, мир"), "ru");
+        assert_eq!(guess_source_lang("僵尸毁灭工程"), "zh-CN");
+        // 假名优先于汉字：日语文本里的汉字不应误判成中文
+        assert_eq!(guess_source_lang("_zombie_は死んだ"), "ja");
+        assert_eq!(guess_source_lang(""), "en");
+    }
+    #[test]
+    fn parses_mymemory_response_and_rejects_quota_warning() {
+        let ok: Value = serde_json::from_str(
+            r#"{"responseData":{"translatedText":"你好世界"},"responseStatus":200}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_mymemory(&ok), Some("你好世界".into()));
+
+        let quota: Value = serde_json::from_str(
+            r#"{"responseData":{"translatedText":"MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY"},"responseStatus":200}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_mymemory(&quota), None);
+
+        let error: Value = serde_json::from_str(r#"{"responseStatus":403}"#).unwrap();
+        assert_eq!(parse_mymemory(&error), None);
+    }
     #[test]
     fn groups_at_fifty() {
         let jobs = (0..51)

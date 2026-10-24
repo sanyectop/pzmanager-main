@@ -5,10 +5,10 @@
       {
         "label": "main",
         "title": "pzmanager",
-        "width": 970,
-        "height": 600,
-        "minWidth": 970,
-        "minHeight": 564,
+        "width": 840,
+        "height": 560,
+        "minWidth": 840,
+        "minHeight": 560,
         "decorations": false,
         "additionalBrowserArgs": "--remote-debugging-port=10001"
       }

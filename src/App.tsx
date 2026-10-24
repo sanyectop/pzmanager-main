@@ -40,6 +40,7 @@ import {
 } from "./developerMode";
 import { FallbackImage } from "./FallbackImage";
 import { steamWorkshopUrl } from "./externalLinks";
+import { shaderpackSearchQueries } from "./shaderpackSearch";
 import appManifest from "../package.json";
 import { defaultLaunchArguments, joinLaunchArguments } from "./launchArgs";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
@@ -380,6 +381,12 @@ type ResourceItem = {
   resourceType: string;
 };
 
+/** 已安装光影包在资源中心搜到的图标：主地址（镜像）+ 官方源兜底。 */
+type ShaderpackIcon = {
+  url: string;
+  fallbackUrl: string | null;
+};
+
 type ResourceSearchResponse = {
   items: ResourceItem[];
   total: number;
@@ -494,10 +501,10 @@ type BackgroundEntry = {
     settings.json 的 backgroundPath 里存成 `builtin:<id>`（磁盘上没有对应文件）。 */
 type BuiltinBackground = { id: string; name: string; url: string };
 
-/** 内置「四季动态壁纸」：由 SeasonalWallpaper 每秒绘制，url 只用于菜单缩略图。 */
+/** 内置「四季壁纸」：由 SeasonalWallpaper 每秒绘制，url 只用于菜单缩略图。 */
 const BUILTIN_SEASONAL_ID = "seasonal";
 const BUILTIN_BACKGROUNDS: BuiltinBackground[] = [
-  { id: BUILTIN_SEASONAL_ID, name: "四季动态壁纸", url: "/backgrounds/4.jpg" },
+  { id: BUILTIN_SEASONAL_ID, name: "四季壁纸", url: "/backgrounds/4.jpg" },
 ];
 const BUILTIN_BACKGROUND_PREFIX = "builtin:";
 /** 旧版本的内置背景 id 是 default，读到它时当成四季壁纸。 */
@@ -588,26 +595,6 @@ function mimeTypeFor(name: string): string {
           : "image/png";
 }
 
-function shaderpackSearchQueries(fileName: string): string[] {
-  const fullName = fileName.replace(/\.zip$/i, "").trim();
-  if (!fullName) return [];
-  const isAsciiName = /^[A-Za-z0-9]+(?:[ _.-][A-Za-z0-9]+)*$/.test(fullName);
-  const tokenizedName = fullName
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .replace(/([a-z])([A-Z])/g, "$1 $2");
-  const words = [...new Set(
-    tokenizedName
-      .split(/[^A-Za-z0-9]+/)
-      .filter((token) => token.length > 0 && !/[A-Za-z]\d/.test(token))
-      .map((token) => token.match(/[A-Za-z]+/g)?.join("") ?? "")
-      .filter((token) => token.length > 0)
-  )];
-  const hasVersionToken = tokenizedName.split(/[^A-Za-z0-9]+/).some((token) => /[A-Za-z]\d/.test(token));
-  const queries = isAsciiName && !hasVersionToken ? [fullName] : [];
-  if (words.length > 1) queries.push(words.slice(0, 3).join(" "));
-  queries.push(...words);
-  return [...new Set(queries)].slice(0, 6);
-}
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -2758,8 +2745,10 @@ function App() {
   const [jarModFilter, setJarModFilter] = useState<JarModFilter>("all");
   const [shots, setShots] = useState<ManagedDirectory | null>(null);
   const [shaderpacks, setShaderpacks] = useState<ManagedDirectory | null>(null);
-  const [shaderpackIcons, setShaderpackIcons] = useState<Record<string, string | null>>({});
+  const [shaderpackIcons, setShaderpackIcons] = useState<Record<string, ShaderpackIcon | null>>({});
   const [shaderpackSearchTerms, setShaderpackSearchTerms] = useState<Record<string, string | null>>({});
+  /** 图标图片两个地址都加载不出来、已经换 CurseForge 源重搜过的包，防止反复换源。 */
+  const shaderpackIconResourced = useRef<Set<string>>(new Set());
   const [steamAccountHidden, setSteamAccountHidden] = useState(false);
   const [workshopBackgroundInfoOpen, setWorkshopBackgroundInfoOpen] = useState(false);
   const [jarMods, setJarMods] = useState<ScannedJarMod[] | null>(null);
@@ -3603,18 +3592,11 @@ function App() {
   async function refreshMedia() {
     const lookupShaderpackIcons = async (files: ManagedFile[]) => {
       const entries = await Promise.all(files.map(async (file) => {
-        const searchQueries = shaderpackSearchQueries(file.name);
-        if (searchQueries.length === 0) return [file.name, null, null] as const;
+        const queries = shaderpackSearchQueries(file.name);
+        if (queries.length === 0) return [file.name, null, null] as const;
         try {
-          const search = (searchQuery: string) => invoke<ResourceSearchResponse>("fetch_shader_resources", { query: { resourceType: "shader", searchQuery, gameVersion: "All", selectedTag: "All", sortBy: "relevance", downloadSource: "Modrinth", page: 1, pageSize: 1 } });
-          let usedQuery = searchQueries[0];
-          let response = await search(usedQuery);
-          for (const fallbackQuery of searchQueries.slice(1)) {
-            if (response.items.length > 0) break;
-            usedQuery = fallbackQuery;
-            response = await search(usedQuery);
-          }
-          return [file.name, response.items[0]?.iconUrl || null, response.items.length > 0 ? usedQuery : null] as const;
+          const result = await searchShaderpackIcon(queries, "Modrinth");
+          return [file.name, result?.icon ?? null, result?.usedQuery ?? null] as const;
         } catch {
           return [file.name, null, null] as const;
         }
@@ -3622,6 +3604,7 @@ function App() {
       setShaderpackIcons(Object.fromEntries(entries.map(([name, icon]) => [name, icon])));
       setShaderpackSearchTerms(Object.fromEntries(entries.map(([name, , query]) => [name, query ?? null])));
     };
+
     setLoadingMedia(true);
     try {
       const [shotDirectory, shaderpackDirectory] = await Promise.all([
@@ -3632,11 +3615,58 @@ function App() {
       setShaderpacks(shaderpackDirectory);
       setShaderpackIcons({});
       setShaderpackSearchTerms({});
+      shaderpackIconResourced.current.clear();
       void lookupShaderpackIcons(shaderpackDirectory.files);
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setLoadingMedia(false);
+    }
+  }
+
+  /** 在指定下载源按候选搜索词找一个光影包图标（镜像主地址 + 官方源兜底）。 */
+  async function searchShaderpackIcon(
+    queries: string[],
+    downloadSource: "Modrinth" | "CurseForge",
+  ): Promise<{ icon: ShaderpackIcon; usedQuery: string } | null> {
+    const search = (searchQuery: string) =>
+      invoke<ResourceSearchResponse>("fetch_shader_resources", {
+        query: {
+          resourceType: "shader",
+          searchQuery,
+          gameVersion: "All",
+          selectedTag: "All",
+          sortBy: "relevance",
+          downloadSource,
+          page: 1,
+          pageSize: 1,
+        },
+      });
+    let usedQuery = queries[0];
+    let response = await search(usedQuery);
+    for (const fallbackQuery of queries.slice(1)) {
+      if (response.items.length > 0) break;
+      usedQuery = fallbackQuery;
+      response = await search(fallbackQuery);
+    }
+    const item = response.items[0];
+    if (!item?.iconUrl) return null;
+    return { icon: { url: item.iconUrl, fallbackUrl: item.iconFallbackUrl }, usedQuery };
+  }
+
+  /** 图标在镜像和官方源都加载不出来时，换 CurseForge 源重搜一次；搜不到就保持现状。 */
+  async function reSourceShaderpackIcon(name: string) {
+    if (shaderpackIconResourced.current.has(name)) return;
+    shaderpackIconResourced.current.add(name);
+    const queries = shaderpackSearchQueries(name);
+    if (queries.length === 0) return;
+    try {
+      const result = await searchShaderpackIcon(queries, "CurseForge");
+      if (result) {
+        setShaderpackIcons((prev) => ({ ...prev, [name]: result.icon }));
+      }
+    } catch {
+      // 换源搜索失败时保留现状（破图占位），不打断页面
     }
   }
 
@@ -5782,7 +5812,15 @@ function App() {
               gap="3"
             >
               <Box className="pz-resource-download-icon">
-                {shaderpackIcons[pack.name] ? <FallbackImage alt="" loading="lazy" src={shaderpackIcons[pack.name] ?? ""} /> : <Text>MC</Text>}
+                {shaderpackIcons[pack.name] ? (
+                  <FallbackImage
+                    alt=""
+                    fallbackSrc={shaderpackIcons[pack.name]?.fallbackUrl}
+                    loading="lazy"
+                    onFail={() => void reSourceShaderpackIcon(pack.name)}
+                    src={shaderpackIcons[pack.name]?.url ?? ""}
+                  />
+                ) : <Text>MC</Text>}
               </Box>
               <Box minW="0" flex="1">
                 <Text color="gray.800" fontSize="sm" fontWeight="600" overflowWrap="anywhere">
@@ -6458,7 +6496,7 @@ function App() {
     <Box className="pz-panel pz-translator-settings-panel">
       <Text color="gray.900" fontSize="lg" fontWeight="700">翻译器</Text>
       <Text color="gray.500" fontSize="sm" mt="1">
-        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（Google 优先，失败自动换用 Yandex）。
+        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（Google 优先，失败自动换用 MyMemory）。
       </Text>
 
       <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
@@ -7990,7 +8028,7 @@ async function translateInBatches(
 
 const newsEngineLabels: Record<string, string> = {
   google: "Google",
-  yandex: "Yandex",
+  mymemory: "MyMemory",
   none: "未翻译",
 };
 
