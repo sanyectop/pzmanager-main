@@ -38,7 +38,7 @@ npm run tauri:build
 
 `pz_overlay.dll` 已通过 `tauri.conf.json` 的 `bundle.resources` 打进安装包（与 exe 同目录）。安装版中前端传出的开发期相对路径不存在，后端会按「exe 目录 + 文件名」兜底定位到打包的 DLL，覆盖层功能开箱即用。
 
-安装包输出位置：`src-tauri/target/release/bundle/`（NSIS `.exe` 安装器与 MSI）。
+安装包输出位置：`src-tauri/target/release/bundle/`（NSIS `.exe` 安装器）。便携版取 `src-tauri/target/release/` 下的 `pzmanager.exe` 与 `pz_overlay.dll` 打包 zip 即可。
 
 ## 测试
 

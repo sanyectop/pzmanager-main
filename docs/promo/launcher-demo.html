@@ -1,0 +1,1669 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PZMANAGER · 功能演示（录制用单文件）</title>
+<!--
+  PZMANAGER 宣传片演示：单文件、零依赖，双击即开。
+  8 段场景自动播放：启动页 → 支持库 → 截图管理 → 光影管理 → 资源中心 → 模组管理 → 设置 → 结尾。
+
+  键盘：空格 暂停 / R 重播 / 1-8 跳场景 / H 辅助条 / C 字幕 / K 点击高亮 / F 全屏
+
+  URL 参数（可组合）：
+    ?scene=5          从第 5 段开始（1..8）
+    ?clean=1          纯净画面：辅助条 + 字幕 + 点击特效全关（录正式素材用）
+    ?hud=0&caption=0  单独关辅助条 / 字幕
+    ?cursor=0         关点击涟漪与高亮
+    ?speed=0.6        整体放慢（0.25 起），方便卡配音
+    ?still=1          静态帧模式：禁过渡、场景一步到终态、停在本段不往下播。
+                      默认同时收起辅助条与字幕，用来抓封面图；要辅助条加 &hud=1。
+                      例：launcher-demo.html?scene=6&still=1
+-->
+<style>
+/* ==========================================================================
+   设计令牌：与 src/App.css 的 :root 保持同一套值（颜色 / 圆角 / 时长 / 阴影 / 层级）。
+   演示画面的观感之所以和真实启动器一致，就是靠这里；改令牌请两边同步。
+   ========================================================================== */
+:root {
+  --pz-canvas: #edf2f7;
+  --pz-surface-shell: rgba(255, 255, 255, 0.38);
+  --pz-surface-glass: rgba(255, 255, 255, 0.84);
+  --pz-surface-card: rgba(255, 255, 255, 0.55);
+  --pz-surface-float: rgba(255, 255, 255, 0.96);
+  --pz-surface-media: rgba(247, 250, 252, 0.62);
+  --pz-surface-hover: rgba(236, 244, 254, 0.92);
+  --pz-surface-command: rgba(32, 20, 28, 0.58);
+  --pz-glass-dark: rgba(18, 24, 38, 0.42);
+  --pz-glass-dark-hover: rgba(18, 24, 38, 0.62);
+  --pz-line: rgba(113, 128, 150, 0.2);
+  --pz-line-strong: rgba(113, 128, 150, 0.28);
+  --pz-line-emphasis: rgba(113, 128, 150, 0.42);
+  --pz-line-white: rgba(255, 255, 255, 0.48);
+  --pz-line-glass: rgba(255, 255, 255, 0.3);
+  --pz-line-hover: rgba(150, 192, 249, 0.9);
+  --pz-fill: rgba(113, 128, 150, 0.2);
+  --pz-fill-subtle: rgba(113, 128, 150, 0.1);
+  --pz-fill-gray: rgba(226, 232, 240, 0.72);
+  --pz-fill-gray-strong: rgba(160, 174, 192, 0.34);
+  --pz-fill-accent: rgba(66, 153, 225, 0.1);
+  --pz-fill-accent-active: rgba(190, 227, 248, 0.72);
+  --pz-fill-row-hover: rgba(235, 248, 255, 0.7);
+  --pz-fill-row-enabled: rgba(235, 248, 255, 0.82);
+  --pz-fill-row-selected: rgba(190, 227, 248, 0.92);
+  --pz-fill-glass: rgba(255, 255, 255, 0.18);
+  --pz-fill-glass-soft: rgba(255, 255, 255, 0.08);
+  --pz-fill-highlight: rgba(255, 255, 255, 0.34);
+  --pz-text: #2d3748;
+  --pz-text-strong: #1a202c;
+  --pz-text-muted: #718096;
+  --pz-text-label: #4a5568;
+  --pz-text-subtle: #a0aec0;
+  --pz-text-inverse: #fff;
+  --pz-text-on-dark: rgba(255, 255, 255, 0.86);
+  --pz-text-on-dark-muted: rgba(255, 255, 255, 0.62);
+  --pz-accent-rgb: 49 130 206;
+  --pz-accent: rgb(var(--pz-accent-rgb));
+  --pz-accent-strong: #2b6cb0;
+  --pz-accent-deep: #1a4f85;
+  --pz-accent-line: rgb(66 153 225 / 40%);
+  --pz-accent-line-strong: rgb(66 153 225 / 72%);
+  --pz-accent-line-soft: rgb(66 153 225 / 20%);
+  --pz-accent-faint: rgb(66 153 225 / 4%);
+  --pz-pink-line: rgba(255, 92, 132, 0.72);
+  --pz-pink-ring: rgba(255, 92, 132, 0.2);
+  --pz-pink-fill: rgba(255, 92, 132, 0.08);
+  --pz-pink-glow: rgba(255, 70, 116, 0.32);
+  --pz-success: #38a169;
+  --pz-danger: #e53e3e;
+  --pz-warning: #d69e2e;
+  --pz-tint-danger: rgba(255, 245, 245, 0.64);
+  --pz-tint-danger-line: rgba(254, 178, 178, 0.92);
+  --pz-tint-warning: rgba(254, 252, 232, 0.72);
+  --pz-tint-warning-strong: rgba(254, 252, 232, 0.94);
+  --pz-tint-warning-line: rgba(214, 158, 46, 0.32);
+  --pz-radius-xs: 0.25rem;
+  --pz-radius-sm: 0.4rem;
+  --pz-radius-md: 0.45rem;
+  --pz-radius-lg: 0.7rem;
+  --pz-radius-pill: 999px;
+  --pz-dur-fast: 150ms;
+  --pz-dur-base: 180ms;
+  --pz-dur-slow: 260ms;
+  --pz-dur-slower: 360ms;
+  --pz-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --pz-ease-pop: cubic-bezier(0.2, 0.85, 0.35, 1.2);
+  --pz-shadow-sm: 0 5px 16px rgba(26, 32, 44, 0.08);
+  --pz-shadow-menu: 0 12px 30px rgba(26, 32, 44, 0.18);
+  --pz-shadow-shell: 0 16px 36px rgba(26, 32, 44, 0.14);
+  --pz-shadow-dialog: 0 18px 48px rgba(26, 32, 44, 0.25);
+  --pz-shadow-modal: 0 24px 70px rgba(7, 11, 28, 0.32);
+  --pz-highlight: rgba(255, 255, 255, 0.74);
+  --pz-scrim: rgba(26, 32, 44, 0.42);
+  --pz-scrim-strong: rgba(10, 16, 35, 0.7);
+  --pz-z-nav: 30;
+  --pz-z-dialog: 1000;
+  --pz-z-titlebar: 9999;
+  --pz-z-hud: 12000;
+  --pz-font-xs: 0.68rem;
+  --pz-font-sm: 0.72rem;
+  --pz-font-md: 0.78rem;
+  --pz-font-base: 0.86rem;
+  --pz-font-lg: 1rem;
+  --pz-font-xl: 1.3rem;
+}
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #0b0f18;
+  color: var(--pz-text);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI",
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 16px;
+  line-height: 22px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- 舞台与缩放 */
+.pz-viewport { position: fixed; inset: 0; display: grid; place-items: center; }
+#stage {
+  position: relative;
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  background: var(--pz-canvas);
+  transform-origin: top left;
+  /* 真实启动器支持自定义背景图，这里用渐变模拟一张游戏壁纸，避免外链资源。 */
+  background-image:
+    radial-gradient(1100px 620px at 18% 12%, rgba(120, 176, 235, 0.55), transparent 62%),
+    radial-gradient(900px 520px at 82% 78%, rgba(214, 122, 96, 0.42), transparent 60%),
+    radial-gradient(700px 420px at 62% 28%, rgba(96, 110, 160, 0.5), transparent 65%),
+    linear-gradient(160deg, #1b2434 0%, #26313f 42%, #171d29 100%);
+}
+
+/* ------------------------------------------------------------------ 标题栏 */
+.pz-window-titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--pz-z-titlebar);
+  display: flex;
+  height: 32px;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.42);
+  backdrop-filter: blur(12px) saturate(140%);
+  color: var(--pz-text-label);
+  user-select: none;
+}
+.pz-window-drag-region { flex: 1; height: 100%; }
+.pz-window-controls { display: flex; height: 100%; align-items: stretch; }
+.pz-window-control {
+  display: grid;
+  width: 46px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+  transition: background var(--pz-dur-fast) ease, color var(--pz-dur-fast) ease;
+}
+.pz-window-control:hover { background: var(--pz-fill-subtle); color: var(--pz-text-strong); }
+.pz-window-control-close:hover { background: var(--pz-danger); color: var(--pz-text-inverse); }
+.pz-window-icon { position: relative; display: block; width: 12px; height: 12px; }
+.pz-window-icon-minimize::before {
+  position: absolute; top: 6px; left: 0; width: 12px; height: 1px;
+  background: currentColor; content: "";
+}
+.pz-window-icon-maximize { border: 1px solid currentColor; }
+.pz-window-icon-close::before,
+.pz-window-icon-close::after {
+  position: absolute; top: 6px; left: 0; width: 13px; height: 1px;
+  background: currentColor; content: "";
+}
+.pz-window-icon-close::before { transform: rotate(45deg); }
+.pz-window-icon-close::after { transform: rotate(-45deg); }
+
+/* --------------------------------------------------------------- 应用布局 */
+.pz-app-layout {
+  position: absolute;
+  inset: 32px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: calc(1.5rem + 3.5rem + 0.8rem) 0 0.8rem;
+}
+.pz-app-layout.pz-app-layout-launch { padding: 0; }
+
+/* 顶部悬浮胶囊导航（真实程序里就是这一颗玻璃胶囊） */
+.pz-sidebar {
+  position: absolute;
+  top: 1.5rem;
+  left: 50%;
+  z-index: var(--pz-z-nav);
+  display: flex;
+  height: 3.5rem;
+  align-items: center;
+  align-self: center;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--pz-line-white);
+  border-radius: var(--pz-radius-lg);
+  background: var(--pz-surface-glass);
+  box-shadow: 0 10px 28px rgba(26, 32, 44, 0.14), inset 1px 1px 0 var(--pz-highlight);
+  backdrop-filter: blur(18px) saturate(130%);
+  transform: translateX(-50%);
+}
+.pz-sidebar-brand { display: flex; flex: 0 0 auto; align-items: center; gap: 0.5rem; padding-right: 0.2rem; }
+.pz-top-nav-logo {
+  display: grid; width: 1.9rem; height: 1.9rem; place-items: center;
+  border-radius: var(--pz-radius-md); background: var(--pz-accent);
+  color: var(--pz-text-inverse); font-size: var(--pz-font-xs); font-weight: 800; letter-spacing: 0.02em;
+}
+.pz-top-nav-title { color: var(--pz-text-strong); font-size: var(--pz-font-md); font-weight: 700; letter-spacing: 0.06em; }
+.pz-side-nav { display: flex; gap: 0.3rem; }
+.pz-side-nav-item {
+  position: relative;
+  display: flex;
+  width: 2.35rem;
+  min-width: 2.35rem;
+  min-height: 2.35rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.45rem;
+  border: 0;
+  border-radius: var(--pz-radius-md);
+  background: transparent;
+  color: var(--pz-text-label);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--pz-dur-base) ease, background var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) ease, width var(--pz-dur-base) ease, padding var(--pz-dur-base) ease;
+}
+.pz-side-nav-item:hover { background: var(--pz-fill-accent); color: var(--pz-accent-strong); transform: translateX(2px); }
+.pz-side-nav-item-active {
+  width: auto;
+  min-width: 5.8rem;
+  justify-content: flex-start;
+  padding-inline: 0.7rem;
+  color: var(--pz-accent-deep);
+  background: var(--pz-fill-accent-active);
+  box-shadow: 0 0 0 1px var(--pz-accent-line-soft), 0 6px 14px rgb(var(--pz-accent-rgb) / 10%);
+}
+.pz-side-nav-label { max-width: 0; overflow: hidden; font-size: var(--pz-font-base); font-weight: 600; opacity: 0; transition: max-width var(--pz-dur-base) ease, opacity var(--pz-dur-base) ease; }
+.pz-side-nav-item-active .pz-side-nav-label { max-width: 6rem; opacity: 1; }
+.pz-side-nav-icon { display: block; width: 1.05rem; height: 1.05rem; flex: 0 0 auto; background: currentColor; }
+.pz-side-nav-icon-play { clip-path: polygon(18% 8%, 92% 50%, 18% 92%); }
+.pz-side-nav-icon-house { clip-path: polygon(50% 4%, 96% 44%, 84% 44%, 84% 94%, 16% 94%, 16% 44%, 4% 44%); }
+.pz-side-nav-icon-library { clip-path: polygon(6% 6%, 16% 6%, 16% 94%, 28% 94%, 28% 14%, 38% 14%, 38% 94%, 50% 94%, 50% 6%, 60% 6%, 60% 94%, 72% 94%, 72% 14%, 82% 14%, 82% 94%, 6% 94%); }
+.pz-side-nav-icon-images { clip-path: polygon(6% 12%, 94% 12%, 94% 88%, 6% 88%); }
+.pz-side-nav-icon-sun-medium { clip-path: polygon(50% 26%, 74% 50%, 50% 74%, 26% 50%); }
+.pz-side-nav-icon-package-open { clip-path: polygon(4% 34%, 96% 34%, 90% 92%, 10% 92%); }
+.pz-side-nav-icon-file-cog { clip-path: polygon(8% 6%, 62% 6%, 92% 34%, 92% 94%, 8% 94%); }
+.pz-side-nav-icon-sliders-horizontal { clip-path: polygon(4% 22%, 96% 22%, 96% 34%, 4% 34%, 4% 66%, 96% 66%, 96% 78%, 4% 78%); }
+
+/* 正文框：真实程序里带 backdrop-filter，光影弹层必须 Portal 才能脱离它——这里保持同样结构 */
+.pz-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: min(1400px, calc(100% - 1.5rem));
+  min-height: 0;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--pz-line-white);
+  border-radius: var(--pz-radius-lg);
+  background: var(--pz-surface-shell);
+  box-shadow: var(--pz-shadow-shell), inset 1px 1px 0 var(--pz-highlight);
+  backdrop-filter: blur(18px) saturate(125%);
+}
+.pz-page { display: none; min-height: 0; flex: 1 1 auto; flex-direction: column; }
+.pz-page.is-active { display: flex; animation: pz-content-enter var(--pz-dur-base) var(--pz-ease-out); }
+@keyframes pz-content-enter {
+  from { opacity: 0; transform: translateY(0.4rem); }
+  to { opacity: 1; transform: none; }
+}
+.pz-panel { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; padding: 1rem clamp(1rem, 2vw, 1.5rem); }
+.pz-panel-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 1rem 0.85rem;
+  border-bottom: 1px solid var(--pz-line);
+}
+.pz-panel-title { color: var(--pz-text-strong); font-size: var(--pz-font-xl); font-weight: 700; }
+.pz-panel-subtitle { margin-top: 0.15rem; color: var(--pz-text-muted); font-size: var(--pz-font-base); }
+.pz-body { min-height: 0; flex: 1 1 auto; padding-top: 0.9rem; }
+
+/* 通用控件 */
+.pz-btn {
+  display: inline-flex; height: 30px; align-items: center; gap: 0.35rem;
+  padding: 0 0.7rem; border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-sm);
+  background: var(--pz-surface-float); color: var(--pz-text-label);
+  font-size: var(--pz-font-md); font-weight: 600; cursor: pointer;
+  transition: background var(--pz-dur-fast) ease, border-color var(--pz-dur-fast) ease,
+    box-shadow var(--pz-dur-fast) ease, color var(--pz-dur-fast) ease, transform var(--pz-dur-fast) ease;
+}
+.pz-btn:hover { border-color: var(--pz-accent-line); color: var(--pz-accent-strong); }
+.pz-btn-primary { border-color: transparent; background: var(--pz-accent); color: var(--pz-text-inverse); }
+.pz-btn-primary:hover { background: var(--pz-accent-strong); color: var(--pz-text-inverse); }
+.pz-btn-ghost { border-color: transparent; background: transparent; }
+.pz-badge {
+  display: inline-flex; height: 18px; align-items: center; padding: 0 0.35rem;
+  border-radius: var(--pz-radius-xs); font-size: var(--pz-font-xs); font-weight: 700;
+}
+.pz-badge-modrinth { background: var(--pz-fill-accent-active); color: var(--pz-accent-deep); }
+.pz-badge-curse { background: rgba(246, 173, 85, 0.28); color: #975a16; }
+.pz-badge-tag { background: var(--pz-fill-accent); color: var(--pz-accent-strong); font-weight: 600; }
+.pz-input {
+  height: 30px; min-width: 8rem; padding: 0 0.55rem;
+  border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-sm);
+  background: var(--pz-surface-float); color: var(--pz-text); font-size: var(--pz-font-base);
+}
+.pz-input:focus { outline: none; border-color: var(--pz-accent-line); box-shadow: 0 0 0 3px var(--pz-accent-line-soft); }
+.pz-filter-label { color: var(--pz-text-label); font-size: var(--pz-font-md); letter-spacing: 0.04em; }
+.pz-row-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+
+/* 启动页 */
+.pz-page-launch { position: relative; padding: 0; }
+.pz-launch-bg {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(760px 460px at 26% 30%, rgba(150, 190, 240, 0.32), transparent 66%),
+    linear-gradient(180deg, rgba(9, 13, 22, 0.35), rgba(9, 13, 22, 0.72));
+}
+.pz-launch-account {
+  position: absolute; top: 1.4rem; left: 1.4rem; z-index: 4;
+  display: flex; width: 20rem; align-items: center; gap: 0.7rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--pz-line-white); border-radius: var(--pz-radius-lg);
+  background: var(--pz-surface-glass); box-shadow: var(--pz-shadow-sm), inset 1px 1px 0 var(--pz-highlight);
+  backdrop-filter: blur(16px);
+}
+.pz-avatar {
+  display: grid; width: 2.6rem; height: 2.6rem; flex: 0 0 auto; place-items: center;
+  border-radius: var(--pz-radius-md); background: linear-gradient(140deg, #4a90d9, #2b6cb0);
+  color: var(--pz-text-inverse); font-size: var(--pz-font-lg); font-weight: 800;
+}
+.pz-account-name { color: var(--pz-text-strong); font-size: var(--pz-font-base); font-weight: 700; }
+.pz-steam-id-toggle {
+  display: grid; justify-items: start; padding: 0; border: 0; background: transparent;
+  color: var(--pz-text-muted); font-size: var(--pz-font-xs); cursor: pointer; text-align: left;
+}
+.pz-memory-slider-wrap { position: absolute; top: 6.4rem; left: 1.4rem; z-index: 4; width: 20rem; padding: 0.7rem 0.85rem; border: 1px solid var(--pz-line-white); border-radius: var(--pz-radius-lg); background: var(--pz-surface-glass); box-shadow: var(--pz-shadow-sm), inset 1px 1px 0 var(--pz-highlight); backdrop-filter: blur(16px); }
+.pz-memory-slider { position: relative; height: 6px; margin: 0.55rem 0 0.35rem; border-radius: var(--pz-radius-pill); background: var(--pz-fill-gray-strong); }
+.pz-memory-slider-range { height: 100%; width: 40%; border-radius: var(--pz-radius-pill); background: var(--pz-accent); transition: width 120ms linear; }
+.pz-memory-slider-thumb {
+  position: absolute; top: 50%; left: 40%; width: 1rem; height: 1rem;
+  border: 2px solid #fff; border-radius: var(--pz-radius-pill); background: var(--pz-accent-strong);
+  box-shadow: 0 1px 5px rgba(26, 32, 44, 0.28); transform: translate(-50%, -50%); transition: left 120ms linear;
+}
+.pz-value-box { color: var(--pz-text-strong); font-size: var(--pz-font-lg); font-weight: 800; }
+.pz-launch-actions { position: absolute; top: 1.4rem; right: 1.4rem; z-index: 5; display: flex; gap: 0.5rem; }
+.pz-launch-icon-button {
+  display: grid; width: 2.1rem; height: 2.1rem; place-items: center;
+  border: 1px solid var(--pz-line-glass); border-radius: var(--pz-radius-sm);
+  background: var(--pz-fill-glass-soft); color: var(--pz-text-on-dark); cursor: pointer;
+  transition: transform var(--pz-dur-slow) var(--pz-ease-out), opacity var(--pz-dur-slow) ease,
+    visibility 0s linear var(--pz-dur-slow), background-color var(--pz-dur-base) ease;
+}
+.pz-launch-icon-button:hover { background: var(--pz-fill-glass); color: var(--pz-text-inverse); }
+.pz-launch-card-shell { position: relative; left: 50%; bottom: 8.6rem; z-index: 3; width: 22rem; transform: translateX(-50%); }
+.pz-launch-card-button {
+  display: flex; width: 100%; min-height: 5.2rem; align-items: center; justify-content: center; gap: 0.6rem;
+  border: 1px solid var(--pz-pink-line); border-radius: var(--pz-radius-md);
+  background: linear-gradient(140deg, rgba(255, 92, 132, 0.92), rgba(214, 74, 112, 0.92));
+  color: var(--pz-text-inverse); font-size: var(--pz-font-xl); font-weight: 800; letter-spacing: 0.06em;
+  cursor: pointer; box-shadow: 0 0 0 1px var(--pz-pink-ring), 0 14px 30px var(--pz-pink-glow);
+  transition: transform var(--pz-dur-slow) var(--pz-ease-out), opacity var(--pz-dur-slow) ease,
+    visibility 0s linear var(--pz-dur-slow), background-color var(--pz-dur-base) ease;
+}
+.pz-launch-card-button:hover { background: linear-gradient(140deg, rgba(255, 108, 146, 0.96), rgba(222, 84, 120, 0.96)); }
+.pz-launch-slide-left { transform: translateX(-1.4rem); opacity: 0; visibility: hidden; pointer-events: none; }
+.pz-launch-stop-button {
+  position: absolute; inset: 0;
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(18, 24, 38, 0.42);
+  transform: translateX(110%); opacity: 0; pointer-events: none;
+  transition: transform var(--pz-dur-slower) var(--pz-ease-out), opacity var(--pz-dur-base) ease;
+  backdrop-filter: blur(14px) saturate(130%);
+}
+.pz-launch-stop-button.is-in { transform: translateX(0); opacity: 1; pointer-events: auto; }
+.pz-launch-command {
+  position: absolute; right: 1.4rem; bottom: 1.4rem; left: 1.4rem; z-index: 3;
+  display: flex; align-items: center; gap: 0.7rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--pz-pink-line); border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-command); color: var(--pz-text-on-dark);
+  box-shadow: 0 0 0 1px var(--pz-pink-ring), 0 14px 30px var(--pz-pink-glow);
+  backdrop-filter: blur(16px);
+}
+.pz-launch-command-toolbar { display: flex; flex: 0 0 auto; gap: 0.4rem; }
+.pz-launch-command-lines { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 0.15rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--pz-font-md); }
+.pz-launch-command-lines .is-idle { color: var(--pz-text-on-dark-muted); }
+.pz-launch-workshop-info {
+  position: absolute; right: 1.4rem; bottom: 5.6rem; z-index: 4;
+  display: flex; max-width: 22rem; flex-direction: row; align-items: stretch;
+  border: 1px solid var(--pz-line-glass); border-left: 0; border-radius: var(--pz-radius-md);
+  background: var(--pz-glass-dark); color: var(--pz-text-on-dark);
+  box-shadow: var(--pz-shadow-dialog); backdrop-filter: blur(14px) saturate(130%);
+}
+.pz-launch-workshop-info-body { display: flex; flex-direction: column; gap: 0.2rem; padding: 0.55rem 0.75rem; }
+.pz-launch-workshop-info-title { color: var(--pz-text-on-dark-muted); font-size: var(--pz-font-xs); font-weight: 700; letter-spacing: 0.08em; }
+.pz-launch-workshop-info-name { color: var(--pz-text-inverse); font-size: var(--pz-font-md); font-weight: 700; }
+.pz-launch-workshop-info-id { color: var(--pz-text-on-dark-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--pz-font-xs); }
+.pz-launch-workshop-info-details { display: none; padding: 0 0.75rem 0.55rem; color: var(--pz-text-on-dark-muted); font-size: var(--pz-font-xs); }
+.pz-launch-workshop-info.is-open .pz-launch-workshop-info-details { display: block; }
+.pz-launch-workshop-info-toggle {
+  display: grid; order: 1; width: 1.7rem; min-width: 1.7rem; place-items: center;
+  padding: 0; border: 1px solid var(--pz-line-glass); border-left: 0;
+  border-radius: 0 var(--pz-radius-md) var(--pz-radius-md) 0;
+  background: var(--pz-glass-dark); color: var(--pz-text-on-dark); cursor: pointer;
+  transition: background var(--pz-dur-base) ease, color var(--pz-dur-base) ease,
+    border-radius var(--pz-dur-base) ease;
+}
+.pz-launch-workshop-info-toggle:hover { background: var(--pz-glass-dark-hover); color: var(--pz-text-inverse); }
+
+/* 支持库 */
+.pz-stat-grid { display: grid; gap: 0.7rem; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pz-stat-card {
+  display: flex; flex-direction: column; gap: 0.25rem; padding: 0.8rem 0.9rem;
+  border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-card); box-shadow: var(--pz-shadow-sm);
+}
+.pz-stat-label { color: var(--pz-text-muted); font-size: var(--pz-font-md); }
+.pz-stat-value { color: var(--pz-text-strong); font-size: var(--pz-font-lg); font-weight: 800; }
+.pz-stat-note { color: var(--pz-text-subtle); font-size: var(--pz-font-xs); }
+.pz-check-list { display: flex; flex-direction: column; margin-top: 0.9rem; }
+.pz-check-row { display: flex; align-items: center; gap: 0.55rem; padding: 0.55rem 0.2rem; border-top: 1px solid var(--pz-line); font-size: var(--pz-font-base); }
+.pz-dot { width: 0.55rem; height: 0.55rem; flex: 0 0 auto; border-radius: var(--pz-radius-pill); background: var(--pz-fill-gray-strong); }
+.pz-dot.is-ok { background: var(--pz-success); box-shadow: 0 0 0 3px rgba(56, 161, 105, 0.16); }
+.pz-dot.is-warn { background: var(--pz-warning); box-shadow: 0 0 0 3px rgba(214, 158, 46, 0.16); }
+.pz-check-row span:last-child { margin-left: auto; color: var(--pz-text-muted); font-size: var(--pz-font-md); }
+
+/* 截图管理 */
+.pz-shot-grid { display: grid; gap: 0.7rem; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pz-shot-card {
+  position: relative; overflow: hidden; border: 1px solid var(--pz-line-strong);
+  border-radius: var(--pz-radius-md); background: var(--pz-surface-card);
+  box-shadow: var(--pz-shadow-sm); cursor: pointer;
+  transition: transform var(--pz-dur-base) ease, border-color var(--pz-dur-base) ease, box-shadow var(--pz-dur-base) ease;
+}
+.pz-shot-card:hover { border-color: var(--pz-accent-line-strong); box-shadow: var(--pz-shadow-menu), 0 0 0 1px var(--pz-accent-line-soft); transform: translateY(-2px); }
+.pz-shot-thumb { height: 6.6rem; background: linear-gradient(140deg, rgba(96, 140, 200, 0.5), rgba(38, 48, 70, 0.6)); }
+.pz-shot-thumb-2 { background: linear-gradient(140deg, rgba(200, 140, 110, 0.5), rgba(60, 40, 44, 0.62)); }
+.pz-shot-thumb-3 { background: linear-gradient(140deg, rgba(120, 190, 150, 0.45), rgba(30, 54, 48, 0.62)); }
+.pz-shot-meta { display: flex; align-items: center; justify-content: space-between; padding: 0.4rem 0.55rem; }
+.pz-shot-name { color: var(--pz-text-label); font-size: var(--pz-font-md); font-weight: 600; }
+.pz-shot-time { color: var(--pz-text-subtle); font-size: var(--pz-font-xs); }
+
+/* 弹层与对话框（层级与真实程序一致） */
+.pz-modal-overlay {
+  position: absolute; inset: 0; z-index: var(--pz-z-dialog);
+  display: flex; align-items: center; justify-content: center; padding: 1rem;
+  background: var(--pz-scrim-strong); backdrop-filter: blur(7px);
+  animation: pz-fade-in var(--pz-dur-base) ease both;
+}
+.pz-modal-overlay[hidden] { display: none; }
+@keyframes pz-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pz-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes pz-dialog-in { from { opacity: 0; transform: translateY(0.55rem) scale(0.96); } to { opacity: 1; transform: none; } }
+.pz-modal {
+  width: min(880px, 100%); max-height: 90vh; overflow: hidden;
+  border: 1px solid var(--pz-line-white); border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-float); box-shadow: var(--pz-shadow-modal); backdrop-filter: blur(24px);
+  animation: pz-dialog-in var(--pz-dur-base) var(--pz-ease-out) both;
+}
+.pz-modal-preview { height: 26rem; background: linear-gradient(140deg, rgba(96, 140, 200, 0.6), rgba(30, 38, 56, 0.7)); }
+.pz-modal-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.7rem 0.9rem; }
+
+/* 光影管理 */
+.pz-dropzone {
+  display: grid; height: 8.2rem; place-items: center;
+  border: 1px dashed var(--pz-accent-line); border-radius: var(--pz-radius-md);
+  background: linear-gradient(135deg, var(--pz-fill-row-hover), var(--pz-fill-highlight));
+  color: var(--pz-text-label); font-size: var(--pz-font-base);
+  transition: border-color var(--pz-dur-base) ease, background var(--pz-dur-base) ease;
+}
+.pz-dropzone.is-hot { border-color: var(--pz-accent); background: linear-gradient(135deg, var(--pz-fill-accent-active), var(--pz-fill-row-hover)); }
+.pz-list { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow-y: auto; margin-top: 0.75rem; border-top: 1px solid var(--pz-line); }
+.pz-list-row { display: flex; min-height: 3.4rem; align-items: center; gap: 0.7rem; padding: 0.55rem 0.25rem; border-bottom: 1px solid var(--pz-line); }
+.pz-list-row-name { color: var(--pz-text); font-size: var(--pz-font-base); font-weight: 700; }
+.pz-list-row-meta { color: var(--pz-text-muted); font-size: var(--pz-font-xs); }
+.pz-list-row-actions { margin-left: auto; display: flex; gap: 0.4rem; }
+.pz-file-chip {
+  position: absolute; z-index: 6; display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.35rem 0.55rem; border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-sm);
+  background: var(--pz-surface-float); box-shadow: var(--pz-shadow-menu); font-size: var(--pz-font-md);
+  transition: transform var(--pz-dur-slower) var(--pz-ease-out), opacity var(--pz-dur-base) ease;
+}
+
+/* 资源中心（左侧分类 + 右侧内容） */
+.pz-resource-center { display: flex; min-height: 0; flex: 1 1 auto; }
+.pz-resource-center-sidebar { flex: 0 0 9.5rem; width: 9.5rem; padding: 1rem 0.55rem 1rem 1rem; border-right: 1px solid var(--pz-line); }
+.pz-resource-center-sidebar-title { padding: 0 0.55rem 0.45rem; color: var(--pz-text-muted); font-size: var(--pz-font-xs); font-weight: 700; letter-spacing: 0.08em; }
+.pz-resource-center-sidebar-item {
+  display: flex; width: 100%; min-height: 1.9rem; align-items: center;
+  padding: 0 0.6rem; border: 0; border-radius: var(--pz-radius-sm);
+  background: transparent; color: var(--pz-text-label); font-size: var(--pz-font-base); font-weight: 600;
+  cursor: pointer; text-align: left; transition: background var(--pz-dur-fast) ease, color var(--pz-dur-fast) ease;
+}
+.pz-resource-center-sidebar-item:hover { background: var(--pz-fill-accent); color: var(--pz-accent-strong); }
+.pz-resource-center-sidebar-item-active { background: var(--pz-fill-accent-active); color: var(--pz-accent-deep); }
+.pz-resource-center-main { display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
+.pz-resource-toolbar { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 0.45rem 0.6rem; align-items: center; padding: 0.8rem 1rem 0; }
+.pz-resource-meta { display: flex; justify-content: space-between; padding: 0.5rem 1rem 0; color: var(--pz-text-muted); font-size: var(--pz-font-xs); }
+.pz-resource-list { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow-y: auto; margin: 0.5rem 1rem 0.75rem; border-top: 1px solid var(--pz-line); }
+.pz-resource-item { display: flex; min-height: 4.2rem; gap: 0.65rem; padding: 0.55rem 0.25rem; border-bottom: 1px solid var(--pz-line); cursor: pointer; transition: background var(--pz-dur-fast) ease, border-color var(--pz-dur-fast) ease; }
+.pz-resource-item:hover { background: var(--pz-fill-row-hover); }
+.pz-resource-icon { display: grid; width: 42px; height: 42px; flex: 0 0 42px; place-items: center; overflow: hidden; border-radius: var(--pz-radius-xs); background: var(--pz-fill-gray); color: var(--pz-text-muted); font-size: var(--pz-font-sm); font-weight: 800; }
+.pz-resource-icon-mc { background: linear-gradient(140deg, #6aa84f, #3d7a34); color: var(--pz-text-inverse); }
+.pz-resource-title-row { display: flex; align-items: flex-start; gap: 0.5rem; }
+.pz-resource-name { flex: 1; min-width: 0; color: var(--pz-text-strong); font-size: var(--pz-font-base); font-weight: 700; }
+.pz-resource-desc { margin-top: 0.15rem; color: var(--pz-text-muted); font-size: var(--pz-font-xs); }
+.pz-resource-tags { display: flex; flex: 0 0 auto; gap: 0.25rem; }
+.pz-resource-file-overlay {
+  position: absolute; inset: 0; z-index: var(--pz-z-dialog);
+  display: flex; align-items: center; justify-content: center; padding: 1rem;
+  background: var(--pz-scrim);
+  animation: pz-fade-in var(--pz-dur-base) ease both;
+}
+.pz-resource-file-overlay[hidden] { display: none; }
+.pz-resource-file-dialog {
+  display: flex; width: min(720px, 100%); max-height: min(80vh, 620px); flex-direction: column;
+  overflow: hidden; padding: 1rem;
+  border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-float); box-shadow: var(--pz-shadow-dialog);
+  animation: pz-dialog-in var(--pz-dur-base) var(--pz-ease-out) both;
+  transition: height var(--pz-dur-slow) var(--pz-ease-out);
+}
+.pz-resource-file-list { min-height: 0; flex: 1 1 auto; margin-top: 0.85rem; overflow-y: auto; }
+.pz-resource-file-row { display: flex; min-height: 3.5rem; align-items: center; gap: 0.75rem; padding: 0.55rem 0; border-top: 1px solid var(--pz-line); }
+.pz-download-progress { height: 3px; margin-top: 0.5rem; overflow: hidden; border-radius: var(--pz-radius-pill); background: var(--pz-fill); }
+.pz-download-progress > span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--pz-accent); transition: width var(--pz-dur-base) ease; }
+
+/* 模组管理 */
+.pz-mod-tabs { display: flex; gap: 0.4rem; padding: 0.8rem 1rem 0; }
+.pz-mod-tab { display: inline-flex; height: 30px; align-items: center; padding: 0 0.8rem; border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-sm); background: var(--pz-surface-float); color: var(--pz-text-label); font-size: var(--pz-font-md); font-weight: 600; cursor: pointer; }
+.pz-mod-tab.is-active { border-color: var(--pz-accent-line-strong); background: var(--pz-fill-accent-active); color: var(--pz-accent-deep); }
+.pz-mod-batch-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 1rem; border-bottom: 1px solid var(--pz-line); color: var(--pz-text-muted); font-size: var(--pz-font-md); }
+.pz-lua-mod-list { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow-y: auto; padding: 0.45rem 1rem 0.75rem; }
+.pz-mod-row {
+  margin-bottom: 0.22rem; padding: 0.22rem 0.38rem;
+  border: 1px solid rgba(255, 255, 255, 0.62); border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-card);
+  transition: background-color var(--pz-dur-base) ease, border-color var(--pz-dur-base) ease,
+    box-shadow var(--pz-dur-base) ease, transform 120ms ease;
+}
+.pz-mod-row:hover { border-color: var(--pz-line-hover); background: var(--pz-fill-row-hover); }
+.pz-mod-row.is-enabled { border-color: var(--pz-accent-line-strong); background: var(--pz-fill-row-enabled); box-shadow: inset 3px 0 0 var(--pz-accent); }
+.pz-mod-row.is-rejected { border-color: var(--pz-tint-danger-line); background: var(--pz-tint-danger); }
+.pz-mod-row.is-selected { border-color: var(--pz-accent); background: var(--pz-fill-row-selected); box-shadow: 0 0 0 2px rgb(var(--pz-accent-rgb) / 20%), 0 7px 18px rgb(var(--pz-accent-rgb) / 16%); }
+/* 展开态排在三态之前：状态底色与左侧状态条永远优先（与真实程序同一套层叠策略） */
+.pz-mod-row.pz-jar-mod-row-expanded { border-color: var(--pz-line-emphasis); background: var(--pz-surface-glass); box-shadow: var(--pz-shadow-sm); }
+.pz-mod-row.pz-jar-mod-row-expanded:not(.is-enabled):not(.is-rejected):not(.is-selected):hover { border-color: var(--pz-line-hover); background: var(--pz-surface-hover); }
+.pz-mod-summary { display: flex; min-height: 1.9rem; align-items: center; gap: 0.5rem; }
+.pz-mod-check { display: grid; width: 1rem; height: 1rem; flex: 0 0 auto; place-items: center; border: 1px solid var(--pz-line-emphasis); border-radius: var(--pz-radius-xs); background: var(--pz-surface-float); color: transparent; font-size: var(--pz-font-xs); }
+.pz-mod-row.is-selected .pz-mod-check { border-color: var(--pz-accent); background: var(--pz-accent); color: var(--pz-text-inverse); }
+.pz-mod-name { color: var(--pz-text-strong); font-size: var(--pz-font-base); font-weight: 700; }
+.pz-mod-row:not(.is-enabled):not(.is-selected) .pz-mod-name { color: var(--pz-text-disabled, #a6a6a6); text-decoration: line-through; text-decoration-color: rgba(166, 166, 166, 0.7); }
+.pz-mod-row.is-enabled .pz-mod-name { color: #0b5bcb; }
+.pz-mod-badges { display: flex; gap: 0.3rem; margin-left: auto; }
+.pz-mod-actions { display: flex; flex: 0 0 auto; gap: 0.35rem; }
+.pz-jar-mod-details-shell { display: grid; overflow: hidden; grid-template-rows: 0fr; transition: grid-template-rows var(--pz-dur-slower) var(--pz-ease-out); }
+.pz-mod-row.pz-jar-mod-row-expanded .pz-jar-mod-details-shell { grid-template-rows: 1fr; }
+.pz-jar-mod-details { min-height: 0; overflow: hidden; margin-top: 0.4rem; padding: 0.5rem 0 0 0.25rem; border-top: 1px solid var(--pz-line); opacity: 0; transform: translateY(-0.35rem); transition: opacity 240ms ease, transform var(--pz-dur-slower) var(--pz-ease-out); }
+.pz-mod-row.pz-jar-mod-row-expanded .pz-jar-mod-details { opacity: 1; transform: none; }
+.pz-detail-grid { display: grid; gap: 0.3rem 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); color: var(--pz-text-label); font-size: var(--pz-font-md); }
+.pz-mod-row.is-rejected .pz-mod-name { color: #c53030; text-decoration: none; }
+
+/* 设置 */
+.pz-settings-form { display: flex; flex-direction: column; gap: 0.7rem; max-width: 46rem; }
+.pz-field { display: flex; flex-direction: column; gap: 0.25rem; }
+.pz-field-label { color: var(--pz-text-label); font-size: var(--pz-font-base); font-weight: 600; }
+.pz-field-hint { color: var(--pz-text-muted); font-size: var(--pz-font-xs); }
+.pz-switch { position: relative; width: 2.3rem; height: 1.25rem; border-radius: var(--pz-radius-pill); background: var(--pz-fill-gray-strong); transition: background var(--pz-dur-base) ease; }
+.pz-switch::after { position: absolute; top: 0.15rem; left: 0.15rem; width: 0.95rem; height: 0.95rem; border-radius: var(--pz-radius-pill); background: #fff; box-shadow: var(--pz-shadow-sm); content: ""; transition: left var(--pz-dur-base) var(--pz-ease-out); }
+.pz-switch.is-on { background: var(--pz-accent); }
+.pz-switch.is-on::after { left: 1.2rem; }
+
+/* 结尾页 */
+.pz-outro { display: grid; flex: 1 1 auto; place-items: center; }
+.pz-outro-inner { text-align: center; }
+.pz-outro-logo { display: grid; width: 5.2rem; height: 5.2rem; margin: 0 auto 1rem; place-items: center; border-radius: var(--pz-radius-lg); background: var(--pz-accent); color: var(--pz-text-inverse); font-size: var(--pz-font-xl); font-weight: 800; box-shadow: var(--pz-shadow-dialog); }
+.pz-outro-title { color: var(--pz-text-strong); font-size: 2.4rem; font-weight: 800; letter-spacing: 0.06em; }
+.pz-outro-sub { margin-top: 0.4rem; color: var(--pz-text-muted); font-size: var(--pz-font-lg); }
+.pz-outro-points { display: flex; gap: 0.6rem; justify-content: center; margin-top: 1.2rem; }
+.pz-outro-point { padding: 0.35rem 0.7rem; border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-pill); background: var(--pz-surface-float); color: var(--pz-text-label); font-size: var(--pz-font-md); font-weight: 600; }
+
+/* Toast */
+.pz-toast-viewport { position: absolute; top: 4.2rem; right: 0.75rem; z-index: var(--pz-z-hud); display: flex; width: 20rem; flex-direction: column; gap: 0.6rem; }
+.pz-toast { display: flex; align-items: center; gap: 0.65rem; overflow: hidden; padding: 0.7rem 0.75rem; border: 1px solid var(--pz-line-strong); border-radius: var(--pz-radius-md); background: var(--pz-surface-float); box-shadow: var(--pz-shadow-menu); backdrop-filter: blur(18px); animation: pz-toast-enter var(--pz-dur-base) var(--pz-ease-pop) both; }
+.pz-toast.is-closing { animation: pz-toast-exit var(--pz-dur-base) ease-in both; }
+@keyframes pz-toast-enter { from { opacity: 0; transform: translateX(1.4rem); } to { opacity: 1; transform: none; } }
+@keyframes pz-toast-exit { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(1.4rem); } }
+.pz-toast-indicator { width: 0.22rem; align-self: stretch; border-radius: var(--pz-radius-pill); background: var(--pz-accent); }
+.pz-toast.is-success .pz-toast-indicator { background: var(--pz-success); }
+.pz-toast.is-error .pz-toast-indicator { background: var(--pz-danger); }
+.pz-toast-message { color: var(--pz-text); font-size: var(--pz-font-base); }
+
+/* ------------------------------------------------- 录制辅助（HUD / 字幕 / 光标） */
+.pz-cursor { position: absolute; z-index: var(--pz-z-hud); width: 1.35rem; height: 1.35rem; margin: -0.15rem 0 0 -0.15rem; opacity: 0; pointer-events: none; transition: transform var(--pz-dur-base) var(--pz-ease-out), opacity var(--pz-dur-fast) ease; }
+.pz-cursor.is-visible { opacity: 1; }
+.pz-cursor::before { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 6px rgba(10, 16, 35, 0.45); clip-path: polygon(0 0, 62% 46%, 38% 52%, 52% 100%, 34% 100%, 22% 56%, 0 74%); content: ""; }
+.pz-cursor-ring { position: absolute; top: 50%; left: 50%; width: 3.2rem; height: 3.2rem; margin: -1.6rem 0 0 -1.6rem; border: 2px solid rgb(255 255 255 / 85%); border-radius: var(--pz-radius-pill); opacity: 0; }
+.pz-cursor-ring.is-on { animation: pz-click-ring 620ms var(--pz-ease-out); }
+@keyframes pz-click-ring { 0% { opacity: 0.9; transform: scale(0.3); } 100% { opacity: 0; transform: scale(1); } }
+.pz-ripple { position: absolute; z-index: calc(var(--pz-z-hud) - 1); width: 1.4rem; height: 1.4rem; margin: -0.7rem 0 0 -0.7rem; border-radius: var(--pz-radius-pill); background: rgb(var(--pz-accent-rgb) / 32%); pointer-events: none; animation: pz-ripple 640ms var(--pz-ease-out) forwards; }
+@keyframes pz-ripple { from { opacity: 0.85; transform: scale(0.4); } to { opacity: 0; transform: scale(2.6); } }
+.is-tap { box-shadow: 0 0 0 3px var(--pz-accent-line) !important; }
+
+.pz-hud {
+  position: fixed; bottom: 0.9rem; left: 50%; z-index: var(--pz-z-hud);
+  display: flex; align-items: center; gap: 0.9rem; padding: 0.45rem 0.9rem;
+  border: 1px solid rgba(255, 255, 255, 0.22); border-radius: var(--pz-radius-pill);
+  background: rgba(12, 18, 30, 0.72); color: rgba(255, 255, 255, 0.86);
+  font-size: var(--pz-font-md); backdrop-filter: blur(14px); transform: translateX(-50%);
+}
+.pz-hud[hidden] { display: none; }
+.pz-hud-scene { color: #fff; font-weight: 700; }
+.pz-hud-keys { color: rgba(255, 255, 255, 0.62); }
+.pz-hud-keys b { color: rgba(255, 255, 255, 0.92); font-weight: 700; }
+.pz-hud-progress { display: flex; gap: 0.25rem; }
+.pz-hud-dot { width: 0.4rem; height: 0.4rem; border-radius: var(--pz-radius-pill); background: rgba(255, 255, 255, 0.28); }
+.pz-hud-dot.is-active { background: #fff; }
+.pz-hud-pause { color: #ffd479; font-weight: 700; }
+.pz-hud[hidden] + .pz-caption { bottom: 0.9rem; }
+
+.pz-caption {
+  position: fixed; bottom: 5.4rem; left: 50%; z-index: var(--pz-z-hud);
+  max-width: 62rem; padding: 0.6rem 1.1rem;
+  border: 1px solid rgba(255, 255, 255, 0.18); border-radius: var(--pz-radius-md);
+  background: rgba(12, 18, 30, 0.78); color: #fff;
+  font-size: 1.05rem; line-height: 1.5; text-align: center; letter-spacing: 0.02em;
+  backdrop-filter: blur(14px); transform: translateX(-50%);
+}
+.pz-caption[hidden] { display: none; }
+
+/* still=1 静态帧模式：禁用所有过渡与动画，脚本里 sleep 同时改成立即返回，于是整个场景
+   一步推到终态。无头截图（--screenshot）与封面图抓取靠它拿到「真实的最终布局」，否则
+   虚拟时间下过渡不插值，只能看到过渡起点，会误判成「样式没生效」。 */
+.is-still *,
+.is-still *::before,
+.is-still *::after { animation: none !important; transition: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  #stage *, #stage *::before, #stage *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="pz-viewport">
+  <div id="stage">
+    <!-- 窗口标题栏 -->
+    <header class="pz-window-titlebar">
+      <div class="pz-window-drag-region"></div>
+      <div class="pz-window-controls">
+        <button class="pz-window-control" aria-label="最小化"><span class="pz-window-icon pz-window-icon-minimize"></span></button>
+        <button class="pz-window-control" aria-label="最大化"><span class="pz-window-icon pz-window-icon-maximize"></span></button>
+        <button class="pz-window-control pz-window-control-close" aria-label="关闭"><span class="pz-window-icon pz-window-icon-close"></span></button>
+      </div>
+    </header>
+
+    <div class="pz-app-layout" id="layout">
+      <!-- 顶部悬浮胶囊导航 -->
+      <aside class="pz-sidebar">
+        <div class="pz-sidebar-brand">
+          <div class="pz-top-nav-logo">PZM</div>
+          <span class="pz-top-nav-title">PZMANAGER</span>
+        </div>
+        <nav class="pz-side-nav" id="nav" aria-label="应用主导航"></nav>
+      </aside>
+
+      <!-- 正文框 -->
+      <main class="pz-main" id="main">
+        <!-- 1. 启动 -->
+        <section class="pz-page pz-page-launch" data-page="launch">
+          <div class="pz-launch-bg"></div>
+          <div class="pz-launch-account">
+            <div class="pz-avatar">PZ</div>
+            <div>
+              <div class="pz-account-name">Survivor_Kate</div>
+              <button class="pz-steam-id-toggle">Steam ID 76561198000000000 ▾</button>
+            </div>
+          </div>
+          <div class="pz-memory-slider-wrap" id="memSlider">
+            <div class="pz-row-inline" style="justify-content: space-between">
+              <span class="pz-field-label">分配给游戏的内存</span>
+              <span class="pz-value-box" id="memValue">4 GB</span>
+            </div>
+            <div class="pz-memory-slider"><div class="pz-memory-slider-range" id="memRange"></div><div class="pz-memory-slider-thumb" id="memThumb"></div></div>
+            <div class="pz-field-hint">本机 32 GB · 推荐 8 GB（改动会立即写入启动参数）</div>
+          </div>
+          <div class="pz-launch-actions" id="launchIcons">
+            <button class="pz-launch-icon-button" title="启动设置">⚙</button>
+            <button class="pz-launch-icon-button" title="启动详情">ⓘ</button>
+          </div>
+          <div class="pz-launch-card-shell" id="launchCard">
+            <button class="pz-launch-card-button" id="btnStart">启动游戏</button>
+            <button class="pz-launch-card-button pz-launch-stop-button" id="btnStop">停止游戏进程</button>
+          </div>
+          <div class="pz-launch-workshop-info" id="workshopInfo">
+            <div>
+              <div class="pz-launch-workshop-info-body">
+                <span class="pz-launch-workshop-info-title">创意工坊项</span>
+                <span class="pz-launch-workshop-info-name">ZombieBuddy · 智能队友</span>
+                <span class="pz-launch-workshop-info-id">ID 3619862853 · 已订阅</span>
+              </div>
+              <div class="pz-launch-workshop-info-details">已随游戏一起加载；如需停用可在「资源中心 → 创意工坊」中取消订阅。</div>
+            </div>
+            <button class="pz-launch-workshop-info-toggle" id="workshopToggle" aria-label="展开工坊信息">⌃</button>
+          </div>
+          <div class="pz-launch-command">
+            <div class="pz-launch-command-toolbar">
+              <button class="pz-btn pz-btn-ghost" style="color: var(--pz-text-on-dark)">控制台</button>
+              <button class="pz-btn pz-btn-ghost" style="color: var(--pz-text-on-dark)">日志</button>
+            </div>
+            <div class="pz-launch-command-lines">
+              <span id="cmdText" class="is-idle">> 等待启动…</span>
+              <span id="cmdText2" class="is-idle"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. 支持库 -->
+        <section class="pz-page" data-page="overview">
+          <div class="pz-panel">
+            <div class="pz-panel-header">
+              <div>
+                <div class="pz-panel-title">支持库</div>
+                <div class="pz-panel-subtitle">Project Zomboid 本机环境与安装状态</div>
+              </div>
+              <button class="pz-btn">重新检测</button>
+            </div>
+            <div class="pz-body">
+              <div class="pz-stat-grid" id="statGrid"></div>
+              <div class="pz-check-list" id="checkList"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. 截图管理 -->
+        <section class="pz-page" data-page="shots">
+          <div class="pz-panel">
+            <div class="pz-panel-header">
+              <div>
+                <div class="pz-panel-title">截图管理</div>
+                <div class="pz-panel-subtitle">浏览 Viewpoint 截图，一键复制到剪贴板</div>
+              </div>
+              <div class="pz-row-inline">
+                <button class="pz-btn">打开目录</button>
+                <button class="pz-btn pz-btn-primary">刷新</button>
+              </div>
+            </div>
+            <div class="pz-body">
+              <div class="pz-shot-grid" id="shotGrid"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. 光影管理 -->
+        <section class="pz-page" data-page="shaderpacks">
+          <div class="pz-panel">
+            <div class="pz-panel-header">
+              <div>
+                <div class="pz-panel-title">光影管理</div>
+                <div class="pz-panel-subtitle">导入 Minecraft ZIP 光影包，文件会复制到 Viewpoint 光影目录</div>
+              </div>
+              <button class="pz-btn pz-btn-primary">选择文件</button>
+            </div>
+            <div class="pz-body" style="display:flex;flex-direction:column;min-height:0">
+              <div class="pz-dropzone" id="dropzone">将 ZIP 光影包拖到这里</div>
+              <div class="pz-list" id="shaderList"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. 资源中心 -->
+        <section class="pz-page" data-page="workshop">
+          <div class="pz-resource-center">
+            <div class="pz-resource-center-sidebar">
+              <div class="pz-resource-center-sidebar-title">资源类型</div>
+              <div style="display:flex;flex-direction:column;gap:0.15rem">
+                <button class="pz-resource-center-sidebar-item" data-rc="workshop">创意工坊</button>
+                <button class="pz-resource-center-sidebar-item pz-resource-center-sidebar-item-active" data-rc="shader">光影包下载</button>
+                <button class="pz-resource-center-sidebar-item" data-rc="news">开发者新闻</button>
+              </div>
+            </div>
+            <div class="pz-resource-center-main">
+              <div class="pz-resource-toolbar">
+                <span class="pz-filter-label">下载源</span>
+                <button class="pz-btn" id="srcSelect">Modrinth ▾</button>
+                <span class="pz-filter-label">游戏版本</span>
+                <button class="pz-btn">1.20.1 ▾</button>
+                <span class="pz-filter-label">排序</span>
+                <button class="pz-btn">相关度 ▾</button>
+              </div>
+              <div class="pz-resource-toolbar">
+                <span class="pz-filter-label">名称</span>
+                <input class="pz-input" id="searchInput" placeholder="搜索光影包名称" style="min-width: 18rem" />
+                <button class="pz-btn pz-btn-primary" id="btnSearch">搜索</button>
+              </div>
+              <div class="pz-resource-meta"><span>Modrinth · Minecraft Shader Packs</span><span id="resultCount">共 1,284 个资源</span></div>
+              <div class="pz-resource-list" id="resourceList"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 6. 模组管理 -->
+        <section class="pz-page" data-page="mods">
+          <div class="pz-panel" style="padding:0">
+            <div class="pz-panel-header" style="padding:0.7rem 1rem">
+              <div>
+                <div class="pz-panel-title">模组管理</div>
+                <div class="pz-panel-subtitle">管理 Lua 与 JAR 模组：勾选、排序、查看冲突</div>
+              </div>
+              <div class="pz-row-inline">
+                <button class="pz-btn">全选</button>
+                <button class="pz-btn">反选</button>
+                <button class="pz-btn pz-btn-ghost">更多操作 ▾</button>
+              </div>
+            </div>
+            <div class="pz-mod-tabs">
+              <button class="pz-mod-tab is-active" data-modtab="lua">Lua 模组</button>
+              <button class="pz-mod-tab" data-modtab="jar">JAR 模组</button>
+            </div>
+            <div class="pz-mod-batch-bar"><span id="modCount">已启用 3 / 共 5</span><span style="margin-left:auto">拖动可调整加载顺序</span></div>
+            <div class="pz-lua-mod-list" id="modList"></div>
+          </div>
+        </section>
+
+        <!-- 7. 设置 -->
+        <section class="pz-page" data-page="settings">
+          <div class="pz-resource-center">
+            <div class="pz-resource-center-sidebar">
+              <div class="pz-resource-center-sidebar-title">设置分类</div>
+              <div style="display:flex;flex-direction:column;gap:0.15rem">
+                <button class="pz-resource-center-sidebar-item" data-set="general">常规</button>
+                <button class="pz-resource-center-sidebar-item" data-set="console">控制台</button>
+                <button class="pz-resource-center-sidebar-item pz-resource-center-sidebar-item-active" data-set="downloader">下载器</button>
+              </div>
+            </div>
+            <div class="pz-resource-center-main">
+              <div class="pz-panel">
+                <div class="pz-panel-header">
+                  <div>
+                    <div class="pz-panel-title">下载器设置</div>
+                    <div class="pz-panel-subtitle">光影包与模组下载的默认目录、线程数</div>
+                  </div>
+                </div>
+                <div class="pz-body">
+                  <div class="pz-settings-form">
+                    <div class="pz-field"><span class="pz-field-label">下载地址</span><input class="pz-input" value="https://example.com/shader.zip" /></div>
+                    <div class="pz-field"><span class="pz-field-label">保存文件名</span><input class="pz-input" value="Complementary.zip" /></div>
+                    <div class="pz-field">
+                      <span class="pz-field-label">光影包保存目录</span>
+                      <div class="pz-row-inline"><input class="pz-input" style="flex:1" value="C:\Users\Public\Zomboid\Shaders" /><button class="pz-btn">浏览</button></div>
+                    </div>
+                    <div class="pz-field"><span class="pz-field-label">下载线程数</span><input class="pz-input" style="max-width:6rem" value="4" /><span class="pz-field-hint">1–16，越大越快但更容易被限速</span></div>
+                    <div class="pz-row-inline" style="margin-top:0.3rem">
+                      <button class="pz-btn pz-btn-primary" id="btnSaveSettings">保存设置</button>
+                      <button class="pz-btn">开始下载</button>
+                    </div>
+                    <div class="pz-row-inline" style="margin-top:0.6rem;gap:0.6rem">
+                      <div class="pz-switch is-on" id="swDeveloper"></div>
+                      <span class="pz-field-label">开发者模式（显示控制台与调试信息）</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 8. 结尾 -->
+        <section class="pz-page" data-page="outro">
+          <div class="pz-outro">
+            <div class="pz-outro-inner">
+              <div class="pz-outro-logo">PZM</div>
+              <div class="pz-outro-title">PZMANAGER</div>
+              <div class="pz-outro-sub">Project Zomboid 启动器 · 模组 / 光影 / 截图 / 创意工坊，一个程序搞定</div>
+              <div class="pz-outro-points">
+                <span class="pz-outro-point">一键启动与内存配置</span>
+                <span class="pz-outro-point">Lua + JAR 模组管理</span>
+                <span class="pz-outro-point">光影包直接下载</span>
+                <span class="pz-outro-point">截图与创意工坊</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- 截图预览弹层 -->
+    <div class="pz-modal-overlay" id="shotModal" hidden>
+      <div class="pz-modal">
+        <div class="pz-modal-preview" id="shotModalPreview"></div>
+        <div class="pz-modal-bar">
+          <span class="pz-shot-name" id="shotModalName">viewport_2024-05-01_21-14-08.png</span>
+          <div class="pz-row-inline">
+            <button class="pz-btn pz-btn-primary" id="btnCopyShot">复制到剪贴板</button>
+            <button class="pz-btn" id="btnCloseShot">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 光影包版本弹层（对应真实程序里 Portal 到 body 的那一层） -->
+    <div class="pz-resource-file-overlay" id="fileOverlay" hidden>
+      <div class="pz-resource-file-dialog" id="fileDialog">
+        <div class="pz-row-inline" style="justify-content: space-between; align-items: flex-start">
+          <div>
+            <div class="pz-panel-title" id="fileTitle" style="font-size:var(--pz-font-lg)">Complementary Shaders</div>
+            <div class="pz-panel-subtitle" id="fileMeta" style="font-size:var(--pz-font-xs)">Modrinth · 选择文件下载</div>
+            <div class="pz-panel-subtitle" id="fileStats" style="font-size:var(--pz-font-xs)">更新 2024/05/01 · 下载 2,481,903 · 作者 EminGT</div>
+          </div>
+          <button class="pz-btn pz-btn-ghost" id="btnCloseFile" aria-label="关闭">✕</button>
+        </div>
+        <div class="pz-resource-file-list" id="fileList"></div>
+      </div>
+    </div>
+
+    <div class="pz-toast-viewport" id="toastViewport"></div>
+    <div class="pz-cursor" id="cursor"><div class="pz-cursor-ring" id="cursorRing"></div></div>
+    <div class="pz-file-chip" id="fileChip" hidden>📦 Complementary_v5.2.zip</div>
+  </div>
+</div>
+
+<div class="pz-hud" id="hud">
+  <span class="pz-hud-scene" id="hudScene">1/8 启动页</span>
+  <span class="pz-hud-progress" id="hudProgress"></span>
+  <span class="pz-hud-keys"><b>空格</b> 暂停 · <b>R</b> 重播 · <b>1-8</b> 跳场景 · <b>H</b> 辅助条 · <b>C</b> 字幕 · <b>K</b> 点击高亮 · <b>F</b> 全屏</span>
+  <span class="pz-hud-pause" id="hudPause" hidden>已暂停</span>
+</div>
+<div class="pz-caption" id="caption"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const params = new URLSearchParams(location.search);
+  const SPEED = Math.max(0.25, Number(params.get("speed") || 1));
+  // still=1：跳过所有等待并禁用过渡/动画，直接把当前场景推到「结束态」，且不往下播。
+  // 用于抓封面图/缩略图，也让无头截图能验证真实的最终布局。
+  const STILL = params.get("still") === "1";
+
+  const stage = document.getElementById("stage");
+  const layout = document.getElementById("layout");
+  const nav = document.getElementById("nav");
+  const hud = document.getElementById("hud");
+  const hudScene = document.getElementById("hudScene");
+  const hudProgress = document.getElementById("hudProgress");
+  const hudPause = document.getElementById("hudPause");
+  const captionEl = document.getElementById("caption");
+  const cursor = document.getElementById("cursor");
+  const cursorRing = document.getElementById("cursorRing");
+
+  const state = {
+    scene: 0,
+    paused: false,
+    hud: params.get("hud") !== "0",
+    caption: params.get("caption") !== "0",
+    clickFx: params.get("cursor") !== "0",
+    scale: 1,
+  };
+  if (params.get("clean") === "1") {
+    state.hud = false;
+    state.caption = false;
+    state.clickFx = false;
+  }
+  if (STILL) {
+    // 静态帧默认是「干净封面帧」：辅助条与字幕收起，需要时用 hud=1 / caption=1 打开。
+    if (!params.has("hud")) state.hud = false;
+    if (!params.has("caption")) state.caption = false;
+    document.documentElement.classList.add("is-still");
+  }
+
+  /* ------------------------------------------------------------------ 缩放舞台 */
+  function fitStage() {
+    const s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+    state.scale = s;
+    stage.style.transform = `scale(${s})`;
+  }
+  window.addEventListener("resize", fitStage);
+  fitStage();
+
+  /* ------------------------------------------------------------------ 导航 */
+  const NAV_ITEMS = [
+    { value: "launch", label: "启动", icon: "play" },
+    { value: "overview", label: "支持库", icon: "library" },
+    { value: "shots", label: "截图管理", icon: "images" },
+    { value: "shaderpacks", label: "光影管理", icon: "sun-medium" },
+    { value: "workshop", label: "资源中心", icon: "package-open" },
+    { value: "mods", label: "模组管理", icon: "file-cog" },
+    { value: "settings", label: "设置", icon: "sliders-horizontal" },
+  ];
+  NAV_ITEMS.forEach((item) => {
+    const btn = document.createElement("button");
+    btn.className = "pz-side-nav-item";
+    btn.dataset.nav = item.value;
+    btn.innerHTML = `<span class="pz-side-nav-icon pz-side-nav-icon-${item.icon}"></span><span class="pz-side-nav-label">${item.label}</span>`;
+    nav.appendChild(btn);
+  });
+
+  function setNav(value) {
+    nav.querySelectorAll(".pz-side-nav-item").forEach((el) => {
+      el.classList.toggle("pz-side-nav-item-active", el.dataset.nav === value);
+    });
+  }
+
+  function showPage(page) {
+    document.querySelectorAll(".pz-page").forEach((el) => {
+      el.classList.toggle("is-active", el.dataset.page === page);
+    });
+    layout.classList.toggle("pz-app-layout-launch", page === "launch");
+    setNav(page);
+  }
+
+  /* ------------------------------------------------------------------ 数据 */
+  const STATS = [
+    { label: "游戏版本", value: "41.78.16", note: "Build 41 稳定版" },
+    { label: "安装路径", value: "Steam Library", note: "D:\\Steam\\steamapps\\common" },
+    { label: "本机内存", value: "32 GB", note: "已分配给游戏 8 GB" },
+    { label: "模组数量", value: "42 个", note: "Lua 27 · JAR 15" },
+  ];
+  const CHECKS = [
+    { text: "游戏本体", note: "已检测到", ok: true },
+    { text: "Viewpoint 框架", note: "已安装", ok: true },
+    { text: "Steam 创意工坊同步", note: "3 项待更新", ok: false },
+    { text: "Java 运行环境", note: "内置，无需单独安装", ok: true },
+  ];
+  const SHOTS = [
+    { name: "viewport_21-14-08.png", time: "05/01 21:14", cls: "" },
+    { name: "viewport_20-58-31.png", time: "05/01 20:58", cls: "pz-shot-thumb-2" },
+    { name: "viewport_19-02-44.png", time: "04/30 19:02", cls: "pz-shot-thumb-3" },
+    { name: "viewport_18-47-10.png", time: "04/30 18:47", cls: "" },
+    { name: "viewport_17-31-55.png", time: "04/29 17:31", cls: "pz-shot-thumb-2" },
+    { name: "viewport_16-20-03.png", time: "04/29 16:20", cls: "pz-shot-thumb-3" },
+    { name: "viewport_15-05-27.png", time: "04/28 15:05", cls: "" },
+    { name: "viewport_14-42-19.png", time: "04/28 14:42", cls: "pz-shot-thumb-2" },
+  ];
+  const SHADERS = [
+    { name: "Complementary_v5.2.zip", meta: "12.4 MB · 已导入" },
+    { name: "BSL_v8.2.04.zip", meta: "6.8 MB · 已导入" },
+    { name: "Photon_v1.1.zip", meta: "9.1 MB · 已导入" },
+  ];
+  const RESOURCES = [
+    { name: "Complementary Shaders - Reimagined", source: "Modrinth", tags: ["Optimization", "Fantasy"], desc: "经典全能光影：性能与画质平衡，支持 Iris / OptiFine。", downloads: "2,481,903", icon: "mc" },
+    { name: "BSL Shaders", source: "CurseForge", tags: ["Atmosphere", "Vanilla"], desc: "柔和的光照与体积云，低配也能跑出电影感。", downloads: "1,904,552", icon: "mc" },
+    { name: "Photon Shader", source: "Modrinth", tags: ["Realistic", "High-End"], desc: "面向高端显卡的写实光影，带光线追踪式反射。", downloads: "1,120,338", icon: "mc" },
+    { name: "Sildur's Vibrant Shaders", source: "CurseForge", tags: ["Vibrant", "Lite"], desc: "色彩鲜艳、配置档位多，从集成显卡到独显都能用。", downloads: "986,201", icon: "mc" },
+  ];
+  const FILES = [
+    { name: "ComplementaryReimagined_r5.2.zip", meta: "Release · 1.20.1、1.19.4 · 下载 812,441" },
+    { name: "ComplementaryReimagined_r5.1.1.zip", meta: "Release · 1.20.1 · 下载 233,908" },
+    { name: "ComplementaryUnbound_r5.2.zip", meta: "Release · 1.20.1 · 下载 190,772" },
+  ];
+  const MODS_LUA = [
+    { name: "ZombieBuddy", version: "1.4.2", state: "enabled", note: "智能队友与指令", detail: ["作者 Nihilist", "需要 Viewpoint", "最后更新 2024/04/22"] },
+    { name: "AutoMechanic", version: "3.1.0", state: "selected", note: "自动修车与加油", detail: ["作者 NoName", "独立运行", "最后更新 2024/03/11"] },
+    { name: "Filibuster Rhymes' Used Cars", version: "2.9.7", state: "enabled", note: "更多载具与改装件", detail: ["作者 Filibuster", "与 AutoMechanic 兼容", "最后更新 2024/02/28"] },
+    { name: "Brita's Weapon Pack", version: "4.0.3", state: "rejected", note: "检测到冲突：与 Vanilla Firearms 重叠", detail: ["冲突文件 12 个", "建议二选一", "最后更新 2024/01/19"] },
+    { name: "More Traits", version: "1.2.0", state: "off", note: "更多特质与职业", detail: ["作者 Braven", "存档兼容 B41", "最后更新 2023/12/02"] },
+  ];
+  const MODS_JAR = [
+    { name: "pz-vanilla-firearms.jar", version: "1.0.9", state: "enabled", note: "JAR 版枪械扩展", detail: ["体积 4.2 MB", "需要 Java 17", "最后更新 2024/03/30"] },
+    { name: "zombie-loot-overhaul.jar", version: "2.2.1", state: "off", note: "掉落表重做", detail: ["体积 1.1 MB", "与 More Traits 兼容", "最后更新 2024/02/14"] },
+  ];
+
+  /* ------------------------------------------------------------------ 渲染 */
+  function renderNavPage(page) {
+    if (page === "overview" && !document.getElementById("statGrid").childElementCount) {
+      STATS.forEach((s) => {
+        const el = document.createElement("div");
+        el.className = "pz-stat-card";
+        el.innerHTML = `<span class="pz-stat-label">${s.label}</span><span class="pz-stat-value">${s.value}</span><span class="pz-stat-note">${s.note}</span>`;
+        document.getElementById("statGrid").appendChild(el);
+      });
+      CHECKS.forEach((c, i) => {
+        const el = document.createElement("div");
+        el.className = "pz-check-row";
+        el.innerHTML = `<span class="pz-dot ${c.ok ? "is-ok" : "is-warn"}"></span><span>${c.text}</span><span>${c.note}</span>`;
+        el.style.opacity = "0";
+        document.getElementById("checkList").appendChild(el);
+        setTimeout(() => { el.style.transition = "opacity 240ms ease"; el.style.opacity = "1"; }, 60 * i);
+      });
+    }
+    if (page === "shots" && !document.getElementById("shotGrid").childElementCount) {
+      SHOTS.forEach((s, i) => {
+        const el = document.createElement("div");
+        el.className = "pz-shot-card";
+        el.dataset.index = String(i);
+        el.innerHTML = `<div class="pz-shot-thumb ${s.cls}"></div><div class="pz-shot-meta"><span class="pz-shot-name">${s.name}</span><span class="pz-shot-time">${s.time}</span></div>`;
+        document.getElementById("shotGrid").appendChild(el);
+      });
+    }
+    if (page === "shaderpacks" && !document.getElementById("shaderList").childElementCount) {
+      SHADERS.forEach((s) => {
+        const el = document.createElement("div");
+        el.className = "pz-list-row";
+        el.innerHTML = `<div><div class="pz-list-row-name">${s.name}</div><div class="pz-list-row-meta">${s.meta}</div></div>
+          <div class="pz-list-row-actions"><button class="pz-btn">删除</button></div>`;
+        document.getElementById("shaderList").appendChild(el);
+      });
+    }
+    if (page === "workshop" && !document.getElementById("resourceList").childElementCount) {
+      RESOURCES.forEach((r) => {
+        const el = document.createElement("div");
+        el.className = "pz-resource-item";
+        el.dataset.name = r.name;
+        el.innerHTML = `<div class="pz-resource-icon ${r.icon === "mc" ? "pz-resource-icon-mc" : ""}">MC</div>
+          <div style="min-width:0;flex:1">
+            <div class="pz-resource-title-row">
+              <span class="pz-resource-name">${r.name}</span>
+              <span class="pz-resource-tags">
+                <span class="pz-badge ${r.source === "Modrinth" ? "pz-badge-modrinth" : "pz-badge-curse"}">${r.source}</span>
+                ${r.tags.slice(0, 2).map((t) => `<span class="pz-badge pz-badge-tag">${t}</span>`).join("")}
+              </span>
+            </div>
+            <div class="pz-resource-desc">${r.desc}</div>
+            <div class="pz-resource-desc" style="color:var(--pz-text-subtle)">下载 ${r.downloads}</div>
+          </div>`;
+        document.getElementById("resourceList").appendChild(el);
+      });
+    }
+    if (page === "mods" && !document.getElementById("modList").childElementCount) {
+      renderMods("lua");
+    }
+  }
+
+  function renderMods(which) {
+    const list = document.getElementById("modList");
+    const data = which === "lua" ? MODS_LUA : MODS_JAR;
+    list.innerHTML = "";
+    data.forEach((m, i) => {
+      const el = document.createElement("div");
+      el.className = "pz-mod-row" + (m.state === "enabled" ? " is-enabled" : m.state === "selected" ? " is-selected" : m.state === "rejected" ? " is-rejected" : "");
+      el.dataset.mod = m.name;
+      el.innerHTML = `<div class="pz-mod-summary">
+          <span class="pz-mod-check">✓</span>
+          <span class="pz-mod-name">${m.name}</span>
+          <span class="pz-badge pz-badge-tag">${m.version}</span>
+          <span class="pz-mod-badges"><span class="pz-badge pz-badge-tag">${m.state === "rejected" ? "冲突" : m.state === "off" ? "未启用" : "已启用"}</span></span>
+          <span class="pz-mod-actions"><button class="pz-btn" data-expand="${i}">详情</button><button class="pz-btn pz-btn-ghost">⋯</button></span>
+        </div>
+        <div class="pz-jar-mod-details-shell"><div class="pz-jar-mod-details"><div class="pz-detail-grid">${m.detail.map((d) => `<span>${d}</span>`).join("")}</div></div></div>`;
+      list.appendChild(el);
+    });
+    document.getElementById("modCount").textContent = `已启用 ${data.filter((m) => m.state === "enabled").length} / 共 ${data.length}`;
+  }
+
+  /* ------------------------------------------------------------------ 工具：选中 / toast / 文本 */
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+  let runToken = 0;
+  function sleep(ms) {
+    const my = runToken;
+    const total = ms / SPEED;
+    return new Promise((resolve, reject) => {
+      // 静态帧：不等待，但保留 runToken 的中断语义（切场景时旧场景立刻退出）。
+      if (STILL) {
+        queueMicrotask(() => (my === runToken ? resolve() : reject(new Error("abort"))));
+        return;
+      }
+      let elapsed = 0;
+      let last = performance.now();
+      // 用 setTimeout 而不是 requestAnimationFrame 调度：录制时后台标签/无头截图都会
+      // 抑制 rAF，setTimeout 更可预测，虚拟时间快进（--virtual-time-budget）也能生效。
+      const tick = () => {
+        if (my !== runToken) return reject(new Error("abort"));
+        const now = performance.now();
+        if (!state.paused) elapsed += now - last;
+        last = now;
+        if (elapsed >= total) return resolve();
+        window.setTimeout(tick, 16);
+      };
+      window.setTimeout(tick, 16);
+    });
+  }
+
+  // 下一帧执行；静态帧里同步执行，免得 rAF 在无头/虚拟时间下不触发而卡住终态。
+  function afterFrame(fn) {
+    if (STILL) fn();
+    else requestAnimationFrame(fn);
+  }
+
+  function stagePoint(el) {
+    const r = el.getBoundingClientRect();
+    const s = stage.getBoundingClientRect();
+    const k = state.scale || 1;
+    return {
+      x: (r.left - s.left) / k + r.width / (2 * k),
+      y: (r.top - s.top) / k + r.height / (2 * k),
+    };
+  }
+
+  async function moveTo(el, ms = 420) {
+    if (!el) return;
+    const p = stagePoint(el);
+    cursor.style.transitionDuration = `${ms / SPEED}ms`;
+    cursor.style.transform = `translate(${p.x}px, ${p.y}px)`;
+    cursor.classList.add("is-visible");
+    await sleep(ms);
+  }
+
+  async function clickEl(el, ms = 460) {
+    await moveTo(el, ms);
+    if (state.clickFx) {
+      const p = stagePoint(el);
+      const ripple = document.createElement("div");
+      ripple.className = "pz-ripple";
+      ripple.style.left = `${p.x}px`;
+      ripple.style.top = `${p.y}px`;
+      stage.appendChild(ripple);
+      setTimeout(() => ripple.remove(), 700);
+      cursorRing.classList.remove("is-on");
+      void cursorRing.offsetWidth;
+      cursorRing.classList.add("is-on");
+      el.classList.add("is-tap");
+      setTimeout(() => el.classList.remove("is-tap"), 260);
+    }
+    await sleep(120);
+  }
+
+  async function typeInto(el, text, per = 26) {
+    el.textContent = "";
+    for (const ch of text) {
+      el.textContent += ch;
+      await sleep(per);
+    }
+  }
+
+  // 输入框要写 value，不能像文本节点那样拼 textContent。
+  async function typeValue(input, text, per = 42) {
+    input.value = "";
+    for (const ch of text) {
+      input.value += ch;
+      await sleep(per);
+    }
+  }
+
+  async function animateNumber(from, to, ms, onFrame) {
+    const steps = Math.max(1, Math.round(ms / 60));
+    for (let i = 0; i <= steps; i++) {
+      onFrame(from + ((to - from) * i) / steps);
+      await sleep(ms / steps);
+    }
+  }
+
+  function toast(message, kind = "success") {
+    const el = document.createElement("div");
+    el.className = `pz-toast is-${kind}`;
+    el.innerHTML = `<span class="pz-toast-indicator"></span><span class="pz-toast-message">${message}</span>`;
+    document.getElementById("toastViewport").appendChild(el);
+    setTimeout(() => {
+      el.classList.add("is-closing");
+      setTimeout(() => el.remove(), 240);
+    }, 2600);
+  }
+
+  function setCaption(text) {
+    captionEl.textContent = text;
+    captionEl.hidden = !state.caption;
+  }
+
+  /* ------------------------------------------- 场景共用状态。
+     正常播放与 still 静态帧都调用这几支：画面里出现的终态只有一份来源，
+     改一处两边（录像与封面图）一起变。 */
+  function setMemory(gb) {
+    const pct = ((gb - 2) / 30) * 100;
+    $("#memValue").textContent = `${Math.round(gb)} GB`;
+    $("#memRange").style.width = `${pct}%`;
+    $("#memThumb").style.left = `${pct}%`;
+  }
+
+  // 启动按钮左滑让位给「停止游戏进程」
+  function setLaunchRunning(on) {
+    $("#btnStart").classList.toggle("pz-launch-slide-left", on);
+    $("#launchIcons").classList.toggle("pz-launch-slide-left", on);
+    $("#btnStop").classList.toggle("is-in", on);
+  }
+
+  function setLaunchLog(line1, line2) {
+    $("#cmdText").classList.toggle("is-idle", !line1);
+    $("#cmdText").textContent = line1 || "> 等待启动…";
+    $("#cmdText2").classList.toggle("is-idle", !line2);
+    $("#cmdText2").textContent = line2 || "";
+  }
+
+  // 预览弹层里的背景直接从 CSS 的缩略图类上取，演示里不再抄第二份渐变色值。
+  function thumbBackground(cls) {
+    const probe = document.createElement("div");
+    probe.className = `pz-shot-thumb ${cls}`.trim();
+    probe.style.cssText = "position:absolute;top:0;left:-9999px;width:1px;height:1px";
+    document.body.appendChild(probe);
+    const bg = getComputedStyle(probe).backgroundImage;
+    probe.remove();
+    return bg;
+  }
+
+  function openShotModal(index) {
+    const shot = SHOTS[index];
+    $("#shotModalName").textContent = shot.name;
+    $("#shotModalPreview").style.backgroundImage = thumbBackground(shot.cls);
+    $("#shotModal").hidden = false;
+  }
+
+  // 资源中心的版本文件弹层：列表与标题都从这里出。
+  function openResourceDialog() {
+    $("#fileTitle").textContent = RESOURCES[0].name;
+    $("#fileStats").textContent = "更新 2024/05/01 · 下载 2,481,903 · 作者 EminGT";
+    $("#fileOverlay").hidden = false;
+    const list = $("#fileList");
+    list.innerHTML = "";
+    FILES.forEach((f) => {
+      const row = document.createElement("div");
+      row.className = "pz-resource-file-row";
+      row.innerHTML = `<div style="min-width:0"><div class="pz-list-row-name">${f.name}</div><div class="pz-list-row-meta">${f.meta}</div></div>
+        <button class="pz-btn pz-btn-primary" style="margin-left:auto">下载</button>`;
+      list.appendChild(row);
+    });
+  }
+
+  // 下载进度条：第一次调用创建，之后只更新宽度。
+  function showDownloadProgress(pct) {
+    let prog = $("#fileDialog .pz-download-progress");
+    if (!prog) {
+      prog = document.createElement("div");
+      prog.className = "pz-download-progress";
+      prog.innerHTML = "<span></span>";
+      $("#fileDialog").appendChild(prog);
+    }
+    prog.firstElementChild.style.width = `${pct}%`;
+    return prog;
+  }
+
+  /* ------------------------------------------------------------------ 场景 */
+  const SCENES = [
+    {
+      page: "launch",
+      title: "启动页",
+      caption: "账户、内存、创意工坊状态一屏搞定；一键启动，游戏窗口就绪后按钮自动让位给「停止」。",
+      async run(api) {
+        await api.sleep(700);
+        await api.moveTo($("#memSlider"), 520);
+        await api.animateNumber(4, 8, 900, setMemory);
+        await api.sleep(320);
+        await api.clickEl($("#btnStart"), 520);
+        setLaunchRunning(true);
+        setLaunchLog("> 正在启动 Project Zomboid…", "");
+        await api.typeInto($("#cmdText"), "> 正在启动 Project Zomboid…", 24);
+        await api.sleep(420);
+        setLaunchLog($("#cmdText").textContent, "> 游戏窗口已就绪 · PID 12345");
+        await api.typeInto($("#cmdText2"), "> 游戏窗口已就绪 · PID 12345", 24);
+        await api.sleep(900);
+        await api.clickEl($("#workshopToggle"), 480);
+        $("#workshopInfo").classList.add("is-open");
+        await api.sleep(1700);
+        $("#workshopInfo").classList.remove("is-open");
+        await api.clickEl($("#btnStop"), 420);
+        setLaunchRunning(false);
+        setLaunchLog("", "> 已停止 · 退出码 0");
+        await api.sleep(900);
+      },
+      // 封面帧取「运行中」这一刻（record 的终态是停止后复位，不适合当封面）
+      async still(api) {
+        setMemory(8);
+        setLaunchRunning(true);
+        setLaunchLog("> 正在启动 Project Zomboid…", "> 游戏窗口已就绪 · PID 12345");
+        $("#workshopInfo").classList.add("is-open");
+        await api.moveTo($("#btnStop"), 0);
+      },
+    },
+    {
+      page: "overview",
+      title: "支持库",
+      caption: "游戏本体、Viewpoint、创意工坊同步、运行环境，启动前一次性看清。",
+      async run(api) {
+        await api.sleep(900);
+        await api.moveTo($$(".pz-stat-card")[2] || $("#statGrid"), 480);
+        await api.sleep(400);
+        await api.clickEl($$(".pz-check-row")[2] || $("#checkList"), 480);
+        await api.sleep(600);
+        await api.moveTo($$(".pz-check-row")[3] || $("#checkList"), 420);
+        await api.sleep(1200);
+      },
+    },
+    {
+      page: "shots",
+      title: "截图管理",
+      caption: "浏览 Viewpoint 截图，点开即可预览、一键复制到剪贴板，不用再翻文件夹。",
+      async run(api) {
+        await api.sleep(800);
+        const card = $$(".pz-shot-card")[1];
+        await api.clickEl(card, 520);
+        openShotModal(1);
+        await api.sleep(900);
+        await api.clickEl($("#btnCopyShot"), 520);
+        toast("截图已复制到剪贴板");
+        await api.sleep(1400);
+        await api.clickEl($("#btnCloseShot"), 480);
+        $("#shotModal").hidden = true;
+        await api.sleep(700);
+      },
+      // 封面帧停在「预览弹层打开」：这是本页最有信息量的一帧
+      async still(api) {
+        openShotModal(1);
+        await api.moveTo($("#btnCopyShot"), 0);
+      },
+    },
+    {
+      page: "shaderpacks",
+      title: "光影管理",
+      caption: "把 ZIP 光影包拖进来就完成导入，落点、重名、删除都在这一页。",
+      async run(api) {
+        await api.sleep(700);
+        const dz = $("#dropzone");
+        const chip = $("#fileChip");
+        const chipFrom = stagePoint($$(".pz-page[data-page='shaderpacks'] .pz-panel-header .pz-btn")[0] || dz);
+        const dropAt = stagePoint(dz);
+        chip.hidden = false;
+        chip.style.transition = "none";
+        chip.style.transform = `translate(${chipFrom.x - 60}px, ${chipFrom.y - 10}px)`;
+        chip.style.opacity = "0";
+        void chip.offsetWidth;
+        chip.style.transition = "";
+        chip.style.transform = `translate(${chipFrom.x}px, ${chipFrom.y}px)`;
+        chip.style.opacity = "1";
+        await api.sleep(360);
+        dz.classList.add("is-hot");
+        chip.style.transform = `translate(${dropAt.x - 40}px, ${dropAt.y - 12}px)`;
+        await api.moveTo(dz, 620);
+        await api.sleep(360);
+        chip.style.opacity = "0";
+        dz.classList.remove("is-hot");
+        await api.sleep(240);
+        chip.hidden = true;
+        const row = document.createElement("div");
+        row.className = "pz-list-row";
+        row.style.opacity = "0";
+        row.innerHTML = `<div><div class="pz-list-row-name">Complementary_v5.2.zip</div><div class="pz-list-row-meta">12.4 MB · 刚刚导入</div></div>
+          <div class="pz-list-row-actions"><button class="pz-btn">删除</button></div>`;
+        $("#shaderList").prepend(row);
+        afterFrame(() => { row.style.transition = "opacity 260ms ease"; row.style.opacity = "1"; });
+        toast("已导入 1 个光影包：Complementary_v5.2.zip");
+        await api.sleep(1500);
+      },
+    },
+    {
+      page: "workshop",
+      title: "资源中心",
+      caption: "和启动器内置同源的 Minecraft 光影源：搜得到、看得到版本、点一下就下载。",
+      async run(api) {
+        await api.sleep(700);
+        await api.clickEl($("#srcSelect"), 480);
+        await api.sleep(500);
+        await api.clickEl($("#searchInput"), 420);
+        await api.typeValue($("#searchInput"), "Complementary", 42);
+        await api.sleep(320);
+        await api.clickEl($("#btnSearch"), 460);
+        $("#resultCount").textContent = "共 6 个资源";
+        await api.sleep(700);
+        const item = $$(".pz-resource-item")[0];
+        await api.clickEl(item, 520);
+        $("#fileOverlay").hidden = false;
+        $("#fileList").innerHTML = `<span style="color:var(--pz-text-muted);font-size:var(--pz-font-base)">正在读取版本文件…</span>`;
+        await api.sleep(900);
+        openResourceDialog();
+        await api.sleep(900);
+        const dl = $("#fileList").querySelector(".pz-btn-primary");
+        await api.clickEl(dl, 480);
+        const prog = showDownloadProgress(0);
+        await api.animateNumber(0, 72, 1200, showDownloadProgress);
+        toast("开始下载 ComplementaryReimagined_r5.2.zip");
+        await api.sleep(1000);
+        await api.clickEl($("#btnCloseFile"), 460);
+        $("#fileOverlay").hidden = true;
+        prog.remove();
+        await api.sleep(600);
+      },
+      // 封面帧停在「版本列表 + 下载进度 72%」
+      async still(api) {
+        $("#searchInput").value = "Complementary";
+        $("#resultCount").textContent = "共 6 个资源";
+        openResourceDialog();
+        showDownloadProgress(72);
+        await api.moveTo($(".pz-resource-file-row .pz-btn-primary"), 0);
+      },
+    },
+    {
+      page: "mods",
+      title: "模组管理",
+      caption: "Lua 与 JAR 模组集中管理：勾选、排序、冲突提示，展开详情也不丢状态色。",
+      async run(api) {
+        await api.sleep(800);
+        const rows = $$(".pz-mod-row");
+        await api.moveTo(rows[0], 460);
+        await api.sleep(300);
+        await api.clickEl(rows[1].querySelector(".pz-btn"), 480);
+        rows[1].classList.add("pz-jar-mod-row-expanded");
+        await api.sleep(900);
+        // 勾选「未启用」的第 5 行：这一步真的会改变状态（未启用 → 已选），
+        // 而不是去点亮一个本来就选中的行。
+        await api.clickEl(rows[4].querySelector(".pz-mod-check"), 420);
+        rows[4].classList.add("is-selected");
+        toast("已选中 More Traits");
+        await api.sleep(1200);
+        await api.clickEl(rows[3].querySelector(".pz-btn"), 480);
+        rows[3].classList.add("pz-jar-mod-row-expanded");
+        await api.sleep(1200);
+        await api.clickEl($(".pz-mod-tab[data-modtab='jar']"), 460);
+        $$(".pz-mod-tab").forEach((t) => t.classList.toggle("is-active", t.dataset.modtab === "jar"));
+        renderMods("jar");
+        await api.sleep(1300);
+      },
+      // 封面帧：三种状态同框（已启用 / 已选 / 冲突），外加两个展开详情
+      async still(api) {
+        renderMods("lua");
+        const rows = $$(".pz-mod-row");
+        rows[1].classList.add("pz-jar-mod-row-expanded");
+        rows[4].classList.add("is-selected");
+        rows[3].classList.add("pz-jar-mod-row-expanded");
+        await api.moveTo(rows[4].querySelector(".pz-mod-check"), 0);
+      },
+    },
+    {
+      page: "settings",
+      title: "设置",
+      caption: "下载器、控制台、开发者选项都收在这里，改完立即生效。",
+      async run(api) {
+        await api.sleep(800);
+        await api.moveTo($("#swDeveloper"), 460);
+        await api.clickEl($("#swDeveloper"), 380);
+        $("#swDeveloper").classList.toggle("is-on");
+        await api.sleep(600);
+        await api.clickEl($("#btnSaveSettings"), 480);
+        toast("设置已保存");
+        await api.sleep(1300);
+      },
+      // 封面帧保留「开发者模式已开」的默认状态
+      async still(api) {
+        $("#swDeveloper").classList.add("is-on");
+        await api.moveTo($("#btnSaveSettings"), 0);
+      },
+    },
+    {
+      page: "outro",
+      title: "结尾",
+      caption: "PZMANAGER · Project Zomboid 启动器",
+      async run(api) {
+        await api.sleep(2600);
+      },
+    },
+  ];
+
+  /* ------------------------------------------------------------------ HUD */
+  function renderHud() {
+    hud.hidden = !state.hud;
+    hudScene.textContent = `${state.scene + 1}/${SCENES.length} ${SCENES[state.scene].title}`;
+    hudProgress.innerHTML = SCENES.map((_, i) => `<span class="pz-hud-dot ${i === state.scene ? "is-active" : ""}"></span>`).join("");
+    hudPause.hidden = !state.paused;
+  }
+
+  /* ------------------------------------------------------------------ 播放 */
+  async function play(index) {
+    const scene = SCENES[index];
+    runToken++;
+    const my = runToken;
+    state.scene = index;
+    document.body.dataset.scene = String(index);
+    document.querySelectorAll(".pz-resource-file-overlay, .pz-modal-overlay").forEach((el) => { el.hidden = true; });
+    showPage(scene.page);
+    renderNavPage(scene.page);
+    setCaption(scene.caption);
+    renderHud();
+    const api = {
+      sleep,
+      moveTo,
+      clickEl,
+      typeInto,
+      typeValue,
+      animateNumber,
+      toast,
+      caption: setCaption,
+    };
+    try {
+      // 静态帧：有 still 钩子就用钩子摆出该场景最有信息量的一帧，没有就把 run 一步跑完
+      //（sleep 立即返回 + 过渡全禁用 = 直接落在终态）。
+      if (STILL && scene.still) await scene.still(api);
+      else await scene.run(api);
+    } catch (err) {
+      if (!(err && err.message === "abort")) throw err;
+      return;
+    }
+    if (my !== runToken) return;
+    if (STILL) return; // 静态帧停在当前场景，不自动播下一段
+    if (index + 1 < SCENES.length) {
+      await play(index + 1);
+    } else {
+      await sleep(800);
+      await play(0);
+    }
+  }
+
+  function setPaused(next) {
+    state.paused = next;
+    renderHud();
+    const anims = document.getAnimations ? document.getAnimations() : [];
+    anims.forEach((a) => { if (next) a.pause(); else a.play(); });
+  }
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === " ") {
+      event.preventDefault();
+      setPaused(!state.paused);
+    } else if (event.key === "r" || event.key === "R") {
+      setPaused(false);
+      play(0);
+    } else if (event.key === "h" || event.key === "H") {
+      state.hud = !state.hud;
+      renderHud();
+    } else if (event.key === "c" || event.key === "C") {
+      state.caption = !state.caption;
+      setCaption(captionEl.textContent);
+    } else if (event.key === "k" || event.key === "K") {
+      state.clickFx = !state.clickFx;
+    } else if (event.key === "f" || event.key === "F") {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen();
+    } else if (/^[1-8]$/.test(event.key)) {
+      const idx = Number(event.key) - 1;
+      if (idx < SCENES.length) {
+        setPaused(false);
+        play(idx);
+      }
+    }
+  });
+
+  /* ------------------------------------------------------------------ 启动 */
+  renderHud();
+  // ?scene=N 是「第 N 段」（1..8），和 HUD 的「3/8」、键盘 1-8 用同一套编号；
+  // 之前这里当 0 基下标用，?scene=7 会跑到第 8 段（结尾），等于跳场景直接失效。
+  const wanted = Number(params.get("scene"));
+  const startScene = Math.min(SCENES.length - 1, Math.max(0, (Number.isFinite(wanted) && wanted >= 1 ? Math.round(wanted) : 1) - 1));
+  play(startScene);
+})();
+</script>
+</body>
+</html>

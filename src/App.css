@@ -131,6 +131,10 @@
   /* 二次曲线（quad）：匀变速运动。入场用减速段，出场用加速段。 */
   --pz-ease-in-quad: cubic-bezier(0.11, 0, 0.5, 0);
   --pz-ease-out-quad: cubic-bezier(0.5, 1, 0.89, 1);
+  /* 页面切换滑动：两端慢、中段匀的 S 曲线。ease 会把位移挤进最初几帧——
+     内容还没显形就滑完了，慢放看就是纯淡入；这条曲线让滑动在透明度
+     尚可辨认的时段内持续可见。 */
+  --pz-ease-page-slide: cubic-bezier(0.45, 0, 0.3, 1);
 
 /* 状态语义色（列表行/提示的语义底色，与主题色浅底分开命名） */
   --pz-tint-danger: rgba(255, 245, 245, 0.64);
@@ -1378,17 +1382,17 @@ body {
   pointer-events: none;
   transition:
     opacity var(--pz-dur-base) ease,
-    transform var(--pz-dur-base) ease;
+    transform var(--pz-dur-base) var(--pz-ease-page-slide);
   opacity: 0;
-  transform: translateX(-32px);
+  transform: translateX(-48px);
 }
 
 .pz-page-transition-exiting[data-direction="backward"] {
-  transform: translateX(32px);
+  transform: translateX(48px);
 }
 
 .pz-page-transition-entering {
-  animation: pz-page-content-in-from-right var(--pz-dur-base) ease both;
+  animation: pz-page-content-in-from-right var(--pz-dur-base) var(--pz-ease-page-slide) both;
 }
 
 .pz-page-transition-entering[data-direction="backward"] {
@@ -1398,7 +1402,7 @@ body {
 @keyframes pz-page-content-in-from-right {
   from {
     opacity: 0;
-    transform: translateX(32px);
+    transform: translateX(48px);
   }
 
   to {
@@ -1410,7 +1414,7 @@ body {
 @keyframes pz-page-content-in-from-left {
   from {
     opacity: 0;
-    transform: translateX(-32px);
+    transform: translateX(-48px);
   }
 
   to {
@@ -1423,22 +1427,22 @@ body {
   pointer-events: none;
   transition:
     opacity var(--pz-dur-base) ease,
-    transform var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) var(--pz-ease-page-slide),
     background-color var(--pz-dur-base) ease,
     border-color var(--pz-dur-base) ease,
     box-shadow var(--pz-dur-slow) ease,
     border-radius var(--pz-dur-slow) ease,
     backdrop-filter var(--pz-dur-slow) ease;
   opacity: 0;
-  transform: translateX(-32px);
+  transform: translateX(-48px);
 }
 
 .pz-main-exiting[data-direction="backward"] {
-  transform: translateX(32px);
+  transform: translateX(48px);
 }
 
 .pz-main-entering {
-  animation: pz-main-slide-in-from-right var(--pz-dur-base) ease both;
+  animation: pz-main-slide-in-from-right var(--pz-dur-base) var(--pz-ease-page-slide) both;
 }
 
 .pz-main-entering[data-direction="backward"] {
@@ -1448,7 +1452,7 @@ body {
 @keyframes pz-main-slide-in-from-right {
   from {
     opacity: 0;
-    transform: translateX(32px);
+    transform: translateX(48px);
   }
 
   to {
@@ -1460,7 +1464,7 @@ body {
 @keyframes pz-main-slide-in-from-left {
   from {
     opacity: 0;
-    transform: translateX(-32px);
+    transform: translateX(-48px);
   }
 
   to {
@@ -1841,17 +1845,24 @@ body {
   grid-template-rows: 1fr;
 }
 
+/* 网格直接子项的 margin/border/padding 会被算进 0fr 轨道的最小外尺寸，
+   收起态的壳因此留下 ~15px 的空白占位、还吞掉行尾的点击（行的点击守卫
+   会忽略落在 .pz-jar-mod-details-shell 里的命中）——外观全部挪到内层
+   .pz-jar-mod-details-body，让直接子项保持零外尺寸，0fr 才真正收拢到 0。 */
 .pz-jar-mod-details {
   min-height: 0;
   overflow: hidden;
-  margin-top: 0.4rem;
-  padding: 0.5rem 0 0 0.25rem;
-  border-top: 1px solid var(--pz-line);
   opacity: 0;
   transform: translateY(-0.35rem);
   transition:
     opacity var(--pz-dur-slow) ease,
     transform var(--pz-dur-slower) var(--pz-ease-out);
+}
+
+.pz-jar-mod-details-body {
+  margin-top: 0.4rem;
+  padding: 0.5rem 0 0 0.25rem;
+  border-top: 1px solid var(--pz-line);
 }
 
 .pz-jar-mod-row-expanded .pz-jar-mod-details {
@@ -2367,6 +2378,7 @@ body {
 }
 
 .pz-resource-file-dialog {
+  position: relative;
   display: flex;
   width: min(720px, 100%);
   max-height: min(80vh, 700px);
@@ -2375,11 +2387,30 @@ body {
   padding: 1rem;
   border: 1px solid var(--pz-line-strong);
   border-radius: var(--pz-radius-md);
-  background: var(--pz-surface-float);
+  /* 启动页亚克力配方（§2.3）：半透明亚克力底 + 下方 ::after 的噪点颗粒 +
+     isolation 兜住 z-index: -1。这里用浅色档（--pz-surface-acrylic-light，同启动页
+     用户面板）：弹窗正文是浅色系文字，创意工坊详情还嵌着按浅色底渲染的 Steam 富文本，
+     暗色档会把它们全部压灭。浮层悬在任意页面之上，拿不到启动页的克隆壁纸层，
+     按浮层规范用真的背景模糊补"看透"，参数走菜单令牌（模糊度设置全局生效）。 */
+  background-color: var(--pz-surface-acrylic-light);
   box-shadow: var(--pz-shadow-dialog);
+  backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
+  isolation: isolate;
   animation: pz-resource-dialog-in var(--pz-dur-base) var(--pz-ease-out) both;
   /* 高度由 App.tsx 量出内容高度后写成内联值，这里只提供时长与缓动。 */
   transition: height var(--pz-dur-slow) var(--pz-ease-out);
+}
+
+/* 亚克力的磨砂颗粒层，与 .pz-launch-account::after 同一张 --pz-noise-image。 */
+.pz-resource-file-dialog::after {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: inherit;
+  background-image: var(--pz-noise-image);
+  opacity: 0.14;
+  pointer-events: none;
+  content: "";
 }
 
 .pz-resource-file-overlay.is-closing .pz-resource-file-dialog {

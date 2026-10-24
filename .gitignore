@@ -32,3 +32,6 @@ pzmanager-webview2
 # 工具误产生的垃圾目录（环境变量未展开、路径为 undefined 等）
 %SystemDrive%/
 undefined/
+
+# 本地样例模组目录
+pzmodsample/

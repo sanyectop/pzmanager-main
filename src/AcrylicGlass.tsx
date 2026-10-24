@@ -20,7 +20,7 @@ const SUPPORTS_PATH_CLIP =
 export type AcrylicGlassProps = {
   /** 当前背景图（自定义 / 创意工坊 / 内置）；四季壁纸时是 null。 */
   backgroundUrl: string | null;
-  /** 是否四季动态壁纸：它由 DOM 图层逐秒重绘，靠再渲染一次 <SeasonalWallpaper> 复制。 */
+  /** 是否四季壁纸：它由 DOM 图层逐秒重绘，靠再渲染一次 <SeasonalWallpaper> 复制。 */
   seasonal: boolean;
   effect: WallpaperEffect;
 };
@@ -57,12 +57,14 @@ function roundedRectPath(
   return parts.join(" ");
 }
 
-/** 取某个角的圆角半径；getComputedStyle 在多值（椭圆角）时给的是 "a b"，取第一个即可。 */
+/** 取某个角的圆角半径；getComputedStyle 在多值（椭圆角）时给的是 "a b"，取第一个即可。
+    注意横线归属：回调给每个大写字母补 "-"，前缀不能再写 "border-"，
+    否则拼出 "border--top-left-radius"（双横线）→ 查无此属性 → 圆角恒为 0。 */
 function cornerRadius(
   style: CSSStyleDeclaration,
   side: "TopLeft" | "TopRight" | "BottomRight" | "BottomLeft",
 ): number {
-  const property = `border-${side.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}-radius`;
+  const property = `border${side.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}-radius`;
   return Number.parseFloat(style.getPropertyValue(property)) || 0;
 }
 

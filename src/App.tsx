@@ -40,6 +40,8 @@ import {
 } from "./developerMode";
 import { FallbackImage } from "./FallbackImage";
 import { steamWorkshopUrl } from "./externalLinks";
+import { shaderpackSearchQueries } from "./shaderpackSearch";
+import appManifest from "../package.json";
 import { defaultLaunchArguments, joinLaunchArguments } from "./launchArgs";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import {
@@ -261,7 +263,7 @@ type StartupTiming = {
 type ActivePage = "launch" | "overview" | "shots" | "shaderpacks" | "workshop" | "mods" | "settings";
 type ModManagementPage = "lua" | "jar";
 type ResourceCenterPage = "workshop" | "shaderDownload" | "developerNews";
-type SettingsPage = "general" | "translator" | "console" | "downloader" | "modLoader" | "startup";
+type SettingsPage = "about" | "general" | "translator" | "console" | "downloader" | "modLoader" | "startup";
 
 type PreviewState = {
   name: string;
@@ -379,6 +381,12 @@ type ResourceItem = {
   resourceType: string;
 };
 
+/** 已安装光影包在资源中心搜到的图标：主地址（镜像）+ 官方源兜底。 */
+type ShaderpackIcon = {
+  url: string;
+  fallbackUrl: string | null;
+};
+
 type ResourceSearchResponse = {
   items: ResourceItem[];
   total: number;
@@ -493,10 +501,10 @@ type BackgroundEntry = {
     settings.json 的 backgroundPath 里存成 `builtin:<id>`（磁盘上没有对应文件）。 */
 type BuiltinBackground = { id: string; name: string; url: string };
 
-/** 内置「四季动态壁纸」：由 SeasonalWallpaper 每秒绘制，url 只用于菜单缩略图。 */
+/** 内置「四季壁纸」：由 SeasonalWallpaper 每秒绘制，url 只用于菜单缩略图。 */
 const BUILTIN_SEASONAL_ID = "seasonal";
 const BUILTIN_BACKGROUNDS: BuiltinBackground[] = [
-  { id: BUILTIN_SEASONAL_ID, name: "四季动态壁纸", url: "/backgrounds/4.jpg" },
+  { id: BUILTIN_SEASONAL_ID, name: "四季壁纸", url: "/backgrounds/4.jpg" },
 ];
 const BUILTIN_BACKGROUND_PREFIX = "builtin:";
 /** 旧版本的内置背景 id 是 default，读到它时当成四季壁纸。 */
@@ -587,26 +595,6 @@ function mimeTypeFor(name: string): string {
           : "image/png";
 }
 
-function shaderpackSearchQueries(fileName: string): string[] {
-  const fullName = fileName.replace(/\.zip$/i, "").trim();
-  if (!fullName) return [];
-  const isAsciiName = /^[A-Za-z0-9]+(?:[ _.-][A-Za-z0-9]+)*$/.test(fullName);
-  const tokenizedName = fullName
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .replace(/([a-z])([A-Z])/g, "$1 $2");
-  const words = [...new Set(
-    tokenizedName
-      .split(/[^A-Za-z0-9]+/)
-      .filter((token) => token.length > 0 && !/[A-Za-z]\d/.test(token))
-      .map((token) => token.match(/[A-Za-z]+/g)?.join("") ?? "")
-      .filter((token) => token.length > 0)
-  )];
-  const hasVersionToken = tokenizedName.split(/[^A-Za-z0-9]+/).some((token) => /[A-Za-z]\d/.test(token));
-  const queries = isAsciiName && !hasVersionToken ? [fullName] : [];
-  if (words.length > 1) queries.push(words.slice(0, 3).join(" "));
-  queries.push(...words);
-  return [...new Set(queries)].slice(0, 6);
-}
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -1457,9 +1445,6 @@ function ResourceDownloadBrowser({
             <Text color="gray.900" fontSize="lg" fontWeight="700">
               光影包下载
             </Text>
-            <Text color="gray.500" fontSize="sm" mt="1">
-              使用 SJMCL 同款 Minecraft 光影源，支持 CurseForge 与 Modrinth。
-            </Text>
           </Box>
           <HStack gap="2">
             <Button loading={loading} onClick={() => void loadResources()} size="sm" variant="outline">
@@ -2135,7 +2120,9 @@ function SupportOptionRow({
         </HStack>
       </Box>
       <Box aria-hidden={!expanded} className="pz-jar-mod-details-shell">
-        <Box className="pz-jar-mod-details">{children}</Box>
+        <Box className="pz-jar-mod-details">
+          <Box className="pz-jar-mod-details-body">{children}</Box>
+        </Box>
       </Box>
     </Box>
   );
@@ -2758,8 +2745,10 @@ function App() {
   const [jarModFilter, setJarModFilter] = useState<JarModFilter>("all");
   const [shots, setShots] = useState<ManagedDirectory | null>(null);
   const [shaderpacks, setShaderpacks] = useState<ManagedDirectory | null>(null);
-  const [shaderpackIcons, setShaderpackIcons] = useState<Record<string, string | null>>({});
+  const [shaderpackIcons, setShaderpackIcons] = useState<Record<string, ShaderpackIcon | null>>({});
   const [shaderpackSearchTerms, setShaderpackSearchTerms] = useState<Record<string, string | null>>({});
+  /** 图标图片两个地址都加载不出来、已经换 CurseForge 源重搜过的包，防止反复换源。 */
+  const shaderpackIconResourced = useRef<Set<string>>(new Set());
   const [steamAccountHidden, setSteamAccountHidden] = useState(false);
   const [workshopBackgroundInfoOpen, setWorkshopBackgroundInfoOpen] = useState(false);
   const [jarMods, setJarMods] = useState<ScannedJarMod[] | null>(null);
@@ -2783,8 +2772,8 @@ function App() {
     startKey: string;
     select: boolean;
     moved: boolean;
-    /** 划过的行 → 该行拖动前的选中状态与最近一次套用的状态；回移时用于恢复。 */
-    visited: Map<string, { original: boolean; applied: boolean }>;
+    /** 已被本次拖动改写过的行 → 该行拖动前的选中状态；划出选区时用于恢复。 */
+    originals: Map<string, boolean>;
   } | null>(null);
   const suppressRowClickRef = useRef(false);
   const [selectedJarModKeys, setSelectedJarModKeys] = useState<Set<string>>(new Set());
@@ -3107,36 +3096,14 @@ function App() {
 
     setNavActivePage(nextPage);
 
-    // 启动页是整页固定层（.pz-main-launch）：整页做 opacity/transform 入场时，
-    // 壁纸层和两块亚克力面板会先空一帧再补上，看起来就是"闪一下"。
-    // 所以切到启动页时只让旧页面滑出，启动页本身不做入场动画；离开启动页也直接换页。
-    // 面板原先靠 backdrop-filter 兜这层模糊（Chromium 在动画期间还会丢掉它），
-    // 现在已改成无模糊实现，但硬切的节奏保持不变。
-    if (nextPage === "launch" && activePage !== "launch") {
-      setPageTransitionMovesShell(true);
-      setPageTransitionDirection(
-        navigationItems.findIndex((item) => item.value === nextPage) >=
-          navigationItems.findIndex((item) => item.value === activePage)
-          ? "forward"
-          : "backward",
-      );
-      setPageTransitionPhase("exiting");
-      pageTransitionTimerRef.current = setTimeout(() => {
-        setActivePage("launch");
-        setPageTransitionPhase("idle");
-        pageTransitionTimerRef.current = null;
-      }, PAGE_TRANSITION_MS);
-      return;
-    }
-
-    if (activePage === "launch") {
-      setPageTransitionMovesShell(false);
-      setActivePage(nextPage);
-      setPageTransitionPhase("idle");
-      return;
-    }
-
-    setPageTransitionMovesShell(false);
+    // 启动页与普通页面的切换现在与普通页面之间完全同构：滑出 → 换页 → 滑入。
+    // 早期切到启动页只滑出、离开启动页直接硬切，是因为亚克力面板靠 backdrop-filter，
+    // 整页做 opacity/transform 动画期间会丢模糊、先空一帧；面板改成克隆壁纸 +
+    // clip-path 的无模糊实现后，这个限制已不存在，启动页也能完整参与过渡。
+    // 启动页是整页固定层（.pz-main-launch），所以这两类切换让 .pz-main 外壳一起动
+    // （movesShell）：正文 Stack 与外壳同曲线同位移，观感是整页滑动。
+    const isLaunchTransition = nextPage === "launch" || activePage === "launch";
+    setPageTransitionMovesShell(isLaunchTransition);
     setPageTransitionDirection(
       navigationItems.findIndex((item) => item.value === nextPage) >=
         navigationItems.findIndex((item) => item.value === activePage)
@@ -3291,16 +3258,6 @@ function App() {
     setExpandedLuaModKeys((current) => toggleSelection(current, luaModKey(mod)));
   }
 
-  function setRowSelected(kind: "lua" | "jar", key: string, selected: boolean) {
-    startTransition(() => {
-      if (kind === "lua") {
-        setSelectedLuaModKeys((current) => setSelectionForKeys(current, [key], selected));
-      } else {
-        setSelectedJarModKeys((current) => setSelectionForKeys(current, [key], selected));
-      }
-    });
-  }
-
   function beginRowDrag(kind: "lua" | "jar", key: string, selected: boolean) {
     suppressRowClickRef.current = false;
     rowDragRef.current = {
@@ -3308,31 +3265,64 @@ function App() {
       startKey: key,
       select: !selected,
       moved: false,
-      visited: new Map([[key, { original: selected, applied: selected }]]),
+      originals: new Map([[key, selected]]),
     };
   }
 
-  /** 拖动勾选：像 Windows 桌面框选一样，前移套用拖动方向（选中/取消），
-      回移到已划过的行则恢复该行拖动前的状态，再次前移又重新套用。 */
-  function extendRowDrag(kind: "lua" | "jar", key: string, selected: boolean) {
+  /** 拖动勾选：模拟 Windows 桌面框选。选区是"起始行 ↔ 当前行"的索引区间，
+      区间内所有行套用拖动方向（选中/取消），区间外的行一律恢复拖动前的状态——
+      所以回移时被划出选区的行即使光标没再碰到也会取消，快速甩动跳过的行也会被覆盖。 */
+  function extendRowDrag(kind: "lua" | "jar", key: string) {
     const drag = rowDragRef.current;
     if (!drag || drag.kind !== kind || (!drag.moved && key === drag.startKey)) return;
-    if (!drag.moved) {
-      drag.moved = true;
-      const startEntry = drag.visited.get(drag.startKey);
-      drag.visited.set(drag.startKey, { original: startEntry?.original ?? false, applied: drag.select });
-      setRowSelected(kind, drag.startKey, drag.select);
+    const order =
+      kind === "lua"
+        ? (filteredLuaMods ?? []).map(luaModKey)
+        : (filteredJarMods ?? []).map(jarModKey);
+    const startIndex = order.indexOf(drag.startKey);
+    const currentIndex = order.indexOf(key);
+    if (startIndex < 0 || currentIndex < 0) return;
+    drag.moved = true;
+    const inRange = new Set(
+      order.slice(Math.min(startIndex, currentIndex), Math.max(startIndex, currentIndex) + 1),
+    );
+    for (const rowKey of inRange) {
+      if (!drag.originals.has(rowKey)) {
+        drag.originals.set(
+          rowKey,
+          kind === "lua" ? selectedLuaModKeys.has(rowKey) : selectedJarModKeys.has(rowKey),
+        );
+      }
     }
-    const entry = drag.visited.get(key);
-    if (!entry) {
-      // 首次划过：闭包里的 selected 就是该行此刻的真实状态，记为"拖动前"。
-      drag.visited.set(key, { original: selected, applied: drag.select });
-      setRowSelected(kind, key, drag.select);
-      return;
-    }
-    const next = entry.applied === drag.select ? entry.original : drag.select;
-    drag.visited.set(key, { original: entry.original, applied: next });
-    setRowSelected(kind, key, next);
+    startTransition(() => {
+      if (kind === "lua") {
+        setSelectedLuaModKeys((current) => {
+          const next = new Set(current);
+          drag.originals.forEach((original, rowKey) => {
+            const target = inRange.has(rowKey) ? drag.select : original;
+            if (target) {
+              next.add(rowKey);
+            } else {
+              next.delete(rowKey);
+            }
+          });
+          return next;
+        });
+      } else {
+        setSelectedJarModKeys((current) => {
+          const next = new Set(current);
+          drag.originals.forEach((original, rowKey) => {
+            const target = inRange.has(rowKey) ? drag.select : original;
+            if (target) {
+              next.add(rowKey);
+            } else {
+              next.delete(rowKey);
+            }
+          });
+          return next;
+        });
+      }
+    });
   }
 
   function toggleLuaModSelection(mod: LuaModEntry, element?: HTMLElement) {
@@ -3602,18 +3592,11 @@ function App() {
   async function refreshMedia() {
     const lookupShaderpackIcons = async (files: ManagedFile[]) => {
       const entries = await Promise.all(files.map(async (file) => {
-        const searchQueries = shaderpackSearchQueries(file.name);
-        if (searchQueries.length === 0) return [file.name, null, null] as const;
+        const queries = shaderpackSearchQueries(file.name);
+        if (queries.length === 0) return [file.name, null, null] as const;
         try {
-          const search = (searchQuery: string) => invoke<ResourceSearchResponse>("fetch_shader_resources", { query: { resourceType: "shader", searchQuery, gameVersion: "All", selectedTag: "All", sortBy: "relevance", downloadSource: "Modrinth", page: 1, pageSize: 1 } });
-          let usedQuery = searchQueries[0];
-          let response = await search(usedQuery);
-          for (const fallbackQuery of searchQueries.slice(1)) {
-            if (response.items.length > 0) break;
-            usedQuery = fallbackQuery;
-            response = await search(usedQuery);
-          }
-          return [file.name, response.items[0]?.iconUrl || null, response.items.length > 0 ? usedQuery : null] as const;
+          const result = await searchShaderpackIcon(queries, "Modrinth");
+          return [file.name, result?.icon ?? null, result?.usedQuery ?? null] as const;
         } catch {
           return [file.name, null, null] as const;
         }
@@ -3621,6 +3604,7 @@ function App() {
       setShaderpackIcons(Object.fromEntries(entries.map(([name, icon]) => [name, icon])));
       setShaderpackSearchTerms(Object.fromEntries(entries.map(([name, , query]) => [name, query ?? null])));
     };
+
     setLoadingMedia(true);
     try {
       const [shotDirectory, shaderpackDirectory] = await Promise.all([
@@ -3631,11 +3615,58 @@ function App() {
       setShaderpacks(shaderpackDirectory);
       setShaderpackIcons({});
       setShaderpackSearchTerms({});
+      shaderpackIconResourced.current.clear();
       void lookupShaderpackIcons(shaderpackDirectory.files);
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setLoadingMedia(false);
+    }
+  }
+
+  /** 在指定下载源按候选搜索词找一个光影包图标（镜像主地址 + 官方源兜底）。 */
+  async function searchShaderpackIcon(
+    queries: string[],
+    downloadSource: "Modrinth" | "CurseForge",
+  ): Promise<{ icon: ShaderpackIcon; usedQuery: string } | null> {
+    const search = (searchQuery: string) =>
+      invoke<ResourceSearchResponse>("fetch_shader_resources", {
+        query: {
+          resourceType: "shader",
+          searchQuery,
+          gameVersion: "All",
+          selectedTag: "All",
+          sortBy: "relevance",
+          downloadSource,
+          page: 1,
+          pageSize: 1,
+        },
+      });
+    let usedQuery = queries[0];
+    let response = await search(usedQuery);
+    for (const fallbackQuery of queries.slice(1)) {
+      if (response.items.length > 0) break;
+      usedQuery = fallbackQuery;
+      response = await search(fallbackQuery);
+    }
+    const item = response.items[0];
+    if (!item?.iconUrl) return null;
+    return { icon: { url: item.iconUrl, fallbackUrl: item.iconFallbackUrl }, usedQuery };
+  }
+
+  /** 图标在镜像和官方源都加载不出来时，换 CurseForge 源重搜一次；搜不到就保持现状。 */
+  async function reSourceShaderpackIcon(name: string) {
+    if (shaderpackIconResourced.current.has(name)) return;
+    shaderpackIconResourced.current.add(name);
+    const queries = shaderpackSearchQueries(name);
+    if (queries.length === 0) return;
+    try {
+      const result = await searchShaderpackIcon(queries, "CurseForge");
+      if (result) {
+        setShaderpackIcons((prev) => ({ ...prev, [name]: result.icon }));
+      }
+    } catch {
+      // 换源搜索失败时保留现状（破图占位），不打断页面
     }
   }
 
@@ -5781,7 +5812,15 @@ function App() {
               gap="3"
             >
               <Box className="pz-resource-download-icon">
-                {shaderpackIcons[pack.name] ? <FallbackImage alt="" loading="lazy" src={shaderpackIcons[pack.name] ?? ""} /> : <Text>MC</Text>}
+                {shaderpackIcons[pack.name] ? (
+                  <FallbackImage
+                    alt=""
+                    fallbackSrc={shaderpackIcons[pack.name]?.fallbackUrl}
+                    loading="lazy"
+                    onFail={() => void reSourceShaderpackIcon(pack.name)}
+                    src={shaderpackIcons[pack.name]?.url ?? ""}
+                  />
+                ) : <Text>MC</Text>}
               </Box>
               <Box minW="0" flex="1">
                 <Text color="gray.800" fontSize="sm" fontWeight="600" overflowWrap="anywhere">
@@ -6457,7 +6496,7 @@ function App() {
     <Box className="pz-panel pz-translator-settings-panel">
       <Text color="gray.900" fontSize="lg" fontWeight="700">翻译器</Text>
       <Text color="gray.500" fontSize="sm" mt="1">
-        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（Google 优先，失败自动换用 Yandex）。
+        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（Google 优先，失败自动换用 MyMemory）。
       </Text>
 
       <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
@@ -6831,11 +6870,61 @@ function App() {
     </Box>
   );
 
+  const aboutSettingsContent = (
+    <Box className="pz-panel pz-about-panel">
+      <Text color="gray.900" fontSize="lg" fontWeight="700">关于</Text>
+      <Text color="gray.500" fontSize="sm" mt="1">
+        PZMANAGER 的版本与作者信息。
+      </Text>
+      <Box mt="4">
+        <HStack gap="2" wrap="wrap">
+          <Text color="gray.800" fontSize="md" fontWeight="800">PZMANAGER</Text>
+          <Badge colorPalette="blue" size="sm">v{appManifest.version}</Badge>
+        </HStack>
+        <Text color="gray.500" fontSize="sm" mt="2">
+          Project Zomboid（僵尸毁灭工程）的 Windows 桌面启动器 + 模组管理器：
+          整合创意工坊订阅、JAR 模组管理、内置翻译器与下载器，不修改游戏本体。
+        </Text>
+      </Box>
+      <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
+        <Text color="gray.800" fontSize="sm" fontWeight="700">作者</Text>
+        <HStack gap="3" mt="2" align="center">
+          <Avatar.Root colorPalette="blue" size="md">
+            <Avatar.Image src="/avatars/developer.png" alt="叁葉" />
+            <Avatar.Fallback name="叁葉" />
+          </Avatar.Root>
+          <Box>
+            <HStack gap="2" align="center">
+              <Text color="gray.600" fontSize="sm">叁葉</Text>
+              <Text color="gray.500" fontSize="xs">邮箱 / QQ：757739990@qq.com</Text>
+            </HStack>
+            <Text color="gray.500" fontSize="xs" mt="0.5">Project Zomboid Manager的开发者!</Text>
+          </Box>
+        </HStack>
+      </Box>
+      <Box mt="4">
+        <Text color="gray.800" fontSize="sm" fontWeight="700">项目仓库</Text>
+        <Text color="gray.400" fontSize="sm" mt="1">尚未上传，敬请期待。</Text>
+      </Box>
+    </Box>
+  );
+
   const settingsContent = (
     <Box className="pz-resource-center pz-settings-center">
       <Box as="nav" aria-label="设置分类" className="pz-resource-center-sidebar">
         <Text className="pz-resource-center-sidebar-title">设置分类</Text>
         <Stack gap="1">
+          <Button
+            aria-current={settingsPage === "about" ? "page" : undefined}
+            className={`pz-resource-center-sidebar-item ${
+              settingsPage === "about" ? "pz-resource-center-sidebar-item-active" : ""
+            }`}
+            onClick={() => setSettingsPage("about")}
+            size="sm"
+            variant="ghost"
+          >
+            关于
+          </Button>
           <Button
             aria-current={settingsPage === "general" ? "page" : undefined}
             className={`pz-resource-center-sidebar-item ${
@@ -6905,8 +6994,10 @@ function App() {
         </Stack>
       </Box>
       <Box className="pz-resource-center-main">
-        {settingsPage === "general"
-          ? generalSettingsContent
+        {settingsPage === "about"
+          ? aboutSettingsContent
+          : settingsPage === "general"
+            ? generalSettingsContent
           : settingsPage === "translator"
             ? translatorSettingsContent
             : settingsPage === "console"
@@ -7062,7 +7153,7 @@ function App() {
                   if (event.button !== 0 || isModRowInteractiveTarget(event.target)) return;
                   beginRowDrag("lua", key, selected);
                 }}
-                  onPointerEnter={() => extendRowDrag("lua", key, selected)}
+                  onPointerEnter={() => extendRowDrag("lua", key)}
                 role="checkbox"
                 tabIndex={0}
               >
@@ -7163,23 +7254,25 @@ function App() {
                 </Box>
                 <Box aria-hidden={!expanded} className="pz-jar-mod-details-shell">
                   <Box className="pz-jar-mod-details">
-                    <Text color="gray.600" fontSize="xs" overflowWrap="anywhere">ID：{mod.id}</Text>
-                    {developerMode && (
-                      <Text color="gray.500" fontSize="xs" mt="1" overflowWrap="anywhere">路径：{mod.path}</Text>
-                    )}
-                    <Text color="gray.500" fontSize="xs" mt="1">
-                      来源：{mod.source === "workshop" ? `创意工坊 ${mod.workshopId ?? ""}` : "本地"}
-                      {mod.hasCommon ? " · common" : ""}
-                      {mod.hasB42 ? " · B42" : " · 非 B42"}
-                    </Text>
-                    <Text color={mod.requires.length > 0 ? "gray.600" : "gray.500"} fontSize="xs" mt="1" overflowWrap="anywhere">
-                      前置模组：{mod.requires.length > 0 ? mod.requires.join("、") : "无"}
-                    </Text>
-                    <Text color="gray.500" fontSize="xs" mt="1">
-                      {mod.enabled
-                        ? `加载顺序：${mod.loadOrder ?? "-"}`
-                        : "勾选此模组后，可使用“启用选中”批量启用（仅 B42 模组）"}
-                    </Text>
+                    <Box className="pz-jar-mod-details-body">
+                      <Text color="gray.600" fontSize="xs" overflowWrap="anywhere">ID：{mod.id}</Text>
+                      {developerMode && (
+                        <Text color="gray.500" fontSize="xs" mt="1" overflowWrap="anywhere">路径：{mod.path}</Text>
+                      )}
+                      <Text color="gray.500" fontSize="xs" mt="1">
+                        来源：{mod.source === "workshop" ? `创意工坊 ${mod.workshopId ?? ""}` : "本地"}
+                        {mod.hasCommon ? " · common" : ""}
+                        {mod.hasB42 ? " · B42" : " · 非 B42"}
+                      </Text>
+                      <Text color={mod.requires.length > 0 ? "gray.600" : "gray.500"} fontSize="xs" mt="1" overflowWrap="anywhere">
+                        前置模组：{mod.requires.length > 0 ? mod.requires.join("、") : "无"}
+                      </Text>
+                      <Text color="gray.500" fontSize="xs" mt="1">
+                        {mod.enabled
+                          ? `加载顺序：${mod.loadOrder ?? "-"}`
+                          : "勾选此模组后，可使用“启用选中”批量启用（仅 B42 模组）"}
+                      </Text>
+                    </Box>
                   </Box>
                 </Box>
               </Box>
@@ -7357,7 +7450,7 @@ function App() {
                       if (event.button !== 0 || isModRowInteractiveTarget(event.target)) return;
                       beginRowDrag("jar", modKey, selected);
                     }}
-                    onPointerEnter={() => extendRowDrag("jar", modKey, selected)}
+                    onPointerEnter={() => extendRowDrag("jar", modKey)}
                     role="checkbox"
                     tabIndex={0}
                   >
@@ -7429,58 +7522,60 @@ function App() {
                     </Box>
                     <Box aria-hidden={!expanded} className="pz-jar-mod-details-shell">
                       <Box className="pz-jar-mod-details">
-                        {developerMode && (
-                          <>
-                            <Text color="gray.600" fontSize="xs" overflowWrap="anywhere">
-                              包：{mod.packageName}
-                            </Text>
-                            <Text color="gray.500" fontSize="xs" mt="1" overflowWrap="anywhere">
-                              JAR：{mod.jarPath}
-                            </Text>
-                            <Text color="gray.500" fontSize="xs" mt="1" overflowWrap="anywhere">
-                              配置：{mod.modInfoPath}
-                            </Text>
-                          </>
-                        )}
-                        <Text color={mod.disabled ? "red.600" : "green.700"} fontSize="xs" mt="1">
-                          {developerMode
-                            ? mod.disabled
-                              ? "已通过 mod.info.disabled 禁用，其他启动器不会读取此模组。"
-                              : "已启用 mod.info。"
-                            : mod.disabled || mod.decision === false
-                              ? "已禁用。"
-                              : mod.decision === true
-                                ? "已启用。"
-                                : "尚未启用。"}
-                        </Text>
-                        {developerMode && mod.patchClasses.length > 0 && (
-                          <Text color="gray.500" fontFamily="mono" fontSize="xs" mt="2" overflowWrap="anywhere">
-                            @Patch：{mod.patchClasses.join("、")}
-                          </Text>
-                        )}
-                        {developerMode && mod.patchMethods.length > 0 && (
-                          <Stack gap="1" mt="2">
-                            <Text color="gray.500" fontSize="xs">
-                              具体方法：
-                            </Text>
-                            {mod.patchMethods.map((patchMethod) => (
-                              <Text
-                                color="gray.500"
-                                fontFamily="mono"
-                                fontSize="xs"
-                                key={`${patchMethod.annotation}-${patchMethod.methodName}`}
-                                overflowWrap="anywhere"
-                              >
-                                @{patchMethod.annotation}：{patchMethod.methodName}
+                        <Box className="pz-jar-mod-details-body">
+                          {developerMode && (
+                            <>
+                              <Text color="gray.600" fontSize="xs" overflowWrap="anywhere">
+                                包：{mod.packageName}
                               </Text>
-                            ))}
-                          </Stack>
-                        )}
-                        {developerMode && mod.luaClasses.length > 0 && (
-                          <Text color="gray.500" fontFamily="mono" fontSize="xs" mt="2" overflowWrap="anywhere">
-                            @Exposer.LuaClass：{mod.luaClasses.join("、")}
+                              <Text color="gray.500" fontSize="xs" mt="1" overflowWrap="anywhere">
+                                JAR：{mod.jarPath}
+                              </Text>
+                              <Text color="gray.500" fontSize="xs" mt="1" overflowWrap="anywhere">
+                                配置：{mod.modInfoPath}
+                              </Text>
+                            </>
+                          )}
+                          <Text color={mod.disabled ? "red.600" : "green.700"} fontSize="xs" mt="1">
+                            {developerMode
+                              ? mod.disabled
+                                ? "已通过 mod.info.disabled 禁用，其他启动器不会读取此模组。"
+                                : "已启用 mod.info。"
+                              : mod.disabled || mod.decision === false
+                                ? "已禁用。"
+                                : mod.decision === true
+                                  ? "已启用。"
+                                  : "尚未启用。"}
                           </Text>
-                        )}
+                          {developerMode && mod.patchClasses.length > 0 && (
+                            <Text color="gray.500" fontFamily="mono" fontSize="xs" mt="2" overflowWrap="anywhere">
+                              @Patch：{mod.patchClasses.join("、")}
+                            </Text>
+                          )}
+                          {developerMode && mod.patchMethods.length > 0 && (
+                            <Stack gap="1" mt="2">
+                              <Text color="gray.500" fontSize="xs">
+                                具体方法：
+                              </Text>
+                              {mod.patchMethods.map((patchMethod) => (
+                                <Text
+                                  color="gray.500"
+                                  fontFamily="mono"
+                                  fontSize="xs"
+                                  key={`${patchMethod.annotation}-${patchMethod.methodName}`}
+                                  overflowWrap="anywhere"
+                                >
+                                  @{patchMethod.annotation}：{patchMethod.methodName}
+                                </Text>
+                              ))}
+                            </Stack>
+                          )}
+                          {developerMode && mod.luaClasses.length > 0 && (
+                            <Text color="gray.500" fontFamily="mono" fontSize="xs" mt="2" overflowWrap="anywhere">
+                              @Exposer.LuaClass：{mod.luaClasses.join("、")}
+                            </Text>
+                          )}
+                        </Box>
                       </Box>
                     </Box>
                   </Box>
@@ -7933,7 +8028,7 @@ async function translateInBatches(
 
 const newsEngineLabels: Record<string, string> = {
   google: "Google",
-  yandex: "Yandex",
+  mymemory: "MyMemory",
   none: "未翻译",
 };
 

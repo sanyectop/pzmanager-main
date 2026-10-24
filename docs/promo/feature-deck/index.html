@@ -1,0 +1,1010 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PZManager · 功能介绍</title>
+<style>
+  :root {
+    --bg: #070b12;
+    --panel: #0d141f;
+    --line: rgba(255, 255, 255, 0.1);
+    --text: #e9eefc;
+    --muted: #93a2ba;
+    --pink: #ff5c84;
+    --blue: #4aa3ff;
+    --radius: 18px;
+    /* 截图比例 = 应用的最小窗口尺寸（tauri.conf.json: minWidth 970 / minHeight 564） */
+    --shot-ratio: 970 / 564;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  body {
+    background:
+      radial-gradient(900px 520px at 78% 12%, rgba(74, 163, 255, 0.16), transparent 68%),
+      radial-gradient(760px 460px at 12% 88%, rgba(255, 92, 132, 0.12), transparent 70%),
+      var(--bg);
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* 16:9 舞台，按窗口等比缩放 */
+  #stage {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    width: 1600px;
+    height: 900px;
+    transform: translate(-50%, -50%) scale(var(--s, 1));
+    transform-origin: center center;
+  }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 64px 84px 56px;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(18px);
+    transition: opacity 420ms cubic-bezier(0.22, 1, 0.36, 1), transform 420ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 420ms;
+    pointer-events: none;
+  }
+
+  .slide.is-active {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition-delay: 0s;
+    pointer-events: auto;
+  }
+
+  .slide::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background:
+      linear-gradient(160deg, rgba(255, 255, 255, 0.045), transparent 42%),
+      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.028) 0 1px, transparent 1px 64px),
+      repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.028) 0 1px, transparent 1px 64px);
+    mask-image: radial-gradient(circle at 30% 20%, #000 0 34%, transparent 78%);
+  }
+
+  .eyebrow {
+    margin: 0 0 14px;
+    color: var(--pink);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+  }
+
+  h1, h2 { margin: 0; letter-spacing: -0.01em; }
+
+  h1 { font-size: 104px; line-height: 1; font-weight: 800; }
+  h2 { font-size: 46px; line-height: 1.15; font-weight: 760; }
+
+  .lead {
+    margin: 18px 0 0;
+    max-width: 720px;
+    color: var(--muted);
+    font-size: 21px;
+    line-height: 1.65;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 30px;
+  }
+
+  .chip {
+    padding: 7px 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.045);
+    color: #c9d5ea;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .chip--accent {
+    border-color: rgba(255, 92, 132, 0.45);
+    background: rgba(255, 92, 132, 0.12);
+    color: #ffd0dc;
+  }
+
+  /* ---------- 封面 ---------- */
+  .slide--cover { justify-content: center; }
+
+  .cover-mark {
+    display: grid;
+    width: 78px;
+    height: 78px;
+    place-items: center;
+    margin-bottom: 34px;
+    border-radius: 20px;
+    background: linear-gradient(150deg, #4aa3ff, #2b6cb0);
+    box-shadow: 0 18px 40px rgba(43, 108, 176, 0.45);
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+
+  .cover-art {
+    position: absolute;
+    right: 76px;
+    top: 50%;
+    width: 760px;
+    transform: translateY(-50%) rotate(-3.2deg);
+    pointer-events: none;
+  }
+
+  .cover-art::after {
+    content: "";
+    position: absolute;
+    inset: -12% -8% -18%;
+    z-index: -1;
+    background: radial-gradient(closest-side, rgba(255, 92, 132, 0.22), transparent 72%);
+    filter: blur(12px);
+  }
+
+  .cover-card {
+    aspect-ratio: var(--shot-ratio);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 20px;
+    box-shadow: 0 46px 90px rgba(0, 0, 0, 0.62), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    overflow: hidden;
+  }
+
+  .cover-card img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .cover-hint {
+    position: absolute;
+    left: 84px;
+    bottom: 56px;
+    color: #6f7f99;
+    font-size: 14px;
+    letter-spacing: 0.02em;
+  }
+
+  kbd {
+    padding: 2px 7px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #c9d5ea;
+    font: inherit;
+    font-size: 13px;
+  }
+
+  /* ---------- 通用版式 ---------- */
+  .slide-head { flex: 0 0 auto; }
+
+  .slide--split {
+    display: grid;
+    /* 截图按 1:1 附近显示（源图 970 宽），右栏给得比文字栏多，细节才看得清 */
+    grid-template-columns: 0.66fr 1.34fr;
+    grid-template-rows: auto 1fr;
+    gap: 28px 44px;
+    align-content: start;
+    padding-left: 76px;
+    padding-right: 76px;
+  }
+
+  .slide--split .slide-head { grid-column: 1; }
+
+  .slide--split .shot {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    /* 与「最小窗口截图」同比例：整窗都能看到，不裁标题栏也不裁面板 */
+    aspect-ratio: var(--shot-ratio);
+    align-self: center;
+  }
+
+  .bullets {
+    display: grid;
+    gap: 14px;
+    margin: 26px 0 0;
+    padding: 0;
+    list-style: none;
+    align-self: start;
+  }
+
+  .bullets li {
+    position: relative;
+    padding-left: 26px;
+    color: #c3cfe4;
+    font-size: 18px;
+    line-height: 1.6;
+  }
+
+  .bullets li::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 0.62em;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--blue);
+    box-shadow: 0 0 0 4px rgba(74, 163, 255, 0.16);
+  }
+
+  .bullets li strong { color: var(--text); font-weight: 700; }
+
+  /* ---------- 三栏卡片 ---------- */
+  .slide--cards {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  .slide--cards .cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 26px;
+    align-self: center;
+    margin-top: 12px;
+  }
+
+  .card {
+    padding: 30px 28px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
+    box-shadow: 0 20px 44px rgba(0, 0, 0, 0.32);
+  }
+
+  .card h3 { margin: 0 0 12px; font-size: 24px; font-weight: 740; }
+
+  .card p { margin: 0; color: var(--muted); font-size: 16.5px; line-height: 1.7; }
+
+  .card .tag {
+    display: inline-block;
+    margin-bottom: 16px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(74, 163, 255, 0.14);
+    color: #9fc9ff;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+  }
+
+  /* ---------- 截图框（可拖入替换） ---------- */
+  .shot {
+    position: relative;
+    display: block;
+    margin: 0;
+    min-height: 0;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: var(--radius);
+    background: linear-gradient(180deg, #111927, #0b1119);
+    box-shadow: 0 30px 70px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+    cursor: pointer;
+    outline: none;
+  }
+
+  .shot:focus-visible { box-shadow: 0 0 0 3px rgba(74, 163, 255, 0.5), 0 30px 70px rgba(0, 0, 0, 0.5); }
+
+  .shot-img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .shot[data-fit="contain"] .shot-img { object-fit: contain; background: #0b1119; }
+
+  .shot.is-empty .shot-img { display: none; }
+
+  .shot-empty {
+    position: absolute;
+    inset: 0;
+    display: none;
+    place-content: center;
+    justify-items: center;
+    gap: 10px;
+    padding: 24px;
+    border: 1px dashed rgba(255, 255, 255, 0.18);
+    border-radius: inherit;
+    color: #7f8ea6;
+    text-align: center;
+  }
+
+  .shot.is-empty .shot-empty { display: grid; }
+
+  .shot-empty strong { color: #c9d5ea; font-size: 18px; font-weight: 700; }
+
+  .shot-empty span { font-size: 14px; line-height: 1.6; max-width: 380px; }
+
+  .shot-empty .plus {
+    display: grid;
+    width: 54px;
+    height: 54px;
+    place-items: center;
+    margin-bottom: 6px;
+    border-radius: 50%;
+    background: rgba(74, 163, 255, 0.12);
+    color: #8fc0ff;
+    font-size: 26px;
+    font-weight: 300;
+  }
+
+  .shot-hint {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: rgba(6, 10, 16, 0.78);
+    color: #b9c7db;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity 180ms ease;
+    pointer-events: none;
+  }
+
+  .shot:hover .shot-hint, .shot:focus-visible .shot-hint { opacity: 1; }
+
+  .shot.is-dragging { border-color: rgba(74, 163, 255, 0.7); box-shadow: 0 0 0 3px rgba(74, 163, 255, 0.35); }
+
+  .caption {
+    margin: 14px 2px 0;
+    color: #7f8ea6;
+    font-size: 14px;
+    letter-spacing: 0.01em;
+  }
+
+  /* ---------- HUD ---------- */
+  .hud {
+    position: fixed;
+    right: 22px;
+    bottom: 18px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #8a99b0;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .hud button {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #c9d5ea;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .hud button:hover { background: rgba(255, 255, 255, 0.1); }
+
+  .hud button:disabled { opacity: 0.35; cursor: default; }
+
+  .progress {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 20;
+    height: 3px;
+    background: linear-gradient(90deg, var(--blue), var(--pink));
+    transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* ---------- 帮助 / toast ---------- */
+  .help {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: grid;
+    place-items: center;
+    background: rgba(5, 8, 13, 0.78);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 220ms ease, visibility 0s linear 220ms;
+  }
+
+  .help.is-open { opacity: 1; visibility: visible; transition-delay: 0s; }
+
+  .help-card {
+    width: min(620px, calc(100vw - 48px));
+    padding: 34px 38px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: #0d141f;
+    box-shadow: 0 40px 90px rgba(0, 0, 0, 0.6);
+  }
+
+  .help-card h3 { margin: 0 0 18px; font-size: 20px; }
+
+  .help-card dl { display: grid; grid-template-columns: 118px 1fr; gap: 12px 18px; margin: 0; }
+  .help-card dt { color: #9fb0c9; font-size: 14px; }
+  .help-card dd { margin: 0; color: #d7e1f2; font-size: 14px; line-height: 1.5; }
+
+  .help-card p { margin: 20px 0 0; color: #7f8ea6; font-size: 13px; line-height: 1.7; }
+
+  #toast {
+    position: fixed;
+    left: 50%;
+    bottom: 30px;
+    z-index: 40;
+    padding: 11px 18px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgba(13, 20, 31, 0.96);
+    color: #dbe5f5;
+    font-size: 14px;
+    opacity: 0;
+    transform: translate(-50%, 10px);
+    transition: opacity 200ms ease, transform 200ms ease;
+    pointer-events: none;
+  }
+
+  #toast.is-open { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ---------- 打印 / 导出 PDF ---------- */
+  @media print {
+    html, body { overflow: visible; background: #070b12; }
+    #stage { position: static; width: 1600px; height: auto; transform: none !important; }
+    .slide {
+      position: relative;
+      width: 1600px;
+      height: 900px;
+      opacity: 1 !important;
+      visibility: visible !important;
+      transform: none !important;
+      page-break-after: always;
+      break-after: page;
+    }
+    .hud, .help, .shot-hint, #toast, .progress { display: none !important; }
+    @page { size: 1600px 900px; margin: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+
+<div id="stage">
+  <!-- 1. 封面 -->
+  <section class="slide slide--cover is-active" aria-label="封面">
+    <div class="cover-art" aria-hidden="true">
+      <div class="cover-card">
+        <img src="shots/02-menus.jpg" alt="">
+      </div>
+    </div>
+    <div class="cover-mark">PZM</div>
+    <p class="eyebrow">Project Zomboid · Launcher &amp; Mod Manager</p>
+    <h1>PZMANAGER</h1>
+    <p class="lead">把启动、模组、资源与截图，收进一个窗口。</p>
+    <div class="meta">
+      <span class="chip chip--accent">Windows x64</span>
+      <span class="chip">Tauri 2</span>
+      <span class="chip">Rust + React</span>
+      <span class="chip">无 Electron</span>
+      <span class="chip">单文件安装</span>
+    </div>
+    <p class="cover-hint"><kbd>←</kbd> <kbd>→</kbd> 翻页 · <kbd>F</kbd> 全屏 · 任意画面可点击或拖入截图</p>
+  </section>
+
+  <!-- 2. 启动页 -->
+  <section class="slide slide--split" aria-label="启动页">
+    <div class="slide-head">
+      <p class="eyebrow">Launch</p>
+      <h2>一眼启动</h2>
+      <p class="lead">壁纸、账户、内存、参数都在这一屏，不用翻设置。</p>
+    </div>
+    <ul class="bullets">
+      <li><strong>Steam 账户</strong>自动识别，账号可一键遮罩。</li>
+      <li><strong>内存上限</strong>滑块带推荐线，拖到多少写进启动配置。</li>
+      <li><strong>启动参数</strong>逐条增删，按顺序拼接。</li>
+      <li><strong>启动 / 停止</strong>一键切换，底部显示本次启动耗时。</li>
+    </ul>
+    <figure class="shot" data-shot="launch" data-fit="contain">
+      <img class="shot-img" src="shots/01-launch.jpg" alt="启动页">
+      <div class="shot-empty">
+        <span class="plus">+</span>
+        <strong>01-launch.jpg</strong>
+        <span>启动页整窗截图 · 建议 970×564（应用最小窗口）</span>
+      </div>
+      <div class="shot-hint">点击 / 拖入图片可替换</div>
+    </figure>
+  </section>
+
+  <!-- 3. 外观 / 亚克力 -->
+  <section class="slide slide--split" aria-label="外观">
+    <div class="slide-head">
+      <p class="eyebrow">Look &amp; Feel</p>
+      <h2>看得清，也调得动</h2>
+      <p class="lead">菜单与弹层是带真背景模糊的亚克力：半透明底 + 细颗粒 + 顶边高光。</p>
+    </div>
+    <ul class="bullets">
+      <li><strong>多级子菜单</strong>同一套材质，不会一层一个样。</li>
+      <li><strong>模糊度 0–200%</strong>：面板、菜单、弹层、标题栏一起变。</li>
+      <li><strong>字体对比度 0–100%</strong>：背景再花也能把字压清楚。</li>
+      <li><strong>四季动态壁纸</strong>：随时辰与季节换光，也能手动固定。</li>
+    </ul>
+    <figure class="shot" data-shot="menus" data-fit="contain">
+      <img class="shot-img" src="shots/02-menus.jpg" alt="启动设置与背景菜单">
+      <div class="shot-empty">
+        <span class="plus">+</span>
+        <strong>02-menus.jpg</strong>
+        <span>打开菜单 / 弹层的整窗截图 · 建议 970×564（最小窗口）</span>
+      </div>
+      <div class="shot-hint">点击 / 拖入图片可替换</div>
+    </figure>
+  </section>
+
+  <!-- 4. 模组管理 -->
+  <section class="slide slide--split" aria-label="模组管理">
+    <div class="slide-head">
+      <p class="eyebrow">Mods</p>
+      <h2>模组管理</h2>
+      <ul class="bullets">
+        <li><strong>JAR / Lua 两个列表</strong>，行内勾选即启用，不必进游戏试。</li>
+        <li><strong>批量操作</strong>：全选、反选、批量启停，结果可直接存成预设。</li>
+        <li><strong>冲突与依赖</strong>：JAR 冲突检测、缺失依赖提示，细节在开发者模式展开。</li>
+        <li><strong>休眠模组</strong>：不想删又不想加载的，挂起即可。</li>
+      </ul>
+    </div>
+    <figure class="shot" data-shot="mods" data-fit="contain">
+      <img class="shot-img" src="shots/04-mods.jpg" alt="模组管理">
+      <div class="shot-empty">
+        <span class="plus">+</span>
+        <strong>04-mods.jpg</strong>
+        <span>模组管理页（JAR 或 Lua 列表）· 建议 970×564（最小窗口）</span>
+      </div>
+      <div class="shot-hint">点击 / 拖入图片可替换</div>
+    </figure>
+  </section>
+
+  <!-- 5. 资源 / 光影 -->
+  <section class="slide slide--split" aria-label="光影与资源">
+    <div class="slide-head">
+      <p class="eyebrow">Shaders &amp; Resources</p>
+      <h2>光影与资源</h2>
+      <ul class="bullets">
+        <li><strong>Modrinth 光影包</strong>：搜索、筛选、直接下载。</li>
+        <li><strong>多线程下载</strong>，进度进后台任务中心，不挡你操作。</li>
+        <li><strong>一键落位</strong>到 Viewpoint 的光影目录，省掉手动解压。</li>
+        <li><strong>自定义下载</strong>：任意链接、并行线程数、保存目录。</li>
+      </ul>
+    </div>
+    <figure class="shot" data-shot="resources" data-fit="contain">
+      <img class="shot-img" src="shots/05-resources.jpg" alt="光影下载">
+      <div class="shot-empty">
+        <span class="plus">+</span>
+        <strong>05-resources.jpg</strong>
+        <span>光影 / 资源中心页面 · 建议 970×564（最小窗口）</span>
+      </div>
+      <div class="shot-hint">点击 / 拖入图片可替换</div>
+    </figure>
+  </section>
+
+  <!-- 6. 创意工坊 -->
+  <section class="slide slide--split" aria-label="创意工坊">
+    <div class="slide-head">
+      <p class="eyebrow">Workshop</p>
+      <h2>创意工坊</h2>
+      <ul class="bullets">
+        <li><strong>标签包含 / 排除</strong>、排序与时间范围，筛出真正想要的那批。</li>
+        <li><strong>详情在窗口内打开</strong>，正文可按设置的语言翻译。</li>
+        <li><strong>工坊背景</strong>：看中的壁纸可以直接设为启动页背景。</li>
+        <li><strong>右键菜单</strong>：在 Steam 打开，或在窗口内看详情。</li>
+      </ul>
+    </div>
+    <figure class="shot" data-shot="workshop" data-fit="contain">
+      <img class="shot-img" src="shots/06-workshop.jpg" alt="创意工坊">
+      <div class="shot-empty">
+        <span class="plus">+</span>
+        <strong>06-workshop.jpg</strong>
+        <span>创意工坊列表或详情 · 建议 970×564（最小窗口）</span>
+      </div>
+      <div class="shot-hint">点击 / 拖入图片可替换</div>
+    </figure>
+  </section>
+
+  <!-- 7. 截图管理 -->
+  <section class="slide slide--split" aria-label="截图管理">
+    <div class="slide-head">
+      <p class="eyebrow">Screenshots</p>
+      <h2>截图管理</h2>
+      <ul class="bullets">
+        <li><strong>扫描 Viewpoint 截图目录</strong>，缩略图直接铺开。</li>
+        <li><strong>单击预览</strong>，大图不挤列表。</li>
+        <li><strong>一键复制</strong>到剪贴板，发群里不用找文件夹。</li>
+      </ul>
+    </div>
+    <figure class="shot" data-shot="shots" data-fit="contain">
+      <img class="shot-img" src="shots/07-shots.jpg" alt="截图管理">
+      <div class="shot-empty">
+        <span class="plus">+</span>
+        <strong>07-shots.jpg</strong>
+        <span>截图管理页 · 建议 970×564（最小窗口）</span>
+      </div>
+      <div class="shot-hint">点击 / 拖入图片可替换</div>
+    </figure>
+  </section>
+
+  <!-- 8. 设置 -->
+  <section class="slide slide--split" aria-label="设置">
+    <div class="slide-head">
+      <p class="eyebrow">Settings</p>
+      <h2>该调的都能调</h2>
+      <ul class="bullets">
+        <li><strong>通用</strong>：开发者模式、翻译语言、字体对比度、模糊度。</li>
+        <li><strong>翻译器</strong>：自建文本翻译，Google 优先、Yandex 兜底。</li>
+        <li><strong>控制台</strong>：覆盖层会话状态与本次运行的通知记录。</li>
+        <li><strong>启动</strong>：极速启动、静默内存清理、加载器方案。</li>
+      </ul>
+    </div>
+    <figure class="shot" data-shot="settings" data-fit="contain">
+      <img class="shot-img" src="shots/03-settings.jpg" alt="设置 · 通用">
+      <div class="shot-empty">
+        <span class="plus">+</span>
+        <strong>03-settings.jpg</strong>
+        <span>设置 › 通用（对比度 / 模糊度）· 建议 970×564（最小窗口）</span>
+      </div>
+      <div class="shot-hint">点击 / 拖入图片可替换</div>
+    </figure>
+  </section>
+
+  <!-- 9. 技术底座 -->
+  <section class="slide slide--cards" aria-label="技术底座">
+    <div class="slide-head">
+      <p class="eyebrow">Under the hood</p>
+      <h2>轻，但有底座</h2>
+      <p class="lead">没有 Electron。壳是 Tauri 2，重活都在 Rust 侧；需要动游戏的地方才下场。</p>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <span class="tag">SHELL</span>
+        <h3>Tauri 2 + Rust</h3>
+        <p>原生窗口、无边框自绘标题栏，安装包和常驻内存都远小于同类工具；前端仍是熟悉的 React。</p>
+      </article>
+      <article class="card">
+        <span class="tag">OVERLAY</span>
+        <h3>覆盖层注入</h3>
+        <p>Rust 侧注入 DLL（MinHook + JNI），把会话状态、加载进度叠在游戏窗口里，不必切出来看。</p>
+      </article>
+      <article class="card">
+        <span class="tag">FAST LAUNCH</span>
+        <h3>极速启动（实验性）</h3>
+        <p>把模组与补丁清单缓存下来，短路 ZombieBuddy 的 ClassGraph 扫描；任何异常都自动回退原生扫描。</p>
+      </article>
+    </div>
+    <p class="caption">仅 Windows x64 · 启动、模组、资源、截图与设置共用一套无边框窗口</p>
+  </section>
+
+  <!-- 10. 收尾 -->
+  <section class="slide slide--cover" aria-label="结尾">
+    <p class="eyebrow">Ready</p>
+    <h1 style="font-size: 82px;">打开它，<br>然后启动游戏。</h1>
+    <p class="lead">这一页 PPT 本身就是个网页：任意画面点一下或把截图拖进来就能替换，按 <kbd>E</kbd> 导出成单文件 HTML 发给别人。</p>
+    <div class="meta">
+      <span class="chip chip--accent">PZManager</span>
+      <span class="chip">功能介绍</span>
+      <span class="chip">v0.1.0</span>
+    </div>
+    <p class="cover-hint"><kbd>H</kbd> 查看全部快捷键 · <kbd>E</kbd> 导出单文件 HTML</p>
+  </section>
+</div>
+
+<div class="hud">
+  <button id="prev" title="上一页（←）" aria-label="上一页">‹</button>
+  <span id="counter">1 / 10</span>
+  <button id="next" title="下一页（→）" aria-label="下一页">›</button>
+  <button id="export" title="导出单文件 HTML（E）" aria-label="导出单文件 HTML">⤓</button>
+  <button id="helpBtn" title="快捷键（H）" aria-label="快捷键">?</button>
+</div>
+
+<div class="help" id="help" role="dialog" aria-label="快捷键">
+  <div class="help-card">
+    <h3>快捷键</h3>
+    <dl>
+      <dt>← → / 空格</dt><dd>上一页 / 下一页（也可以点右下角按钮）</dd>
+      <dt>Home / End</dt><dd>跳到第一页 / 最后一页</dd>
+      <dt>F</dt><dd>全屏演示（再按一次退出）</dd>
+      <dt>E</dt><dd>导出成单文件 HTML（拖入的截图会内联进去）</dd>
+      <dt>H / Esc</dt><dd>打开 / 关闭这个面板</dd>
+      <dt>截图</dt><dd>点画框选文件，或直接把图片拖到画框里</dd>
+    </dl>
+    <p>想换成自己截的图：打开 PZManager，按 <kbd>Win + Shift + S</kbd> 或 <kbd>Alt + PrtScn</kbd> 截图，保存成 PNG，拖到对应画框即可。文件名不必和示例一致。</p>
+  </div>
+</div>
+
+<input type="file" id="picker" accept="image/*" hidden>
+<div id="toast" role="status"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var slides = Array.prototype.slice.call(document.querySelectorAll(".slide"));
+  var current = 0;
+  var stage = document.getElementById("stage");
+  var counter = document.getElementById("counter");
+  var progress = document.getElementById("progress");
+  var prevBtn = document.getElementById("prev");
+  var nextBtn = document.getElementById("next");
+  var help = document.getElementById("help");
+  var toastEl = document.getElementById("toast");
+  var picker = document.getElementById("picker");
+  var pendingShot = null;
+  var toastTimer = null;
+
+  /** 支持 #3 这种地址，方便直接分享 / 定位到某一页。 */
+  function readHash() {
+    var match = /^#(\d+)$/.exec(window.location.hash || "");
+    if (!match) return 0;
+    return Math.max(0, Math.min(slides.length - 1, Number(match[1]) - 1));
+  }
+
+  function fit() {
+    var scale = Math.min(window.innerWidth / 1600, window.innerHeight / 900);
+    stage.style.setProperty("--s", String(scale));
+  }
+
+  function render() {
+    slides.forEach(function (slide, index) {
+      var active = index === current;
+      slide.classList.toggle("is-active", active);
+      slide.setAttribute("aria-hidden", active ? "false" : "true");
+    });
+    counter.textContent = (current + 1) + " / " + slides.length;
+    progress.style.width = ((current + 1) / slides.length) * 100 + "%";
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = current === slides.length - 1;
+  }
+
+  function go(index) {
+    current = Math.max(0, Math.min(slides.length - 1, index));
+    render();
+    try {
+      window.history.replaceState(null, "", "#" + (current + 1));
+    } catch (error) {
+      /* file:// 下可能不允许改地址，忽略即可 */
+    }
+  }
+
+  function toast(message) {
+    toastEl.textContent = message;
+    toastEl.classList.add("is-open");
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(function () {
+      toastEl.classList.remove("is-open");
+    }, 2600);
+  }
+
+  /* ---------- 截图框：点击 / 拖入即可替换 ---------- */
+
+  function markEmpty(figure) {
+    var img = figure.querySelector(".shot-img");
+    var empty = !img || !img.getAttribute("src") || img.naturalWidth === 0;
+    figure.classList.toggle("is-empty", empty);
+  }
+
+  function applyImage(figure, dataUrl) {
+    var img = figure.querySelector(".shot-img");
+    if (!img) {
+      img = document.createElement("img");
+      img.className = "shot-img";
+      img.alt = "";
+      figure.insertBefore(img, figure.firstChild);
+    }
+    img.onload = function () { figure.classList.remove("is-empty"); };
+    img.src = dataUrl;
+    figure.classList.remove("is-empty");
+  }
+
+  function readFile(file) {
+    if (!file || !/^image\//.test(file.type)) {
+      toast("请选择图片文件");
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      if (!pendingShot) return;
+      applyImage(pendingShot, String(reader.result));
+      toast("已替换 " + (file.name || "截图"));
+      pendingShot = null;
+    };
+    reader.onerror = function () { toast("读取图片失败"); };
+    reader.readAsDataURL(file);
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll(".shot"), function (figure) {
+    var img = figure.querySelector(".shot-img");
+    if (img) {
+      img.addEventListener("load", function () { figure.classList.remove("is-empty"); });
+      img.addEventListener("error", function () { figure.classList.add("is-empty"); });
+      if (img.complete && img.naturalWidth === 0) {
+        figure.classList.add("is-empty");
+      }
+    } else {
+      figure.classList.add("is-empty");
+    }
+
+    figure.setAttribute("tabindex", "0");
+    figure.setAttribute("role", "button");
+    figure.setAttribute("aria-label", "替换这张截图");
+
+    function openPicker() {
+      pendingShot = figure;
+      picker.value = "";
+      picker.click();
+    }
+
+    figure.addEventListener("click", openPicker);
+    figure.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openPicker();
+      }
+    });
+
+    ["dragenter", "dragover"].forEach(function (type) {
+      figure.addEventListener(type, function (event) {
+        event.preventDefault();
+        figure.classList.add("is-dragging");
+      });
+    });
+    ["dragleave", "dragend"].forEach(function (type) {
+      figure.addEventListener(type, function () { figure.classList.remove("is-dragging"); });
+    });
+    figure.addEventListener("drop", function (event) {
+      event.preventDefault();
+      figure.classList.remove("is-dragging");
+      var file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      if (!file) return;
+      pendingShot = figure;
+      readFile(file);
+    });
+  });
+
+  picker.addEventListener("change", function () {
+    if (picker.files && picker.files[0]) {
+      readFile(picker.files[0]);
+    }
+  });
+
+  /* ---------- 导出单文件 HTML ---------- */
+
+  function exportHtml() {
+    var clone = document.documentElement.cloneNode(true);
+    var cloneHelp = clone.querySelector("#help");
+    if (cloneHelp) cloneHelp.classList.remove("is-open");
+    var cloneToast = clone.querySelector("#toast");
+    if (cloneToast) {
+      cloneToast.classList.remove("is-open");
+      cloneToast.textContent = "";
+    }
+
+    // 统计还没内联的图（来自 shots/ 的相对路径），导出后仍要靠同目录文件
+    var relative = 0;
+    Array.prototype.forEach.call(clone.querySelectorAll(".shot-img"), function (img) {
+      var src = img.getAttribute("src") || "";
+      if (src && src.indexOf("data:") !== 0) relative++;
+    });
+
+    var html = "<!doctype html>\n" + clone.outerHTML;
+    var blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = "pzmanager-feature-deck.html";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+
+    toast(relative > 0
+      ? "已导出；有 " + relative + " 张图还是相对路径，需连同 shots/ 目录一起发送"
+      : "已导出单文件 HTML");
+  }
+
+  /* ---------- 事件 ---------- */
+
+  function toggleHelp(open) {
+    var next = typeof open === "boolean" ? open : !help.classList.contains("is-open");
+    help.classList.toggle("is-open", next);
+  }
+
+  prevBtn.addEventListener("click", function () { go(current - 1); });
+  nextBtn.addEventListener("click", function () { go(current + 1); });
+  document.getElementById("export").addEventListener("click", exportHtml);
+  document.getElementById("helpBtn").addEventListener("click", function () { toggleHelp(); });
+  help.addEventListener("click", function (event) {
+    if (event.target === help) toggleHelp(false);
+  });
+
+  window.addEventListener("keydown", function (event) {
+    var tag = (event.target && event.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+    switch (event.key) {
+      case "ArrowRight":
+      case "PageDown":
+      case " ":
+        event.preventDefault();
+        go(current + 1);
+        break;
+      case "ArrowLeft":
+      case "PageUp":
+        event.preventDefault();
+        go(current - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        go(0);
+        break;
+      case "End":
+        event.preventDefault();
+        go(slides.length - 1);
+        break;
+      case "f":
+      case "F":
+        if (document.fullscreenElement) {
+          void document.exitFullscreen();
+        } else {
+          void document.documentElement.requestFullscreen();
+        }
+        break;
+      case "e":
+      case "E":
+        exportHtml();
+        break;
+      case "h":
+      case "H":
+        toggleHelp();
+        break;
+      case "Escape":
+        toggleHelp(false);
+        break;
+      default:
+        break;
+    }
+  });
+
+  window.addEventListener("resize", fit);
+  window.addEventListener("hashchange", function () {
+    var index = readHash();
+    if (index !== current) {
+      current = index;
+      render();
+    }
+  });
+
+  fit();
+  current = readHash();
+  render();
+})();
+</script>
+</body>
+</html>

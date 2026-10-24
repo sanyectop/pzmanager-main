@@ -33,9 +33,9 @@ test("mod presets store the Lua load order and JAR enabled state", () => {
 
 test("mod rows never select text and support drag-to-select", () => {
   assert.match(cssSource, /\.pz-mod-row\[role="checkbox"\]\s*\{[^}]*user-select:\s*none;/s);
-  // 拖动勾选把行的当前选中状态传进去，回移时用于恢复拖动前的状态。
-  assert.match(appSource, /extendRowDrag\("lua", key, selected\)/);
-  assert.match(appSource, /extendRowDrag\("jar", modKey, selected\)/);
+  // 拖动勾选按"起始行 ↔ 当前行"的区间套用/恢复，模拟 Windows 桌面框选。
+  assert.match(appSource, /extendRowDrag\("lua", key\)/);
+  assert.match(appSource, /extendRowDrag\("jar", modKey\)/);
 });
 
 test("batch enable and disable buttons stay visible without a selection", () => {

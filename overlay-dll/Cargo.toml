@@ -1,6 +1,6 @@
 [package]
 name = "pz_overlay"
-version = "0.1.0"
+version = "1.0.261025"
 description = "Project Zomboid overlay probe DLL: hooks wglSwapBuffers and tints the game window red for 5 seconds."
 edition = "2021"
 license = "MIT"
