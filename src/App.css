@@ -1,0 +1,3986 @@
+:root {
+  /* ==========================================================================
+     设计令牌：同类元素（按钮 / 卡片 / 列表行 / 弹层 / 菜单 / 输入框）共用同一套值。
+     要整体调整只改这里，不要再在下面的规则里写裸数值。
+     ========================================================================== */
+
+  /* 允许 width/min-width 等 longhand 与 auto 关键字之间做插值（Chromium 129+）。
+     导航激活项的 width: auto ↔ 2rem 过渡依赖它；不支持的内核退回原来的瞬切。 */
+  interpolate-size: allow-keywords;
+
+  /* 层级 */
+  --pz-z-nav: 30;
+  --pz-z-nav-raised: 40;
+  --pz-z-nav-label: 100;
+  --pz-z-dialog: 1000;
+  --pz-z-titlebar: 9999;
+  --pz-z-menu: 20000;
+  --pz-z-toast: 2147483647;
+
+  /* 圆角 */
+  --pz-radius-xs: 0.25rem;
+  --pz-radius-sm: 0.4rem;
+  --pz-radius-md: 0.45rem;
+  --pz-radius-lg: 0.7rem;
+  --pz-radius-pill: 999px;
+
+  /* 描边与分隔线 */
+  --pz-line: rgba(113, 128, 150, 0.2);
+  --pz-line-strong: rgba(113, 128, 150, 0.28);
+  --pz-line-emphasis: rgba(113, 128, 150, 0.42);
+  --pz-line-white: rgba(255, 255, 255, 0.48);
+  --pz-line-glass: rgba(255, 255, 255, 0.3);
+
+  /* 填充 */
+  --pz-fill: rgba(113, 128, 150, 0.2);
+  --pz-fill-subtle: rgba(113, 128, 150, 0.1);
+  --pz-fill-gray: rgba(226, 232, 240, 0.72);
+  --pz-fill-gray-strong: rgba(160, 174, 192, 0.34);
+  --pz-fill-accent: rgba(66, 153, 225, 0.1);
+  --pz-fill-accent-active: rgba(190, 227, 248, 0.72);
+  --pz-fill-row-hover: rgba(235, 248, 255, 0.7);
+  --pz-fill-row-enabled: rgba(235, 248, 255, 0.82);
+  --pz-fill-row-locked: rgba(235, 248, 255, 0.32);
+  --pz-fill-row-selected: rgba(190, 227, 248, 0.92);
+  --pz-fill-glass: rgba(255, 255, 255, 0.18);
+  --pz-fill-glass-soft: rgba(255, 255, 255, 0.08);
+
+  /* 表面 */
+  --pz-canvas: #edf2f7;
+  --pz-surface-shell: rgba(255, 255, 255, 0.38);
+  --pz-surface-glass: rgba(255, 255, 255, 0.84);
+  --pz-surface-card: rgba(255, 255, 255, 0.55);
+  --pz-surface-float: rgba(255, 255, 255, 0.96);
+  /* 启动页两块面板的亚克力底色：比 --pz-surface-glass 更通透，
+     底下压着 .pz-acrylic-glass（克隆壁纸 + blur，见 docs/acrylic-panel-options.md 方案 C），
+     所以它和原来的 backdrop-filter 一样只负责"厚度"，模糊由那层提供。
+     仍是 §2.3 的 0.38–0.96 区间内的值。 */
+  --pz-surface-acrylic-light: rgba(255, 255, 255, 0.6);
+  --pz-surface-acrylic-dark: rgba(32, 20, 28, 0.5);
+  /* 启动页亚克力的克隆壁纸层：模糊半径与提饱和系数（原 backdrop-filter 是
+     blur(28px) saturate(160%) / blur(14–18px) 不等，这里统一一档）。
+     半径同样吃 --pz-blur-scale，所以「模糊度」调到 0 时这层退化成无模糊的壁纸副本。 */
+  --pz-acrylic-blur: calc(20px * var(--pz-blur-scale, 1));
+  --pz-acrylic-saturate: 1.45;
+  /* 菜单亚克力：模糊 + 半透明底色 + 极淡颗粒 + 顶边内高光。
+     浮层会叠在任意内容上，启动页那套"克隆壁纸"在这里会露馅（菜单盖住卡片时不该透出壁纸），
+     所以只能用真的背景模糊（backdrop-filter）。菜单面积小、存在时间短，代价可以接受；
+     统一收在这里，要整体关掉模糊只改这一处。
+     颗粒直接当背景层而不是伪元素——菜单内容会滚动，绝对定位的伪元素会跟着一起滚走。
+     强度烘在 SVG 里（opacity='0.3'）：白底上实测标准差才 3 左右，0.08 那种只有 0.87，肉眼看不见。 */
+  /* 全站模糊强度倍率：0 = 关掉模糊，1 = 设计基准，2 = 两倍（上限）。
+     写在这里只是兜底 / 文档化，实际值由「设置 › 通用 › 模糊度」写到 documentElement 上。
+     下面所有 blur 都写成 calc(<基准> * var(--pz-blur-scale, 1))，所以改一处即全站生效。 */
+  --pz-blur-scale: 1;
+  --pz-menu-blur: calc(18px * var(--pz-blur-scale, 1));
+  --pz-menu-saturate: 1.4;
+  --pz-menu-tint: rgba(255, 255, 255, 0.8);
+  --pz-menu-highlight: rgba(255, 255, 255, 0.6);
+  --pz-menu-noise-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.3'/%3E%3C/svg%3E");
+  /* 同一张颗粒图的不透明版本，给启动页面板的 ::after 用（那里靠 opacity 控制强度）。 */
+  --pz-noise-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  /* 文字。值 = 基准色按 --pz-text-contrast（0–1，设置页「通用 › 字体对比度」写进 documentElement）
+     往 --pz-ink-strong 混：0 时等价于原来的 #2d3748 / #1a202c / #718096 / #4a5568 / #a0aec0。
+     深色面上的 --pz-text-on-dark* 不参与对比度，那里往近黑推反而更看不清。 */
+  --pz-ink-strong: #0b1220;
+  --pz-text: color-mix(in srgb, #2d3748 calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --pz-text-strong: color-mix(in srgb, #1a202c calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --pz-text-muted: color-mix(in srgb, #718096 calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --pz-text-label: color-mix(in srgb, #4a5568 calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --pz-text-subtle: color-mix(in srgb, #a0aec0 calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --pz-text-inverse: #fff;
+  --pz-text-on-dark: rgba(255, 255, 255, 0.86);
+  --pz-text-on-dark-muted: rgba(255, 255, 255, 0.62);
+
+  /* 主题色 */
+  --pz-accent-rgb: 49 130 206;
+  --pz-accent: rgb(var(--pz-accent-rgb));
+  --pz-accent-strong: #2b6cb0;
+  --pz-accent-deep: #1a4f85;
+  --pz-accent-line: rgba(66, 153, 225, 0.4);
+  --pz-accent-line-strong: rgba(66, 153, 225, 0.72);
+  --pz-accent-line-soft: rgba(66, 153, 225, 0.2);
+  --pz-accent-faint: rgba(66, 153, 225, 0.04);
+  --pz-success: #38a169;
+  --pz-danger: #e53e3e;
+  --pz-warning: #d69e2e;
+
+  /* 阴影与内嵌高光 */
+  --pz-shadow-shell: 0 16px 36px rgba(26, 32, 44, 0.14);
+  --pz-shadow-bar: 0 10px 28px rgba(26, 32, 44, 0.14);
+  --pz-shadow-sm: 0 5px 16px rgba(26, 32, 44, 0.08);
+  --pz-shadow-menu: 0 12px 30px rgba(26, 32, 44, 0.18);
+  --pz-shadow-dialog: 0 18px 48px rgba(26, 32, 44, 0.25);
+  --pz-shadow-modal: 0 24px 70px rgba(7, 11, 28, 0.32);
+  --pz-ring-accent: 0 0 0 3px rgba(66, 153, 225, 0.2);
+  --pz-ring-warning: 0 0 0 3px rgba(214, 158, 46, 0.16);
+  --pz-ring-success: 0 0 0 3px rgba(56, 161, 105, 0.16);
+  --pz-highlight: rgba(255, 255, 255, 0.74);
+
+  /* 动效：六档时长 + 两条曲线，规则里不要再写 ms。tap 是"点一下要立刻有反应"
+     的轻量反馈档（折叠、开关状态切换），比 fast 再快一档。 */
+  --pz-dur-tap: 120ms;
+  --pz-dur-fast: 150ms;
+  --pz-dur-base: 180ms;
+  --pz-dur-slow: 260ms;
+  --pz-dur-slower: 360ms;
+  --pz-dur-exit: 170ms;
+  --pz-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --pz-ease-pop: cubic-bezier(0.2, 0.85, 0.35, 1.2);
+  /* 二次曲线（quad）：匀变速运动。入场用减速段，出场用加速段。 */
+  --pz-ease-in-quad: cubic-bezier(0.11, 0, 0.5, 0);
+  --pz-ease-out-quad: cubic-bezier(0.5, 1, 0.89, 1);
+  /* 页面切换滑动：两端慢、中段匀的 S 曲线。ease 会把位移挤进最初几帧——
+     内容还没显形就滑完了，慢放看就是纯淡入；这条曲线让滑动在透明度
+     尚可辨认的时段内持续可见。 */
+  --pz-ease-page-slide: cubic-bezier(0.45, 0, 0.3, 1);
+
+/* 状态语义色（列表行/提示的语义底色，与主题色浅底分开命名） */
+  --pz-tint-danger: rgba(255, 245, 245, 0.64);
+  --pz-tint-danger-line: rgba(254, 178, 178, 0.92);
+  --pz-tint-warning: rgba(254, 252, 232, 0.72);
+  --pz-tint-warning-strong: rgba(254, 252, 232, 0.94);
+  --pz-tint-warning-line: rgba(214, 158, 46, 0.32);
+  --pz-tint-warning-line-strong: rgba(214, 158, 46, 0.4);
+  --pz-tint-warning-text: rgba(214, 158, 46, 0.66);
+  --pz-text-disabled: #a6a6a6;
+  --pz-text-disabled-strike: rgba(166, 166, 166, 0.7);
+  --pz-text-accent-strong: #0b5bcb;
+
+  /* 交互反馈 */
+  --pz-line-hover: rgba(150, 192, 249, 0.9);
+  --pz-surface-hover: rgba(236, 244, 254, 0.92);
+  --pz-fill-highlight: rgba(255, 255, 255, 0.34);
+  --pz-window-control-hover: rgba(74, 85, 104, 0.1);
+  --pz-window-icon-bg: #fbfcfe;
+  --pz-window-icon-bg-hover: #f4f6f9;
+
+  /* 深色层：启动页玻璃、遮罩、滚动条 */
+  --pz-glass-dark: rgba(18, 24, 38, 0.42);
+  --pz-glass-dark-hover: rgba(18, 24, 38, 0.62);
+  --pz-scrim: rgba(26, 32, 44, 0.42);
+  --pz-scrim-strong: rgba(10, 16, 35, 0.7);
+  --pz-scroll-thumb: rgba(74, 85, 104, 0.56);
+  --pz-scroll-thumb-hover: rgba(43, 108, 176, 0.72);
+  --pz-scroll-thumb-active: rgba(43, 108, 176, 0.88);
+
+  /* 强调色补充 */
+  --pz-accent-muted: rgba(43, 108, 176, 0.72);
+  --pz-pink-line: rgba(255, 92, 132, 0.72);
+  --pz-pink-ring: rgba(255, 92, 132, 0.2);
+  --pz-pink-fill: rgba(255, 92, 132, 0.08);
+  --pz-pink-glow: rgba(255, 70, 116, 0.32);
+
+  /* 补充表面与阴影 */
+  --pz-surface-media: rgba(247, 250, 252, 0.62);
+  --pz-shadow-card-hover: 0 12px 22px rgba(26, 32, 44, 0.14);
+  --pz-shadow-thumb: 0 1px 5px rgba(26, 32, 44, 0.28);
+  --pz-shadow-ink: rgba(0, 0, 0, 0.24);
+
+  /* 字号 */
+  --pz-font-2xs: 0.62rem;
+  --pz-font-xs: 0.68rem;
+  --pz-font-sm: 0.72rem;
+  --pz-font-md: 0.78rem;
+  --pz-font-base: 0.86rem;
+  --pz-font-lg: 1rem;
+  --pz-font-xl: 1.3rem;
+  --pz-titlebar-height: 50px;
+  /* 导航已嵌入标题栏，不再占用内容区顶部空间（两项置 0 使依赖它们的 calc 同步收缩）。 */
+  --pz-sidebar-top: 0;
+  /* 控件统一高度：取自资源中心「标签 › 包含/排除」两个下拉（26px）。
+     输入框、原生 select、以及所有 Chakra 下拉触发器共用此值，改这里即可整体调整。 */
+  --pz-control-height: 26px;
+  --pz-sidebar-height: 0;
+  --pz-content-gap: 0.8rem;
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI Variable Display",
+    "Segoe UI",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Noto Sans CJK SC",
+    ui-sans-serif,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 16px;
+  line-height: 22px;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 字体对比度也要接管 Chakra 的灰阶：应用里大量文字是内联的 color="gray.400"…"gray.900"，
+   不一起压深的话拖动条只能影响一小部分文字。
+   Chakra 的令牌写在 @layer tokens 的 :where(...) 里（零特异性 + 分层），
+   这条未分层的 :root 规则必定赢，所以不需要 !important。基准值 = Chakra 默认 gray 色板。 */
+:root {
+  --chakra-colors-gray-400: color-mix(in srgb, #a1a1aa calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --chakra-colors-gray-500: color-mix(in srgb, #71717a calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --chakra-colors-gray-600: color-mix(in srgb, #52525b calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --chakra-colors-gray-700: color-mix(in srgb, #3f3f46 calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --chakra-colors-gray-800: color-mix(in srgb, #27272a calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+  --chakra-colors-gray-900: color-mix(in srgb, #18181b calc((1 - var(--pz-text-contrast, 0)) * 100%), var(--pz-ink-strong));
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+/* 全应用统一控件高度：输入框、原生下拉，以及所有 Chakra 下拉触发器。
+   基准取自资源中心「标签 › 包含/排除」两个下拉（--pz-control-height）。
+   Menu.TriggerItem 属于 part="item"，不带 .chakra-menu__trigger，故弹出菜单项不受影响。
+   复选框 / 单选 / 滑块 / 文件 / 颜色 / 隐藏域不参与；文本域保持自身多行高度。 */
+.pz-app-shell input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="color"]),
+.pz-app-shell select,
+.pz-app-shell .chakra-menu__trigger {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-block: 0 !important;
+}
+
+body {
+  min-width: 320px;
+  background: transparent;
+  overflow-x: hidden;
+}
+
+/* 这里刻意不设 scrollbar-width / scrollbar-color：Chromium 只要看到这两个标准属性，
+   就会忽略下面的 ::-webkit-scrollbar* 自定义滚动条、改用原生主题滚动条，
+   而原生滚动条两端带上下箭头（且外观与全站圆角不符）。
+   统一走 ::-webkit-scrollbar，箭头由 ::-webkit-scrollbar-button 关掉。 */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-fill-glass-soft);
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 2px solid transparent;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-scroll-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--pz-scroll-thumb-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: var(--pz-scroll-thumb-active);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-button {
+  display: none !important;
+  visibility: hidden;
+  width: 0;
+  height: 0;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 滚动容器上下两端的渐隐带高度（贴边时会被时间线压到 0）。 */
+@property --pz-scroll-fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --pz-scroll-fade-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes pz-scroll-fade-top {
+  from {
+    --pz-scroll-fade-top: 0px;
+  }
+
+  to {
+    --pz-scroll-fade-top: var(--pz-scroll-fade-size);
+  }
+}
+
+@keyframes pz-scroll-fade-bottom {
+  from {
+    --pz-scroll-fade-bottom: var(--pz-scroll-fade-size);
+  }
+
+  to {
+    --pz-scroll-fade-bottom: 0px;
+  }
+}
+
+/* 滚动容器：内容在滚动口上下两端渐隐。
+   遮罩作用在容器自身（会连子元素一起淡出），而不是盖一层渐变覆盖层——
+   这样玻璃/半透明背景的容器不会露出实心色块。
+   两端渐隐带的高度由 scroll(self block) 时间线驱动：贴住某一端时那一端为 0（不淡出），
+   容器没有溢出时时间线不激活，两个值停在初始值 0px。
+   注意：带自身底色和描边的浮层（.pz-workshop-tag-menu-content）不在清单里，
+   遮罩会把它的底色、圆角和描边一起淡掉。 */
+.pz-app-content,
+.pz-jar-mods-body,
+.pz-resource-download-list,
+.pz-resource-file-list,
+.pz-workshop-detail-body,
+.pz-workshop-list,
+.pz-lua-mod-list,
+.pz-jar-conflict-list,
+.pz-developer-news-list,
+.pz-task-list {
+  --pz-scroll-fade-size: 1.75rem;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--pz-scroll-fade-top),
+    #000 calc(100% - var(--pz-scroll-fade-bottom)),
+    transparent 100%
+  );
+  animation: pz-scroll-fade-top linear both, pz-scroll-fade-bottom linear both;
+  animation-timeline: scroll(self block), scroll(self block);
+  animation-range: 0 var(--pz-scroll-fade-size),
+    calc(100% - var(--pz-scroll-fade-size)) 100%;
+}
+
+/* 启动页内容不滚动，更要紧的是：上面那条 mask-image 会让它成为 **backdrop root**，
+   于是启动页里的 backdrop-filter（设置 / 参数两个上弹面板）只能采到自己子树里的东西，
+   背后的壁纸根本采不到——表现为"加了模糊但完全没效果"。这里把遮罩去掉。
+   启动页本来 overflow: hidden，渐隐也没有意义。 */
+.pz-app-content-launch {
+  mask-image: none;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter/Inter-cyrillic-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter/Inter-cyrillic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter/Inter-greek-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+1F00-1FFF;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter/Inter-greek.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter/Inter-vietnamese.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter/Inter-latin-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter/Inter-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+.pz-app-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 100vh;
+  padding-top: var(--pz-titlebar-height);
+  background-color: var(--pz-canvas);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  transition: background-image var(--pz-dur-base) ease;
+}
+
+.pz-window-titlebar {
+  display: flex;
+  flex: 0 0 var(--pz-titlebar-height);
+  position: fixed;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: var(--pz-z-titlebar);
+  width: 100%;
+  height: var(--pz-titlebar-height);
+  min-height: var(--pz-titlebar-height);
+  border-bottom: 1px solid var(--pz-line-glass);
+  background: var(--pz-surface-shell);
+  backdrop-filter: blur(calc(12px * var(--pz-blur-scale, 1))) saturate(140%);
+  color: var(--pz-text-label);
+  user-select: none;
+}
+
+.pz-window-drag-region {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+/* 导航栏嵌入标题栏：上下各留 4px，水平与垂直都居中于标题栏。 */
+.pz-window-titlebar > .pz-sidebar {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: var(--pz-z-nav);
+  width: fit-content;
+  max-width: calc(100% - 180px);
+  min-height: 0;
+  height: calc(var(--pz-titlebar-height) - 8px);
+  align-self: center;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0 0.3rem 0 0.2rem;
+  border: 0;
+  border-radius: var(--pz-radius-md);
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  transform: translate(-50%, -50%);
+}
+
+.pz-window-titlebar .pz-sidebar-brand {
+  height: 100%;
+  padding: 0 0.6rem;
+  border-right: 0;
+}
+
+.pz-window-titlebar .pz-top-nav-logo {
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: var(--pz-radius-sm);
+  font-size: var(--pz-font-2xs);
+}
+
+.pz-window-titlebar .pz-top-nav-title {
+  font-size: var(--pz-font-sm);
+}
+
+.pz-window-titlebar .pz-side-nav {
+  gap: 0.3rem !important;
+  overflow: visible;
+}
+
+.pz-window-titlebar .pz-side-nav-item {
+  width: auto;
+  min-width: 0;
+  height: 2rem !important;
+  min-height: 2rem;
+  /* 0.225rem×2 + 图标 1.1rem + gap 0.45rem = 2rem：收起态与原固定宽完全一致，
+     宽度变化全部交给标签的 width 过渡，item 自身恒为 auto 贴内容。 */
+  padding-block: 0 !important;
+  padding-inline: 0.225rem !important;
+  border-radius: var(--pz-radius-sm) !important;
+}
+
+.pz-window-titlebar .pz-side-nav-item-active {
+  padding-inline: 0.6rem !important;
+}
+
+.pz-window-titlebar .pz-side-nav-icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  flex-basis: 1.1rem;
+}
+
+.pz-window-controls {
+  display: flex;
+  height: 100%;
+  align-items: stretch;
+}
+
+.pz-window-control {
+  display: grid;
+  width: 46px;
+  height: var(--pz-titlebar-height);
+  padding: 0;
+  border: 0;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--pz-text-label);
+  cursor: pointer;
+  transition:
+    background var(--pz-dur-fast) ease,
+    color var(--pz-dur-fast) ease;
+}
+
+.pz-window-control:hover {
+  background: var(--pz-window-control-hover);
+  color: var(--pz-text-strong);
+}
+
+.pz-window-control-close:hover {
+  background: var(--pz-danger);
+  color: var(--pz-text-inverse);
+}
+
+.pz-window-icon {
+  position: relative;
+  display: block;
+  width: 11px;
+  height: 11px;
+}
+
+.pz-window-icon-minimize {
+  height: 1px;
+  background: currentColor;
+}
+
+.pz-window-icon-maximize {
+  border: 1px solid currentColor;
+}
+
+.pz-window-icon-restore {
+  border: 1px solid currentColor;
+  /* 前面那块要盖住后面那块的重叠边框，否则看起来像两个错位的方框 */
+  background: var(--pz-window-icon-bg);
+}
+
+.pz-window-icon-restore::before {
+  position: absolute;
+  top: -3px;
+  left: 3px;
+  width: 9px;
+  height: 9px;
+  /* 只画上/右两条边，得到标准 Windows「还原」图标的台阶感 */
+  border-top: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+  background: transparent;
+  content: "";
+}
+
+.pz-window-control:hover .pz-window-icon-restore {
+  background: var(--pz-window-icon-bg-hover);
+}
+
+.pz-window-icon-close::before,
+.pz-window-icon-close::after {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  width: 13px;
+  height: 1px;
+  background: currentColor;
+  content: "";
+}
+
+.pz-window-icon-close::before {
+  transform: rotate(45deg);
+}
+
+.pz-window-icon-close::after {
+  transform: rotate(-45deg);
+}
+
+.pz-app-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0;
+  scrollbar-gutter: stable;
+}
+
+.pz-app-content-resource-center {
+  overflow: hidden;
+}
+
+.pz-app-content-resource-center > .chakra-stack {
+  height: 100%;
+  min-height: 0;
+}
+
+.pz-app-layout {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  height: calc(100vh - var(--pz-titlebar-height));
+  gap: 0.8rem;
+  max-height: calc(100vh - var(--pz-titlebar-height));
+  min-height: 0;
+  padding: var(--pz-content-gap) 0;
+}
+
+.pz-app-layout-launch {
+  display: block;
+  overflow: hidden;
+  padding: 0;
+}
+
+.pz-sidebar {
+  position: absolute;
+  top: var(--pz-sidebar-top);
+  left: 50%;
+  z-index: var(--pz-z-nav);
+  display: flex;
+  width: fit-content;
+  max-width: calc(100% - 1.5rem);
+  min-height: 3.5rem;
+  align-items: center;
+  align-self: center;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--pz-line-white);
+  border-radius: var(--pz-radius-lg);
+  background: var(--pz-surface-glass);
+  box-shadow: var(--pz-shadow-bar), inset 1px 1px 0 var(--pz-highlight);
+  backdrop-filter: blur(calc(18px * var(--pz-blur-scale, 1))) saturate(130%);
+  transform: translateX(-50%);
+}
+
+.pz-sidebar-brand {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0 0.35rem 0 0.15rem;
+  border-right: 1px solid var(--pz-line);
+}
+
+.pz-top-nav-logo {
+  display: grid;
+  width: 1.9rem;
+  height: 1.9rem;
+  place-items: center;
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-accent);
+  color: var(--pz-text-inverse);
+  font-size: var(--pz-font-xs);
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.pz-top-nav-title {
+  color: var(--pz-text);
+  font-size: var(--pz-font-md);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.pz-side-nav {
+  position: relative;
+  z-index: var(--pz-z-nav-raised);
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 0.3rem !important;
+  margin: 0;
+  min-width: 0;
+}
+
+.pz-side-nav-item {
+  position: relative;
+  display: flex !important;
+  width: auto;
+  min-width: 0;
+  min-height: 2.35rem;
+  align-items: center;
+  justify-content: center !important;
+  gap: 0.45rem;
+  overflow: visible;
+  padding-block: 0.45rem !important;
+  padding-inline: 0.25rem !important;
+  border-radius: var(--pz-radius-md) !important;
+  color: var(--pz-text-label) !important;
+  white-space: nowrap;
+  transition:
+    color var(--pz-dur-base) ease,
+    background var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) ease,
+    /* 宽度类属性与标签的 width 过渡同曲线同时长：一收一展互为镜像，
+       任意缓动下总和都恒定（缓动只改变各自的节奏，不改变守恒）。 */
+    padding var(--pz-dur-base) var(--pz-ease-out) !important;
+}
+
+/* 同一个选择器此前写成两条规则，这里合并（跨行分写容易漏看覆盖关系）。 */
+.pz-side-nav-item-active {
+  justify-content: flex-start !important;
+  padding-inline: 0.7rem !important;
+  color: var(--pz-accent-deep) !important;
+  background: var(--pz-fill-accent-active) !important;
+  box-shadow:
+    0 0 0 1px var(--pz-accent-line-soft),
+    0 6px 14px rgb(var(--pz-accent-rgb) / 10%);
+}
+
+.pz-side-nav-item:hover {
+  color: var(--pz-accent-strong) !important;
+  background: var(--pz-fill-accent) !important;
+  transform: translateX(2px);
+}
+
+.pz-side-nav-icon {
+  display: grid;
+  width: 1.4rem;
+  height: 1.4rem;
+  flex: 0 0 1.4rem;
+  background: currentColor;
+  color: currentColor;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+}
+
+.pz-side-nav-icon-house {
+  mask-image: url("/icons/house.svg");
+  -webkit-mask-image: url("/icons/house.svg");
+}
+
+.pz-side-nav-icon-library {
+  mask-image: url("/icons/library.svg");
+  -webkit-mask-image: url("/icons/library.svg");
+}
+
+.pz-side-nav-icon-play {
+  mask-image: url("/icons/play.svg");
+  -webkit-mask-image: url("/icons/play.svg");
+}
+
+.pz-side-nav-icon-images {
+  mask-image: url("/icons/images.svg");
+  -webkit-mask-image: url("/icons/images.svg");
+}
+
+.pz-side-nav-icon-sun-medium {
+  mask-image: url("/icons/sun-medium.svg");
+  -webkit-mask-image: url("/icons/sun-medium.svg");
+}
+
+.pz-side-nav-icon-package-open {
+  mask-image: url("/icons/package-open.svg");
+  -webkit-mask-image: url("/icons/package-open.svg");
+}
+
+.pz-side-nav-icon-file-cog {
+  mask-image: url("/icons/file-cog.svg");
+  -webkit-mask-image: url("/icons/file-cog.svg");
+}
+
+.pz-side-nav-icon-sliders-horizontal {
+  mask-image: url("/icons/sliders-horizontal.svg");
+  -webkit-mask-image: url("/icons/sliders-horizontal.svg");
+}
+
+.pz-side-nav-icon-download {
+  mask-image: url("/icons/download.svg");
+  -webkit-mask-image: url("/icons/download.svg");
+}
+
+/* 导航标签常驻文档流：激活时展开（width 0→max-content + 淡入），
+   点其它按钮切走时把同一段过渡倒着播放（收拢 + 淡出）。
+   关键是上限用 max-content 而不是写死的 max-width：盒子全程都在变宽/变窄，
+   展开、收拢落在同一段时长里。新旧两个 item 的过渡同曲线同时长同时触发，
+   互为镜像，任意缓动下总宽度都守恒（此前用 linear 是误判，已改回 ease-out）。
+   width ↔ max-content 的插值依赖 :root 的 interpolate-size（Chromium 129+，
+   不支持的内核退回瞬切）。图标态的悬停名称气泡由 ::after 画。 */
+.pz-side-nav-label {
+  position: static;
+  flex-shrink: 0;
+  width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: currentColor;
+  font-size: var(--pz-font-base);
+  font-weight: 750;
+  line-height: 1.2;
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  transition:
+    width var(--pz-dur-base) var(--pz-ease-out),
+    opacity var(--pz-dur-base) ease;
+}
+
+.pz-side-nav-label-active {
+  width: max-content;
+  opacity: 1;
+}
+
+/* 图标态悬停/键盘聚焦时的名称气泡。 */
+.pz-side-nav-item:not(.pz-side-nav-item-active):hover::after,
+.pz-side-nav-item:not(.pz-side-nav-item-active):focus-visible::after {
+  content: attr(aria-label);
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  left: 50%;
+  z-index: var(--pz-z-nav-label);
+  padding: 0.38rem 0.6rem;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-sm);
+  background: var(--pz-surface-float);
+  box-shadow: var(--pz-shadow-menu);
+  color: var(--pz-text);
+  font-size: var(--pz-font-md);
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+  animation: pz-nav-tooltip-in var(--pz-dur-base) var(--pz-ease-pop);
+}
+
+@keyframes pz-nav-tooltip-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-0.35rem) scale(0.86);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(-50%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-side-nav-label {
+    transition: none;
+  }
+}
+
+.pz-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: min(1400px, calc(100% - 1.5rem));
+  height: auto;
+  max-height: none;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  min-width: 0;
+  min-height: 0;
+  transition:
+    background-color var(--pz-dur-base) ease,
+    border-color var(--pz-dur-base) ease,
+    box-shadow var(--pz-dur-slow) ease,
+    border-radius var(--pz-dur-slow) ease,
+    backdrop-filter var(--pz-dur-slow) ease;
+}
+
+.pz-main-framed {
+  border-color: var(--pz-line-white);
+  border-radius: var(--pz-radius-lg);
+  background: var(--pz-surface-shell);
+  box-shadow: var(--pz-shadow-shell), inset 1px 1px 0 var(--pz-highlight);
+  backdrop-filter: blur(calc(18px * var(--pz-blur-scale, 1))) saturate(125%);
+}
+
+.pz-panel {
+  overflow: visible;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  padding: 1rem clamp(1rem, 2vw, 1.5rem) !important;
+}
+
+/* 启动页亚克力（方案 C：克隆壁纸层 + 面板形状裁剪，替代 backdrop-filter）。
+   .pz-acrylic-glass 是壁纸的一份副本，整层 blur + 提饱和后，由 AcrylicGlass.tsx 用
+   style.clipPath 裁成各面板圆角矩形的并集，垫在面板下面；面板自己的半透明底色 /
+   颗粒层 / 描边仍压在它上面，所以配色和原来的 backdrop-filter 一致。
+   下面的 clip-path 只是几何算出来之前的兜底（整块裁掉），运行时会被行内样式覆盖。 */
+.pz-acrylic-glass {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* 兜底：几何算出来之前整块裁掉；运行时会由 AcrylicGlass.tsx 用行内样式覆盖。 */
+  clip-path: inset(100% 0 0 100%);
+}
+
+/* 副本比可视区大一圈：blur 在元素边缘会向透明区采样，不放大就会让面板贴边处发暗。
+   副本内容本身是模糊的，这点缩放（约 3%）看不出偏差。 */
+.pz-acrylic-glass-copy {
+  position: absolute;
+  inset: calc(var(--pz-acrylic-blur) * -1.6);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  filter: blur(var(--pz-acrylic-blur)) saturate(var(--pz-acrylic-saturate));
+}
+
+.pz-launch-account {
+  display: flex;
+  flex: 0 1 17rem;
+  min-width: 15rem;
+  align-items: center;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--pz-line-glass);
+  border-radius: var(--pz-radius-lg);
+  /* 亚克力底：不做背景模糊（显示问题，见 docs/acrylic-panel-options.md），
+     只保留半透明底色 + 下面 ::after 的颗粒层来撑"厚度"。
+     isolation 必须留着：原来这层叠上下文是 backdrop-filter 顺带建的，
+     去掉模糊后不补上，::after 的 z-index: -1 会跑到面板底色后面去。 */
+  background: var(--pz-surface-acrylic-light);
+  box-shadow: var(--pz-shadow-menu);
+  isolation: isolate;
+  /* 游戏运行时下滑淡出（.pz-launch-slide-down），这里声明回位时的上滑入场：
+     二次减速曲线；visibility 延迟到 transform/opacity 播完再切换。 */
+  transition:
+    transform var(--pz-dur-slow) var(--pz-ease-out-quad),
+    opacity var(--pz-dur-slow) var(--pz-ease-out-quad),
+    visibility 0s linear var(--pz-dur-slow);
+}
+
+.pz-launch-bottom-actions {
+  position: absolute;
+  right: clamp(1rem, 3vw, 2.5rem);
+  bottom: clamp(1rem, 3vw, 2.5rem);
+  z-index: 3;
+  width: fit-content;
+  max-width: min(48rem, calc(100% - 2rem));
+  align-items: stretch;
+}
+
+.pz-launch-command {
+  position: relative;
+  flex: 1 1 20rem;
+  min-width: 16rem;
+  padding: 0.45rem;
+  border: 1px solid var(--pz-pink-line);
+  border-radius: var(--pz-radius-lg);
+  background: var(--pz-surface-acrylic-dark);
+  box-shadow:
+    0 0 0 1px var(--pz-pink-ring),
+    0 0 18px var(--pz-pink-glow),
+    0 14px 30px var(--pz-shadow-ink);
+  /* 这一格不做背景模糊，只留半透明暗底 + 噪点。
+     isolation 补回层叠上下文：否则下面的 ::after 噪点（z-index: -1）与
+     工具栏（z-index: 5）都会跑到外层 .pz-launch-bottom-actions 里去比较层级，
+     噪点会被面板底色盖住。它不产生任何绘制副作用。 */
+  isolation: isolate;
+}
+
+/* 亚克力的磨砂颗粒层：Windows 亚克力区别于普通毛玻璃的就是这层极淡噪点。
+   压在面板底色之上、正文之下（两块面板各自用 isolation 建了层叠上下文，
+   所以 z-index: -1 不会跑到面板背景后面去）。 */
+.pz-launch-account::after,
+.pz-launch-command::after {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: inherit;
+  background-image: var(--pz-noise-image);
+  opacity: 0.14;
+  pointer-events: none;
+  content: "";
+}
+
+.pz-launch-card-shell {
+  position: relative;
+}
+
+/* 游戏窗口就绪后：右上角两个图标按钮左滑淡出（见 .pz-launch-slide-left），
+   启动按钮与用户信息面板下滑淡出、回位时上滑入（见 .pz-launch-slide-down）。 */
+.pz-launch-slide-left {
+  transform: translateX(-1.4rem);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 启动按钮 / 用户信息面板的下滑淡出态：向下滑出 1.4rem 并淡出。 */
+.pz-launch-slide-down {
+  transform: translateY(1.4rem);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 左滑淡出的元素同时带着按钮类，所以这里把两条选择器合成一份 transition，
+   并用 !important 压过按钮默认层：visibility 必须延迟到 transform/opacity 播完，
+   否则元素会瞬间隐藏，看不到左滑过程。右上角图标按钮另有单独的 transition，见下方。 */
+.pz-launch-slide-left,
+.pz-launch-card-button {
+  transition:
+    transform var(--pz-dur-slow) var(--pz-ease-out-quad),
+    opacity var(--pz-dur-slow) var(--pz-ease-out-quad),
+    visibility 0s linear var(--pz-dur-slow),
+    background-color var(--pz-dur-base) ease !important;
+}
+
+/* 「停止游戏进程」按钮从右侧划入 */
+.pz-launch-stop-button {
+  position: absolute;
+  /* 与「启动游戏」按钮完全重合（同宽同高、水平垂直都居中），只做横向划入 */
+  inset: 0;
+  width: 100%;
+  transform: translateX(110%);
+  opacity: 0;
+  pointer-events: none;
+  /* !important：这个按钮同时带 .pz-launch-card-button（在更前面的规则里），
+     不加就被更短的那份 transition 接管，划入会比预期快。 */
+  transition:
+    transform var(--pz-dur-slower) var(--pz-ease-out),
+    opacity var(--pz-dur-base) ease !important;
+}
+
+.pz-launch-stop-button.is-in {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 下滑淡出态的出场 transition：二次加速曲线，写在 stop-button 之后，
+   既要盖过 .pz-launch-card-button 的入场 transition，也不影响划入中的停止按钮
+   （停止按钮从不带这个类）。visibility 同样延迟到播完。 */
+.pz-launch-slide-down {
+  transition:
+    transform var(--pz-dur-slow) var(--pz-ease-in-quad),
+    opacity var(--pz-dur-slow) var(--pz-ease-in-quad),
+    visibility 0s linear var(--pz-dur-slow) !important;
+}
+
+/* 「启动游戏」和「停止游戏进程」共用同一块画布，高度固定：底部留出启动时长
+   那一行（见 .pz-launch-startup-timing），所以文案出现或消失都不会推动按钮。 */
+.pz-launch-card-button {
+  min-height: 6.25rem !important;
+  padding: 0.85rem 1.15rem 1.25rem !important;
+  border: 0 !important;
+  border-radius: var(--pz-radius-sm) !important;
+  background: transparent !important;
+  color: var(--pz-text-inverse) !important;
+}
+
+.pz-launch-card-button:hover {
+  background: var(--pz-pink-fill) !important;
+}
+
+/* 极光描边：悬停「启动游戏」按钮时，一圈红色极光沿启动面板边框缓慢旋转。
+   conic-gradient 的角度是注册过的 <angle> 自定义属性，动画只转角度本身；
+   环用双层 mask 挖出 2px 描边，drop-shadow 给它一点向外洇开的辉光。
+   ::before 已被占用的只有面板自身的噪点 ::after，这里用 ::before 不冲突；
+   :has() 不支持时整条规则不匹配，面板维持原有外观。 */
+@property --pz-aurora-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.pz-launch-command::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: -1;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--pz-aurora-angle),
+    transparent 0deg,
+    rgba(229, 62, 62, 0) 30deg,
+    rgba(229, 62, 62, 0.5) 90deg,
+    rgba(255, 124, 150, 0.95) 130deg,
+    rgba(229, 62, 62, 0.5) 170deg,
+    rgba(229, 62, 62, 0) 230deg,
+    rgba(229, 62, 62, 0.22) 290deg,
+    rgba(229, 62, 62, 0) 330deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  filter: drop-shadow(0 0 5px rgba(229, 62, 62, 0.55));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--pz-dur-base) ease;
+}
+
+.pz-launch-command:has(.pz-launch-card-button:hover:not(.pz-launch-stop-button))::before {
+  opacity: 1;
+  animation: pz-launch-aurora-spin 6s linear infinite;
+}
+
+@keyframes pz-launch-aurora-spin {
+  to {
+    --pz-aurora-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-launch-command:has(.pz-launch-card-button:hover:not(.pz-launch-stop-button))::before {
+    animation: none;
+    /* 减弱动效时不旋转，退成一圈静止的红色描边光。 */
+    background: conic-gradient(rgba(229, 62, 62, 0.65) 0 360deg);
+  }
+}
+
+.pz-launch-card-title {
+  color: var(--pz-text-inverse);
+  font-size: var(--pz-font-xl);
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.pz-launch-card-subtitle {
+  color: var(--pz-text-on-dark);
+  font-size: var(--pz-font-base);
+  font-weight: 650;
+  line-height: 1.35;
+  margin-top: 0.25rem;
+}
+
+/* 启动时长：卡片底部预留的一行，居中排在「强制结束 Project Zomboid」下面，
+   和副标题各占一行——原来贴在右下角会和副标题挤在同一高度上、压住字脚。 */
+.pz-launch-startup-timing {
+  position: absolute;
+  right: 0.7rem;
+  bottom: 0.4rem;
+  left: 0.7rem;
+  z-index: 6;
+  overflow: hidden;
+  color: var(--pz-text-on-dark-muted);
+  font-size: var(--pz-font-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1.1rem;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px var(--pz-shadow-ink);
+  pointer-events: none;
+}
+
+/* 右上角工具栏：只负责定位，本身不画背景、阴影或高光。 */
+.pz-launch-command-toolbar {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 1.7rem;
+}
+
+/* 设置 / 详情两个图标按钮。尺寸、边框与底色直接写在类上，不用 !important 去压 Chakra。
+   过渡只涉及 background-color / color / 左滑淡出（transform、opacity、visibility），
+   不过渡 box-shadow，避免悬停时产生额外的光带。 */
+.pz-launch-command-toolbar .pz-launch-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  min-width: 1.6rem;
+  height: 1.6rem;
+  min-height: 1.6rem;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--pz-line-glass);
+  border-radius: var(--pz-radius-sm);
+  /* 按钮自己的亚克力：半透明暗色底，只作用于这两个按钮，不影响卡片或账户面板。 */
+  background-color: var(--pz-surface-acrylic-dark);
+  box-shadow: none;
+  color: var(--pz-text-on-dark);
+  font-size: var(--pz-font-base);
+  font-weight: 800;
+  line-height: 1;
+  transition:
+    transform var(--pz-dur-slow) var(--pz-ease-out),
+    opacity var(--pz-dur-slow) ease,
+    visibility 0s linear var(--pz-dur-slow),
+    background-color var(--pz-dur-base) ease,
+    color var(--pz-dur-base) ease !important;
+}
+
+.pz-launch-command-toolbar .pz-launch-icon-button:hover {
+  background-color: var(--pz-fill-glass);
+  color: var(--pz-text-inverse);
+}
+
+.pz-launch-command-toolbar .pz-launch-icon-button:focus-visible {
+  box-shadow: none;
+  outline: 2px solid var(--pz-line-glass);
+  outline-offset: 2px;
+}
+
+/* 左滑淡出：就绪后两个按钮随启动按钮一起滑走，展示时立即恢复可见。 */
+.pz-launch-command-toolbar .pz-launch-icon-button.pz-launch-slide-left {
+  transform: translateX(-1.4rem);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.pz-launch-fa-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.pz-launch-popover-shell {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.55rem);
+  width: min(22rem, calc(100vw - 2rem));
+  display: grid;
+  grid-template-rows: 0fr;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(0.35rem);
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--pz-dur-slow) var(--pz-ease-out),
+    opacity var(--pz-dur-base) ease,
+    transform var(--pz-dur-slow) var(--pz-ease-out),
+    visibility 0s linear var(--pz-dur-slow);
+}
+
+.pz-launch-popover-shell.is-open {
+  grid-template-rows: 1fr;
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.pz-launch-popover-shell > .pz-launch-settings-popover,
+.pz-launch-popover-shell > .pz-launch-details-popover {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 启动页的设置 / 详情两个上弹面板：和菜单同一套亚克力，
+   只是圆角与阴影按弹层档位走。它们只在打开期间存在，不参与页面过渡，
+   不会重现当初启动页常驻面板那种"切换时丢模糊"的问题。 */
+.pz-launch-settings-popover,
+.pz-launch-details-popover {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--pz-line-strong);
+  border-radius: var(--pz-radius-md);
+  background-color: var(--pz-menu-tint);
+  background-image: var(--pz-menu-noise-image);
+  box-shadow:
+    var(--pz-shadow-dialog),
+    inset 0 1px 0 var(--pz-menu-highlight);
+  backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
+}
+
+.pz-launch-details-popover {
+  width: min(19rem, calc(100vw - 2rem));
+}
+
+.pz-launch-details-popover-shell {
+  width: min(19rem, calc(100vw - 2rem));
+}
+
+.pz-main-launch {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  margin: 0;
+  /* 启动页是整页固定层：从 .pz-main-framed 切过来时外壳的 background /
+     backdrop-filter 不参与过渡，否则会先按透明底画一帧、过渡结束再补上，
+     看起来就是闪一下（历史上这条还是给亚克力面板兜底的，现在面板已不用模糊）。 */
+  transition: none;
+}
+
+.pz-app-content-launch {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+.pz-app-content-launch > .chakra-stack {
+  height: 100%;
+  min-height: 0;
+}
+
+/* 页面切换只动正文内容：.pz-main 的背景 / 边框 / 阴影保持不动，
+   文字、图片、按钮等内容由这一层承载并做左右滑入滑出。 */
+.pz-page-transition {
+  opacity: 1;
+}
+
+.pz-page-transition-exiting {
+  pointer-events: none;
+  transition:
+    opacity var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) var(--pz-ease-page-slide);
+  opacity: 0;
+  transform: translateX(-48px);
+}
+
+.pz-page-transition-exiting[data-direction="backward"] {
+  transform: translateX(48px);
+}
+
+.pz-page-transition-entering {
+  animation: pz-page-content-in-from-right var(--pz-dur-base) var(--pz-ease-page-slide) both;
+}
+
+.pz-page-transition-entering[data-direction="backward"] {
+  animation-name: pz-page-content-in-from-left;
+}
+
+@keyframes pz-page-content-in-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(48px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pz-page-content-in-from-left {
+  from {
+    opacity: 0;
+    transform: translateX(-48px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pz-main-exiting {
+  pointer-events: none;
+  transition:
+    opacity var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) var(--pz-ease-page-slide),
+    background-color var(--pz-dur-base) ease,
+    border-color var(--pz-dur-base) ease,
+    box-shadow var(--pz-dur-slow) ease,
+    border-radius var(--pz-dur-slow) ease,
+    backdrop-filter var(--pz-dur-slow) ease;
+  opacity: 0;
+  transform: translateX(-48px);
+}
+
+.pz-main-exiting[data-direction="backward"] {
+  transform: translateX(48px);
+}
+
+.pz-main-entering {
+  animation: pz-main-slide-in-from-right var(--pz-dur-base) var(--pz-ease-page-slide) both;
+}
+
+.pz-main-entering[data-direction="backward"] {
+  animation-name: pz-main-slide-in-from-left;
+}
+
+@keyframes pz-main-slide-in-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(48px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pz-main-slide-in-from-left {
+  from {
+    opacity: 0;
+    transform: translateX(-48px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 按钮默认层：用 :where() 把特异性压到 0。此前这条规则是 (0,2,1) + !important，
+   把所有按钮自己的动画全部打死——启动页左滑、侧栏项宽度、工坊胶囊圆角都动不了，
+   而 .pz-launch-slide-left 的 visibility 延迟更会整个丢失，元素当场隐藏看不到滑出。
+   保留 !important：它仍要压住 Chakra 自带的按钮样式。 */
+:where(.pz-app-shell button:not(.pz-window-control)) {
+  border-radius: var(--pz-radius-sm);
+  transition:
+    background-color var(--pz-dur-fast) ease,
+    border-color var(--pz-dur-fast) ease,
+    box-shadow var(--pz-dur-fast) ease,
+    color var(--pz-dur-fast) ease,
+    opacity var(--pz-dur-fast) ease,
+    transform var(--pz-dur-fast) ease !important;
+}
+
+.pz-app-shell button:not(.pz-window-control):not(:disabled):active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.pz-app-shell button:not(.pz-window-control):focus-visible {
+  box-shadow: var(--pz-ring-accent);
+}
+
+.pz-panel-header {
+  border-bottom: 1px solid var(--pz-line);
+  background: transparent;
+}
+
+.pz-media-panel-header {
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--pz-line);
+}
+
+.pz-media-panel-body {
+  padding-top: 1rem;
+}
+
+.pz-empty-state {
+  border: 0 !important;
+  border-radius: 0 !important;
+  border-block: 1px solid var(--pz-line) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.pz-media-card {
+  border-color: var(--pz-line-strong) !important;
+  background: var(--pz-surface-media) !important;
+  box-shadow: var(--pz-shadow-sm);
+  transition:
+    transform var(--pz-dur-base) ease,
+    border-color var(--pz-dur-base) ease,
+    box-shadow var(--pz-dur-base) ease !important;
+}
+
+.pz-value-box {
+  border: 0 !important;
+  border-radius: 0 !important;
+  border-bottom: 1px solid var(--pz-line) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.pz-media-card:hover {
+  border-color: var(--pz-accent-line-strong) !important;
+  box-shadow:
+    var(--pz-shadow-card-hover),
+    0 0 0 1px var(--pz-accent-line-soft);
+  transform: translateY(-2px);
+}
+
+.pz-thumbnail {
+  background: var(--pz-fill-gray) !important;
+}
+
+.pz-memory-slider-wrap {
+  position: relative;
+}
+
+.pz-memory-slider {
+  position: relative;
+  z-index: 1;
+  height: 1.5rem;
+}
+
+.pz-memory-slider [data-part="control"] {
+  height: 100%;
+}
+
+.pz-memory-slider [data-part="track"] {
+  height: 0.3rem;
+  overflow: hidden;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-fill-gray-strong);
+}
+
+.pz-memory-slider [data-part="range"] {
+  background: var(--pz-accent);
+}
+
+.pz-memory-slider [data-part="thumb"] {
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 2px solid var(--pz-text-inverse);
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-accent-strong);
+  box-shadow: var(--pz-shadow-thumb);
+}
+
+.pz-memory-recommendations {
+  min-height: 1.1rem;
+}
+
+.pz-jar-mods-locked {
+  padding: 2rem 1rem;
+  border: 1px dashed var(--pz-accent-line);
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-fill-row-locked);
+}
+
+.pz-jar-mods-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.6rem clamp(0.8rem, 2vw, 1.2rem);
+  scrollbar-gutter: stable;
+}
+
+.pz-jar-conflict-panel {
+  margin-bottom: 0.35rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--pz-tint-warning-line-strong);
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-tint-warning);
+  /* 展开/收起时，承载正文的"框"也一起过渡，而不是只有正文在动 */
+  transition:
+    background-color var(--pz-dur-base) ease,
+    border-color var(--pz-dur-base) ease,
+    box-shadow var(--pz-dur-slow) ease,
+    padding var(--pz-dur-slow) var(--pz-ease-out),
+    transform var(--pz-dur-slow) var(--pz-ease-out);
+}
+
+/* 展开态：框本身高亮（配合上面的 transition 形成动画） */
+.pz-jar-conflict-panel.is-expanded {
+  border-color: var(--pz-tint-warning-text);
+  background: var(--pz-tint-warning-strong);
+  box-shadow: var(--pz-shadow-menu);
+}
+
+.pz-jar-conflict-indicator {
+  width: 0.55rem;
+  min-width: 0.55rem;
+  height: 0.55rem;
+  margin-top: 0.28rem;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-warning);
+  box-shadow: var(--pz-ring-warning);
+}
+
+.pz-zombiebuddy-loader-panel {
+  margin-bottom: 0.6rem;
+}
+
+.pz-zombiebuddy-loader-indicator {
+  background: var(--pz-success);
+  box-shadow: var(--pz-ring-success);
+}
+
+.pz-mod-row {
+  margin-bottom: 0;
+  padding: 0.22rem 0.38rem;
+  border: 1px solid var(--pz-line-white);
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-card);
+  backdrop-filter: blur(calc(14px * var(--pz-blur-scale, 1))) saturate(140%);
+  -webkit-backdrop-filter: blur(calc(14px * var(--pz-blur-scale, 1))) saturate(140%);
+  contain-intrinsic-size: auto 2.35rem;
+  content-visibility: auto;
+  transition:
+    background-color var(--pz-dur-base) ease,
+    border-color var(--pz-dur-base) ease,
+    box-shadow var(--pz-dur-base) ease,
+    transform var(--pz-dur-fast) ease;
+}
+
+.pz-mod-sleep-row {
+  display: block;
+  min-width: 0;
+}
+
+.pz-lua-mod-list .pz-mod-sleep-row + .pz-mod-sleep-row {
+  margin-top: 0.22rem;
+}
+
+.pz-mod-sleep-placeholder {
+  min-height: 2.35rem;
+  border: 1px solid var(--pz-line-glass);
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-fill-glass);
+  pointer-events: none;
+}
+
+.pz-mod-row:hover {
+  border-color: var(--pz-line-hover);
+  background: var(--pz-fill-row-hover);
+}
+
+.pz-mod-row:active {
+  transform: scale(0.997);
+}
+
+/* 展开态：必须排在下面的 .is-enabled / .is-rejected / .is-selected 之前。
+   同特异性下展开白卡原本会盖掉状态底色，还让「已启用」左侧的蓝色状态条消失——
+   展开一行就换了一副样子。状态优先，展开态只负责自己的高亮。 */
+.pz-mod-row.pz-jar-mod-row-expanded {
+  border-color: var(--pz-line-emphasis);
+  background: var(--pz-surface-glass);
+  box-shadow: var(--pz-shadow-sm);
+}
+
+/* 悬停底色同样只给没有状态的行，避免悬停时又把状态色盖掉。 */
+.pz-mod-row.pz-jar-mod-row-expanded:not(.is-enabled):not(.is-rejected):not(.is-selected):hover {
+  border-color: var(--pz-line-hover);
+  background: var(--pz-surface-hover);
+}
+
+.pz-mod-row.is-enabled {
+  border-color: var(--pz-accent-line-strong);
+  background: var(--pz-fill-row-enabled);
+  box-shadow: inset 3px 0 0 var(--pz-accent);
+}
+
+.pz-mod-row.is-rejected {
+  border-color: var(--pz-tint-danger-line);
+  background: var(--pz-tint-danger);
+}
+
+.pz-mod-row.is-selected {
+  border-color: var(--pz-accent);
+  background: var(--pz-fill-row-selected);
+  box-shadow:
+    0 0 0 2px rgb(var(--pz-accent-rgb) / 20%),
+    0 7px 18px rgb(var(--pz-accent-rgb) / 16%);
+}
+
+.pz-mod-row[role="checkbox"] {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pz-mod-row[role="checkbox"]:focus-visible {
+  outline: 3px solid rgb(var(--pz-accent-rgb) / 38%);
+  outline-offset: 2px;
+}
+
+.pz-mod-summary {
+  display: flex;
+  min-height: 1.9rem;
+  align-items: center;
+  gap: 0.5rem;
+  outline: none;
+}
+
+.pz-mod-select-area {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 0.45rem;
+  cursor: pointer;
+}
+
+.pz-jar-mod-summary-content {
+  min-width: 0;
+}
+
+.pz-jar-mod-badges {
+  max-width: none;
+  flex: 0 1 auto;
+  margin-left: auto;
+  justify-content: flex-end;
+  text-align: right;
+  white-space: nowrap;
+  gap: 0.3rem !important;
+}
+
+.pz-jar-mod-badges .chakra-badge {
+  height: 1.05rem;
+  padding-inline: 0.32rem;
+  font-size: var(--pz-font-2xs);
+}
+
+.pz-mod-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  transition: opacity var(--pz-dur-fast) ease, width var(--pz-dur-fast) ease;
+}
+
+.pz-mod-hover-actions {
+  opacity: 0;
+  transition: opacity var(--pz-dur-fast) ease;
+}
+
+.pz-mod-row:hover .pz-mod-hover-actions,
+.pz-mod-row:focus-within .pz-mod-hover-actions,
+.pz-mod-row.is-selected .pz-mod-hover-actions {
+  opacity: 1;
+}
+
+.pz-jar-mod-poster,
+.pz-jar-mod-poster-placeholder {
+  width: 1.9rem;
+  height: 1.9rem;
+}
+
+.pz-jar-mod-poster {
+  position: relative;
+  overflow: hidden;
+  flex: 0 0 auto;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-sm);
+  background: var(--pz-fill-gray);
+}
+
+.pz-jar-mod-poster img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pz-jar-mod-poster-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--pz-accent-muted);
+  font-size: var(--pz-font-sm);
+  font-weight: 800;
+  background:
+    linear-gradient(135deg, var(--pz-accent-line-soft), var(--pz-line-strong)),
+    var(--pz-fill-gray);
+}
+
+.pz-jar-mod-annotation-count {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-jar-mod-description {
+  overflow: hidden;
+  margin-top: 0.08rem;
+  font-size: var(--pz-font-xs);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-jar-mod-details-shell {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--pz-dur-slower) var(--pz-ease-out);
+}
+
+.pz-jar-mod-row-expanded .pz-jar-mod-details-shell {
+  grid-template-rows: 1fr;
+}
+
+/* 网格直接子项的 margin/border/padding 会被算进 0fr 轨道的最小外尺寸，
+   收起态的壳因此留下 ~15px 的空白占位、还吞掉行尾的点击（行的点击守卫
+   会忽略落在 .pz-jar-mod-details-shell 里的命中）——外观全部挪到内层
+   .pz-jar-mod-details-body，让直接子项保持零外尺寸，0fr 才真正收拢到 0。 */
+.pz-jar-mod-details {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-0.35rem);
+  transition:
+    opacity var(--pz-dur-slow) ease,
+    transform var(--pz-dur-slower) var(--pz-ease-out);
+}
+
+.pz-jar-mod-details-body {
+  margin-top: 0.4rem;
+  padding: 0.5rem 0 0 0.25rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-jar-mod-row-expanded .pz-jar-mod-details {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 模组行展开时，正文框（行卡片）本身也做一次过渡并高亮。
+   这条规则已上移到 .pz-mod-row.is-enabled 之前（状态色优先级更高），此处不再重复。 */
+
+.pz-workshop-browser {
+  min-height: 0;
+}
+
+.pz-resource-center {
+  display: flex;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.pz-resource-center-sidebar {
+  flex: 0 0 9.5rem;
+  width: 9.5rem;
+  padding: 1rem 0.55rem 1rem 1rem;
+  border-right: 1px solid var(--pz-line);
+}
+
+.pz-resource-center-sidebar-title {
+  padding: 0 0.55rem 0.45rem;
+  color: var(--pz-text-muted);
+  font-size: var(--pz-font-sm);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.pz-resource-center-sidebar-item {
+  width: 100%;
+  justify-content: flex-start !important;
+  padding-inline: 0.6rem !important;
+  border-radius: var(--pz-radius-sm) !important;
+  color: var(--pz-text-label) !important;
+  font-size: var(--pz-font-base) !important;
+  text-align: left;
+}
+
+.pz-resource-center-sidebar-item:hover {
+  background: var(--pz-fill-accent) !important;
+  color: var(--pz-accent-strong) !important;
+}
+
+.pz-resource-center-sidebar-item-active {
+  background: var(--pz-fill-accent-active) !important;
+  color: var(--pz-accent-deep) !important;
+  font-weight: 700 !important;
+}
+
+.pz-resource-center-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+/* 子页面（创意工坊 / 光影包下载 / 开发者新闻 / 设置里的控制台·下载器）正文框的入场动画：
+   之前切换分类时正文框是"瞬间出现"，这里补上淡入 + 轻微上移。 */
+@keyframes pz-content-enter {
+  from {
+    opacity: 0;
+    transform: translateY(0.4rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.pz-resource-center-main > * {
+  animation: pz-content-enter var(--pz-dur-base) var(--pz-ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-resource-center-main > * {
+    animation: none;
+  }
+}
+
+/* 资源中心与模组管理的列表项：从上到下依次向右滑入，超过前 12 项后统一延迟。 */
+@keyframes pz-list-item-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-1.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.pz-resource-download-list > *,
+.pz-workshop-list > *,
+.pz-developer-news-list > *,
+.pz-lua-mod-list > *,
+.pz-jar-mod-list > * {
+  animation: pz-list-item-slide-in 260ms var(--pz-ease-out) backwards;
+  animation-delay: 540ms;
+}
+
+.pz-resource-download-list > :nth-child(1),
+.pz-workshop-list > :nth-child(1),
+.pz-developer-news-list > :nth-child(1),
+.pz-lua-mod-list > :nth-child(1),
+.pz-jar-mod-list > :nth-child(1) { animation-delay: 0ms; }
+.pz-resource-download-list > :nth-child(2),
+.pz-workshop-list > :nth-child(2),
+.pz-developer-news-list > :nth-child(2),
+.pz-lua-mod-list > :nth-child(2),
+.pz-jar-mod-list > :nth-child(2) { animation-delay: 45ms; }
+.pz-resource-download-list > :nth-child(3),
+.pz-workshop-list > :nth-child(3),
+.pz-developer-news-list > :nth-child(3),
+.pz-lua-mod-list > :nth-child(3),
+.pz-jar-mod-list > :nth-child(3) { animation-delay: 90ms; }
+.pz-resource-download-list > :nth-child(4),
+.pz-workshop-list > :nth-child(4),
+.pz-developer-news-list > :nth-child(4),
+.pz-lua-mod-list > :nth-child(4),
+.pz-jar-mod-list > :nth-child(4) { animation-delay: 135ms; }
+.pz-resource-download-list > :nth-child(5),
+.pz-workshop-list > :nth-child(5),
+.pz-developer-news-list > :nth-child(5),
+.pz-lua-mod-list > :nth-child(5),
+.pz-jar-mod-list > :nth-child(5) { animation-delay: 180ms; }
+.pz-resource-download-list > :nth-child(6),
+.pz-workshop-list > :nth-child(6),
+.pz-developer-news-list > :nth-child(6),
+.pz-lua-mod-list > :nth-child(6),
+.pz-jar-mod-list > :nth-child(6) { animation-delay: 225ms; }
+.pz-resource-download-list > :nth-child(7),
+.pz-workshop-list > :nth-child(7),
+.pz-developer-news-list > :nth-child(7),
+.pz-lua-mod-list > :nth-child(7),
+.pz-jar-mod-list > :nth-child(7) { animation-delay: 270ms; }
+.pz-resource-download-list > :nth-child(8),
+.pz-workshop-list > :nth-child(8),
+.pz-developer-news-list > :nth-child(8),
+.pz-lua-mod-list > :nth-child(8),
+.pz-jar-mod-list > :nth-child(8) { animation-delay: 315ms; }
+.pz-resource-download-list > :nth-child(9),
+.pz-workshop-list > :nth-child(9),
+.pz-developer-news-list > :nth-child(9),
+.pz-lua-mod-list > :nth-child(9),
+.pz-jar-mod-list > :nth-child(9) { animation-delay: 360ms; }
+.pz-resource-download-list > :nth-child(10),
+.pz-workshop-list > :nth-child(10),
+.pz-developer-news-list > :nth-child(10),
+.pz-lua-mod-list > :nth-child(10),
+.pz-jar-mod-list > :nth-child(10) { animation-delay: 405ms; }
+.pz-resource-download-list > :nth-child(11),
+.pz-workshop-list > :nth-child(11),
+.pz-developer-news-list > :nth-child(11),
+.pz-lua-mod-list > :nth-child(11),
+.pz-jar-mod-list > :nth-child(11) { animation-delay: 450ms; }
+.pz-resource-download-list > :nth-child(12),
+.pz-workshop-list > :nth-child(12),
+.pz-developer-news-list > :nth-child(12),
+.pz-lua-mod-list > :nth-child(12),
+.pz-jar-mod-list > :nth-child(12) { animation-delay: 495ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-resource-download-list > *,
+  .pz-workshop-list > *,
+  .pz-developer-news-list > *,
+  .pz-lua-mod-list > *,
+  .pz-jar-mod-list > * {
+    animation: none;
+  }
+}
+
+/* JAR 列表是扫描时逐条追加的：新行一出现就滑入，不等级联延迟，
+   否则每条扫描结果都要隐形 540ms 才显形，看起来像卡住。 */
+.pz-jar-mod-list > * {
+  animation-delay: 0ms;
+}
+
+.pz-resource-center-main > .pz-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 !important;
+}
+
+.pz-resource-center-main > .pz-resource-browser {
+  padding: 0 !important;
+}
+
+/* 设置页里的面板（例如下载器）沿用普通 .pz-panel 的内边距：
+   上面那条 `.pz-resource-center-main > .pz-panel { padding: 0 }` 是给资源中心自己用的，
+   不应该作用到设置页的内容上，否则会出现"边距失效"。 */
+.pz-settings-center > .pz-resource-center-main > .pz-panel {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  padding: 1rem clamp(1rem, 2vw, 1.5rem) !important;
+}
+
+/* 设置子页内容可能比窗口高（例如启动、模组加载器），正文区域自己纵向滚动，
+   不靠外层裁切；滚动条沿用全局的 webkit 主题。 */
+.pz-settings-center > .pz-resource-center-main {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.pz-general-settings-panel {
+  max-width: 52rem;
+}
+
+.pz-translator-settings-panel {
+  max-width: 60rem;
+}
+
+.pz-translator-textarea {
+  min-height: 9rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--pz-font-sm);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.pz-simple-mode .pz-workshop-tag-hint {
+  display: none !important;
+}
+
+.pz-resource-center-main > .pz-panel > .pz-panel-header,
+.pz-resource-center-main > .pz-resource-browser > .pz-panel-header {
+  padding: 0.7rem 1rem !important;
+}
+
+/* 创意工坊页头不画分隔横线（分隔交给下方筛选行自身的间距）。 */
+.pz-resource-center-main > .pz-panel > .pz-panel-header {
+  border-bottom: 0;
+}
+
+/* 资源中心页头普通按钮按设计规范取 30px（ui-style-guide §4.2），
+   覆盖 Chakra size="sm" 的 32px，刷新/重置两枚同排齐平。 */
+.pz-resource-center-main .pz-panel-header button {
+  height: 30px !important;
+  min-height: 30px !important;
+}
+
+.pz-resource-center-main > .pz-panel > .pz-workshop-browser {
+  display: flex;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  flex-direction: column;
+  padding: 0 1rem 0.75rem;
+}
+
+.pz-resource-center-main > .pz-panel > .pz-workshop-browser > :first-child {
+  flex: 0 0 auto;
+}
+
+.pz-resource-center-main > .pz-panel > .pz-workshop-browser > .pz-workshop-results {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  margin-top: 0.6rem !important;
+}
+
+.pz-resource-center-main .pz-workshop-browser > .chakra-stack {
+  gap: 0.35rem !important;
+}
+
+.pz-resource-browser {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pz-resource-download-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  padding: 0 1rem 0.75rem;
+}
+
+/* 两个列表容器共用「撑满 + 可收缩」的骨架，滚动方式各自声明。 */
+.pz-resource-download-list,
+.pz-workshop-results {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* 光影下载列表自己滚动。 */
+.pz-resource-download-list {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--pz-line);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 工坊结果区自身不滚动，滚动交给里面的 .pz-workshop-list。 */
+.pz-workshop-results {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pz-resource-meta-row {
+  margin-top: 0.5rem !important;
+}
+
+.pz-resource-download-item {
+  display: flex;
+  min-height: 4.5rem;
+  gap: 0.65rem;
+  padding: 0.55rem 0.25rem;
+  border-bottom: 1px solid var(--pz-line);
+  cursor: pointer;
+  position: relative;
+  isolation: isolate;
+  transition:
+    background var(--pz-dur-fast) ease,
+    border-color var(--pz-dur-fast) ease;
+}
+
+.pz-resource-download-item:hover,
+.pz-resource-download-item:focus-visible {
+  outline: none;
+}
+
+/* 光影包项目高亮：画在 ::before 上并加圆角，与按钮圆角一致（--pz-radius-sm）。
+   高亮独立成层，行与行之间的分隔线保持直角，只有高亮本身是圆角。 */
+.pz-resource-download-item::before {
+  position: absolute;
+  z-index: -1;
+  border-radius: var(--pz-radius-sm);
+  background: transparent;
+  content: "";
+  inset: 0;
+  transition: background var(--pz-dur-fast) ease;
+}
+
+.pz-resource-download-item:hover::before,
+.pz-resource-download-item:focus-visible::before {
+  background: var(--pz-fill-row-hover);
+}
+
+.pz-resource-download-icon {
+  display: flex;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: var(--pz-radius-xs);
+  background: var(--pz-fill-gray);
+  color: var(--pz-text-muted);
+  font-size: var(--pz-font-sm);
+  font-weight: 700;
+}
+
+.pz-resource-download-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pz-resource-filter-row,
+.pz-resource-search-row {
+  flex: 0 0 auto;
+}
+
+.pz-resource-center-main .pz-resource-filter-row,
+.pz-resource-center-main .pz-resource-search-row,
+.pz-resource-center-main .pz-workshop-filter-row,
+.pz-resource-center-main .pz-workshop-search-row {
+  gap: 0.3rem 0.45rem !important;
+  min-height: 0 !important;
+}
+
+.pz-resource-center-main .pz-resource-filter-row > .chakra-stack,
+.pz-resource-center-main .pz-workshop-filter-row > .chakra-stack {
+  gap: 0.3rem !important;
+}
+
+.pz-resource-center-main .pz-resource-search-row,
+.pz-resource-center-main .pz-workshop-search-row {
+  margin-top: 0.3rem !important;
+}
+
+/* One compact control height for every filter input, trigger and button. */
+.pz-resource-center-main .pz-resource-filter-row button,
+.pz-resource-center-main .pz-resource-search-row input,
+.pz-resource-center-main .pz-resource-search-row button,
+.pz-resource-center-main .pz-workshop-filter-row button,
+.pz-resource-center-main .pz-workshop-search-row input,
+.pz-resource-center-main .pz-workshop-search-row button,
+.pz-resource-center-main .pz-workshop-tag-picker button {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-block: 0 !important;
+}
+
+.pz-resource-center-main .pz-resource-filter-row button,
+.pz-resource-center-main .pz-resource-search-row button,
+/* 下拉触发器的内边距、以及「标签 ↔ ▾」的间距属于它自身的外观，不限作用域：
+   资源中心筛选行一直用这两个值，其它地方（如设置页翻译语言）复用同一组件时也保持一致。 */
+.pz-workshop-menu-trigger {
+  padding-inline: 0.55rem !important;
+}
+
+.pz-workshop-menu-trigger .chakra-stack {
+  gap: 0.3rem !important;
+}
+
+.pz-resource-center-main .pz-workshop-filter-row button,
+.pz-resource-center-main .pz-workshop-search-row button,
+.pz-resource-center-main .pz-workshop-tag-picker button {
+  padding-inline: 0.55rem !important;
+}
+
+.pz-resource-center-main .pz-resource-search-row input,
+.pz-resource-center-main .pz-workshop-search-row input {
+  padding-inline: 0.55rem !important;
+}
+
+/* Keep the label/chevron gap inside dropdown triggers tight. */
+.pz-resource-center-main .pz-background-menu-trigger .chakra-stack {
+  gap: 0.3rem !important;
+}
+
+.pz-resource-center-main .pz-workshop-tag-picker-compact {
+  display: flex;
+  flex: 0 0 auto;
+  height: var(--pz-control-height);
+  min-height: var(--pz-control-height);
+  max-height: var(--pz-control-height);
+  flex-direction: row;
+  align-items: center;
+  overflow: visible;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.pz-resource-center-main .pz-workshop-tag-picker-compact > .chakra-stack {
+  height: var(--pz-control-height);
+  flex-wrap: nowrap;
+  gap: 0.3rem !important;
+}
+
+.pz-resource-center-main .pz-workshop-tag-picker-compact button,
+.pz-resource-center-main .pz-workshop-current-filters button {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-block: 0 !important;
+  padding-inline: 0.45rem !important;
+}
+
+/* 光影包"选择文件下载"弹层：由 App.tsx 里的 <Portal> 挂到 body，
+   否则会被正文框 .pz-main 的 backdrop-filter 变成固定定位包含块、
+   再被它的 overflow: hidden 裁掉，看起来像"只能显示在正文框里"。
+   z-index 取 1000：高于侧边栏(30)，低于窗口标题栏(9999)，保证标题栏按钮仍可点击。 */
+.pz-resource-file-overlay {
+  position: fixed;
+  z-index: var(--pz-z-dialog);
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  animation: pz-resource-overlay-in var(--pz-dur-base) ease both;
+  background: var(--pz-scrim);
+}
+
+/* 关闭时先播退场动画（时长对应 App.tsx 的 RESOURCE_DIALOG_EXIT_MS）再卸载。
+   这层依旧吃点击，避免连点时穿透到下面的光影列表；重复关闭由 App.tsx 的计时器挡住。 */
+.pz-resource-file-overlay.is-closing {
+  animation: pz-resource-overlay-out var(--pz-dur-exit) ease both;
+}
+
+@keyframes pz-resource-overlay-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes pz-resource-overlay-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+.pz-resource-file-dialog {
+  position: relative;
+  display: flex;
+  width: min(720px, 100%);
+  max-height: min(80vh, 700px);
+  flex-direction: column;
+  overflow: hidden;
+  padding: 1rem;
+  border: 1px solid var(--pz-line-strong);
+  border-radius: var(--pz-radius-md);
+  /* 启动页亚克力配方（§2.3）：半透明亚克力底 + 下方 ::after 的噪点颗粒 +
+     isolation 兜住 z-index: -1。这里用浅色档（--pz-surface-acrylic-light，同启动页
+     用户面板）：弹窗正文是浅色系文字，创意工坊详情还嵌着按浅色底渲染的 Steam 富文本，
+     暗色档会把它们全部压灭。浮层悬在任意页面之上，拿不到启动页的克隆壁纸层，
+     按浮层规范用真的背景模糊补"看透"，参数走菜单令牌（模糊度设置全局生效）。 */
+  background-color: var(--pz-surface-acrylic-light);
+  box-shadow: var(--pz-shadow-dialog);
+  backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
+  isolation: isolate;
+  animation: pz-resource-dialog-in var(--pz-dur-base) var(--pz-ease-out) both;
+  /* 高度由 App.tsx 量出内容高度后写成内联值，这里只提供时长与缓动。 */
+  transition: height var(--pz-dur-slow) var(--pz-ease-out);
+}
+
+/* 亚克力的磨砂颗粒层，与 .pz-launch-account::after 同一张 --pz-noise-image。 */
+.pz-resource-file-dialog::after {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: inherit;
+  background-image: var(--pz-noise-image);
+  opacity: 0.14;
+  pointer-events: none;
+  content: "";
+}
+
+.pz-resource-file-overlay.is-closing .pz-resource-file-dialog {
+  animation: pz-resource-dialog-out var(--pz-dur-exit) ease both;
+}
+
+@keyframes pz-resource-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.55rem) scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pz-resource-dialog-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(0.4rem) scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-resource-file-overlay,
+  .pz-resource-file-overlay.is-closing,
+  .pz-resource-file-dialog,
+  .pz-resource-file-overlay.is-closing .pz-resource-file-dialog {
+    animation-duration: 1ms;
+  }
+
+  /* 这里用 1ms 而不是 none：App.tsx 靠 transitionend 把内联高度交还给 auto，
+     没有过渡事件就不会触发。 */
+  .pz-resource-file-dialog {
+    transition-duration: 1ms;
+  }
+}
+
+/* 头部现在带资源信息（更新/下载/作者），高度不固定，
+   所以文件列表用 flex 撑满剩余空间，而不是写死 max-height。 */
+.pz-resource-file-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  margin-top: 0.85rem;
+  overflow-y: auto;
+}
+
+.pz-resource-file-row {
+  min-height: 3.5rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--pz-line);
+}
+
+/* 创意工坊详情弹窗：遮罩、圆角、阴影和进出场动画全部沿用光影下载弹窗
+   （.pz-resource-file-overlay / .pz-resource-file-dialog），这里只调宽度，
+   并给正文一个可滚动区、给底部操作一条分隔线。 */
+.pz-workshop-detail-dialog {
+  width: min(840px, 100%);
+}
+
+.pz-workshop-detail-body {
+  min-height: 6rem;
+  flex: 1 1 auto;
+  margin-top: 0.85rem;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.pz-workshop-detail-footer {
+  flex: 0 0 auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-viewpoint-mod-list {
+  max-width: 100%;
+}
+
+.pz-workshop-filter-row,
+.pz-workshop-search-row {
+  min-height: 2.25rem;
+}
+
+.pz-workshop-tag-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+/* 所有菜单 / 多级子菜单共用这一套外观：标签选择器、筛选下拉、背景菜单、
+   创意工坊右键菜单都是 .pz-workshop-tag-menu-content（子菜单叠的 .pz-background-menu-layer
+   只管层级）。亚克力 = 背景模糊 + 半透明底色 + 颗粒 + 顶边内高光；模糊参数见 --pz-menu-*。 */
+.pz-workshop-tag-menu-content,
+.pz-workshop-context-menu {
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-sm);
+  background-color: var(--pz-menu-tint);
+  background-image: var(--pz-menu-noise-image);
+  box-shadow:
+    var(--pz-shadow-menu),
+    inset 0 1px 0 var(--pz-menu-highlight);
+  backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
+}
+
+.pz-workshop-tag-menu-content {
+  max-width: min(320px, calc(100vw - 1rem));
+  max-height: min(18rem, calc(100vh - 1rem));
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 筛选类下拉（WorkshopDropdown）的浮层宽度跟触发按钮对齐：zag 会把按钮宽度
+   写进 positioner 的 --reference-width。用 min-width 而不是 width，
+   选项文字比按钮长时仍能完整显示，不会被裁掉。
+   标签选择器（显式 minW="220px"）和背景图菜单（.pz-background-menu-content）
+   是"内容比按钮宽"的另一类，不套这条规则。 */
+.pz-dropdown-menu-content {
+  min-width: var(--reference-width, 0px);
+}
+
+/* 创意工坊项目右键菜单：只有两项，沿用同一套亚克力外观但不需要滚动。 */
+.pz-workshop-context-menu {
+  min-width: 170px;
+}
+
+.pz-menu-positioner {
+  z-index: var(--pz-z-menu) !important;
+  max-width: calc(100vw - 1rem);
+}
+
+.pz-background-menu-layer {
+  position: relative;
+  z-index: calc(var(--pz-z-menu) + 1) !important;
+}
+
+.pz-background-menu-content {
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 1rem));
+}
+
+.pz-background-menu-trigger {
+  border-color: var(--pz-accent-line) !important;
+  background: var(--pz-surface-glass) !important;
+}
+
+.pz-background-menu-thumbnail,
+.pz-background-menu-thumbnail-placeholder {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 28px;
+  margin-right: 0.45rem;
+  border-radius: var(--pz-radius-xs);
+  object-fit: cover;
+}
+
+.pz-background-menu-thumbnail-placeholder {
+  background: var(--pz-fill-gray-strong);
+}
+
+.pz-workshop-tag-menu-chevron {
+  color: currentColor;
+  font-size: 0.9em;
+  font-weight: 800;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+.pz-jar-scan-progress {
+  height: 3px;
+  overflow: hidden;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-fill);
+}
+
+.pz-jar-scan-progress-value {
+  height: 100%;
+  background: var(--pz-accent);
+  transition: width var(--pz-dur-fast) ease;
+}
+
+.pz-workshop-tag-hint {
+  margin-left: auto;
+}
+
+.pz-workshop-current-filters {
+  min-height: 0;
+  margin-top: 0.4rem !important;
+  padding-top: 0.3rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-filter-label {
+  color: var(--pz-text-label) !important;
+  letter-spacing: 0.04em;
+}
+
+.pz-workshop-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-workshop-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 0.35rem;
+  border: 0;
+  border-top: 1px solid var(--pz-line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.pz-workshop-list-item {
+  display: flex;
+  min-height: 4.75rem;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--pz-line);
+  cursor: pointer;
+  position: relative;
+  isolation: isolate;
+  transition:
+    background var(--pz-dur-base) ease,
+    border-color var(--pz-dur-base) ease,
+    box-shadow var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) ease;
+}
+
+.pz-workshop-list-item:last-child {
+  border-bottom: 0;
+}
+
+.pz-workshop-list-item:hover,
+.pz-workshop-list-item:focus-visible {
+  outline: none;
+}
+
+/* 创意工坊项目高亮：与光影包项目同一套做法，圆角取自按钮圆角（--pz-radius-sm）。 */
+.pz-workshop-list-item::before {
+  position: absolute;
+  z-index: -1;
+  border-radius: var(--pz-radius-sm);
+  background: transparent;
+  content: "";
+  inset: 0;
+  transition: background var(--pz-dur-base) ease;
+}
+
+.pz-workshop-list-item:hover::before,
+.pz-workshop-list-item:focus-visible::before {
+  background: var(--pz-fill-row-hover);
+}
+
+.pz-workshop-list-preview {
+  display: flex;
+  flex: 0 0 64px;
+  width: 64px;
+  height: 64px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: var(--pz-radius-sm);
+  background: var(--pz-fill-gray);
+}
+
+.pz-workshop-list-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pz-workshop-list-body {
+  min-width: 0;
+  flex: 1;
+  padding-top: 0.1rem;
+}
+
+.pz-workshop-list-body > div:first-child > p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-workshop-list-meta {
+  line-height: 1.35;
+}
+
+.pz-workshop-list-meta p {
+  overflow: hidden;
+  max-width: 16rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-dropzone {
+  border-color: var(--pz-accent-line) !important;
+  background:
+    linear-gradient(135deg, var(--pz-fill-row-hover), var(--pz-fill-highlight)),
+    repeating-linear-gradient(
+      -45deg,
+      var(--pz-accent-faint) 0,
+      var(--pz-accent-faint) 8px,
+      transparent 8px,
+      transparent 16px
+    ) !important;
+}
+
+.pz-list-row {
+  border-bottom-color: var(--pz-line) !important;
+}
+
+.pz-modal-overlay {
+  background: var(--pz-scrim-strong) !important;
+  backdrop-filter: blur(calc(7px * var(--pz-blur-scale, 1)));
+}
+
+.pz-modal {
+  border-radius: var(--pz-radius-md) !important;
+  border: 1px solid var(--pz-line-white);
+  background: var(--pz-surface-float) !important;
+  box-shadow: var(--pz-shadow-modal);
+  backdrop-filter: blur(calc(24px * var(--pz-blur-scale, 1)));
+}
+
+.pz-toast-viewport {
+  position: fixed;
+  top: calc(
+    var(--pz-titlebar-height) + var(--pz-sidebar-top) + var(--pz-sidebar-height) + 0.5rem
+  );
+  right: 0.75rem;
+  bottom: auto;
+  left: auto;
+  z-index: var(--pz-z-toast) !important;
+  display: flex;
+  width: min(360px, calc(100vw - 2rem));
+  flex-direction: column;
+  gap: 0.6rem;
+  pointer-events: none;
+}
+
+.pz-toast {
+  animation: pz-toast-enter var(--pz-dur-base) var(--pz-ease-pop) both;
+  overflow: hidden;
+  border: 1px solid var(--pz-line-strong);
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-float);
+  box-shadow: var(--pz-shadow-menu);
+  pointer-events: auto;
+  backdrop-filter: blur(calc(18px * var(--pz-blur-scale, 1)));
+}
+
+.pz-toast-closing {
+  animation: pz-toast-exit var(--pz-dur-base) ease-in both;
+  pointer-events: none;
+}
+
+.pz-toast-content {
+  display: flex;
+  min-height: 3.1rem;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.7rem 0.55rem 0.7rem 0.75rem;
+}
+
+.pz-toast-indicator {
+  flex: 0 0 0.22rem;
+  align-self: stretch;
+  min-height: 1.55rem;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-accent);
+}
+
+.pz-toast-success .pz-toast-indicator {
+  background: var(--pz-success);
+}
+
+.pz-toast-error .pz-toast-indicator {
+  background: var(--pz-danger);
+}
+
+.pz-toast-message {
+  min-width: 0;
+  flex: 1;
+  color: var(--pz-text);
+  font-size: var(--pz-font-base);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.pz-toast-close {
+  display: grid;
+  width: 1.55rem;
+  height: 1.55rem;
+  flex: 0 0 1.55rem;
+  place-items: center;
+  border: 0;
+  border-radius: var(--pz-radius-sm);
+  background: transparent;
+  color: var(--pz-text-muted);
+  cursor: pointer;
+  font-size: var(--pz-font-lg);
+  line-height: 1;
+}
+
+.pz-toast-close:hover {
+  background: var(--pz-fill-subtle);
+  color: var(--pz-text-strong);
+}
+
+.pz-toast-progress {
+  height: 3px;
+  background: var(--pz-accent);
+  transform-origin: right;
+  animation: pz-toast-progress 3s linear forwards;
+}
+
+.pz-toast-success .pz-toast-progress {
+  background: var(--pz-success);
+}
+
+.pz-toast-error .pz-toast-progress {
+  background: var(--pz-danger);
+}
+
+@keyframes pz-toast-progress {
+  from {
+    transform: scaleX(1);
+  }
+
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes pz-toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(0.7rem) scale(0.94);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes pz-toast-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(0.45rem) scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .pz-launch-bottom-actions {
+    right: 1rem;
+    bottom: 1rem;
+    max-width: calc(100% - 2rem);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .pz-launch-account {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .pz-launch-command {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .pz-sidebar {
+    width: calc(100% - 1.2rem);
+    max-width: calc(100% - 1.2rem);
+    min-height: 3.2rem;
+    gap: 0.35rem;
+    padding: 0.4rem;
+  }
+
+  .pz-sidebar-brand {
+    gap: 0.3rem;
+    padding-right: 0.35rem;
+  }
+
+  .pz-top-nav-title {
+    display: none;
+  }
+
+  .pz-side-nav {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 0.3rem !important;
+    margin-top: 0;
+    overflow-x: auto;
+    padding: 0;
+  }
+
+  .pz-side-nav-item {
+    display: flex !important;
+    flex: 0 0 auto;
+    min-height: 2.3rem;
+  }
+
+  .pz-app-content {
+    height: auto;
+    max-height: none;
+    min-height: calc(100vh - 126px);
+    padding: 0;
+  }
+
+  .pz-main {
+    width: calc(100% - 1.2rem);
+    max-height: none;
+  }
+
+  .pz-workshop-list-item {
+    align-items: flex-start;
+    padding: 0.5rem;
+  }
+
+  .pz-resource-center {
+    display: block;
+    overflow: visible;
+  }
+
+  .pz-resource-center-sidebar {
+    width: 100%;
+    padding: 0.65rem 0.75rem 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--pz-line);
+  }
+
+  .pz-resource-center-sidebar-title {
+    padding-inline: 0.35rem;
+  }
+
+  .pz-resource-center-sidebar .chakra-stack {
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 0.6rem;
+  }
+
+  .pz-resource-center-sidebar .pz-mod-preset-list {
+    flex-direction: column;
+    overflow-x: visible;
+    padding-bottom: 0;
+  }
+
+  .pz-resource-center-sidebar-item {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .pz-resource-center-main {
+    overflow: visible;
+  }
+
+  /* On small screens let the page scroll instead of nesting scroll areas. */
+  .pz-app-content-resource-center {
+    height: auto;
+    max-height: calc(100vh - var(--pz-titlebar-height));
+    overflow-y: auto;
+  }
+
+  .pz-settings-center > .pz-resource-center-main {
+    overflow-y: visible;
+  }
+
+  .pz-resource-center-main > .pz-panel {
+    height: auto;
+  }
+
+  .pz-resource-center-main > .pz-panel > .pz-workshop-browser {
+    height: auto;
+  }
+
+  .pz-workshop-results,
+  .pz-workshop-list,
+  .pz-jar-mods-body,
+  .pz-lua-mod-list,
+  .pz-developer-news-list {
+    overflow-y: visible;
+  }
+
+  .pz-workshop-list-preview {
+    flex-basis: 64px;
+    width: 64px;
+    height: 64px;
+  }
+
+  .pz-workshop-tag-hint {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .pz-toast-viewport {
+    top: calc(
+      var(--pz-titlebar-height) + var(--pz-sidebar-top) + var(--pz-sidebar-height) +
+        0.5rem
+    );
+    right: 0.6rem;
+    bottom: auto;
+    left: auto;
+    width: calc(100vw - 1.2rem);
+  }
+}
+
+/* 尺寸与底色的声明在启动页布局一节，这里只补定位上下文。 */
+.pz-launch-account {
+  position: relative;
+}
+
+.pz-launch-workshop-info {
+  --pz-workshop-info-height: 3.8rem;
+  position: absolute;
+  left: 0;
+  bottom: clamp(1rem, 3vw, 2.5rem);
+  z-index: 7;
+  display: flex;
+  max-width: calc(100% - 1rem);
+  flex-direction: row;
+  align-items: stretch;
+  /* 展开/收起都锁定同一条高度，避免按钮和胶囊在展开前后"长高" */
+  height: var(--pz-workshop-info-height);
+  gap: 0;
+  border-radius: 0 var(--pz-radius-lg) var(--pz-radius-lg) 0;
+  box-shadow: var(--pz-shadow-dialog);
+}
+
+.pz-launch-workshop-info-toggle {
+  order: 1;
+  display: grid !important;
+  width: 1.7rem;
+  min-width: 1.7rem;
+  height: var(--pz-workshop-info-height);
+  min-height: var(--pz-workshop-info-height) !important;
+  max-height: var(--pz-workshop-info-height);
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0 !important;
+  border: 1px solid var(--pz-line-glass) !important;
+  border-left: 0 !important;
+  border-radius: 0 var(--pz-radius-lg) var(--pz-radius-lg) 0 !important;
+  background: var(--pz-glass-dark) !important;
+  color: var(--pz-text-on-dark) !important;
+  cursor: pointer;
+  /* !important：否则被按钮默认层接管，开合胶囊时的圆角过渡看不到。 */
+  transition:
+    background var(--pz-dur-base) ease,
+    color var(--pz-dur-base) ease,
+    border-radius var(--pz-dur-base) ease !important;
+}
+
+/* When open the button becomes the left cap of one continuous capsule. */
+.pz-launch-workshop-info.is-open .pz-launch-workshop-info-toggle {
+  border-right: 0 !important;
+  border-radius: 0 !important;
+}
+
+.pz-launch-workshop-info-toggle:hover {
+  background: var(--pz-glass-dark-hover) !important;
+  color: var(--pz-text-inverse) !important;
+}
+
+.pz-launch-workshop-info-toggle:focus-visible {
+  outline: 2px solid var(--pz-line-glass);
+  outline-offset: 2px;
+}
+
+.pz-launch-workshop-info-chevron {
+  display: block;
+  font-size: var(--pz-font-lg);
+  font-weight: 700;
+  line-height: 1;
+  transition: transform var(--pz-dur-slow) var(--pz-ease-out);
+}
+
+.pz-launch-workshop-info.is-open .pz-launch-workshop-info-chevron {
+  transform: rotate(180deg);
+}
+
+.pz-launch-workshop-info-details {
+  order: 2;
+  display: flex;
+  width: max-content;
+  max-width: 0;
+  height: var(--pz-workshop-info-height);
+  min-height: 0;
+  box-sizing: border-box;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.08rem;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid transparent;
+  border-left: 0;
+  border-radius: 0 var(--pz-radius-md) var(--pz-radius-md) 0;
+  background: var(--pz-glass-dark);
+  opacity: 0;
+  transition:
+    max-width var(--pz-dur-slow) var(--pz-ease-out),
+    opacity var(--pz-dur-base) ease,
+    padding var(--pz-dur-slow) var(--pz-ease-out),
+    border-color var(--pz-dur-base) ease;
+}
+
+.pz-launch-workshop-info.is-open .pz-launch-workshop-info-details {
+  max-width: min(14rem, calc(100vw - 3rem));
+  padding: 0.45rem 0.7rem;
+  border-color: var(--pz-line-glass);
+  opacity: 1;
+}
+
+.pz-launch-workshop-info-title {
+  color: var(--pz-text-on-dark-muted) !important;
+  font-size: var(--pz-font-2xs) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.12em;
+  line-height: 1.1;
+}
+
+.pz-launch-workshop-info-name,
+.pz-launch-workshop-info-id {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pz-text-inverse);
+  font-size: var(--pz-font-md) !important;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-launch-workshop-info-id {
+  color: var(--pz-text-on-dark-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.pz-steam-id-toggle {
+  display: grid;
+  min-width: 0;
+  justify-items: start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pz-text-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+/* 账号名隐藏：只做视觉压缩（scaleY 1 → 0），不写 font-size/line-height，
+   所以行高、轨道宽度都不变，相邻控件不会被推着动。
+   横线和文字占同一格、宽 100%，宽度由账号名字宽决定，因此压平后留下的
+   横线与原文字严格等长，且正好落在文字的垂直中线上。 */
+.pz-steam-id-value {
+  grid-area: 1 / 1;
+  overflow: hidden;
+  white-space: nowrap;
+  transform-origin: center;
+  /* 显示方向：先等横线淡出，再把文字高度还原。
+     延迟取 tap 的一半：两段各占一半并互相搭接，中间不留空窗。 */
+  transition: transform var(--pz-dur-tap) var(--pz-ease-out) calc(var(--pz-dur-tap) / 2);
+}
+
+.pz-steam-id-line {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 3ch;
+  height: 1px;
+  align-self: center;
+  border-radius: var(--pz-radius-pill);
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--pz-dur-tap) ease;
+}
+
+.pz-steam-id-toggle.is-hidden .pz-steam-id-value {
+  transform: scaleY(0);
+  /* 隐藏方向：文字立刻压平；ease-out 让它在 60ms 内基本压到位，
+     横线恰好此时起步，视觉上是"压平的同时拉出一条线"。 */
+  transition-delay: 0ms;
+}
+
+.pz-steam-id-toggle.is-hidden .pz-steam-id-line {
+  opacity: 1;
+  transition-delay: calc(var(--pz-dur-tap) / 2);
+}
+
+/* 减少动态效果时，文件末尾的全局规则只把过渡时长压到 0.01ms，延迟仍会保留，
+   会让"压平 → 出线"中间空等 60ms。这里把延迟一起清掉，变成即时切换。 */
+@media (prefers-reduced-motion: reduce) {
+  .pz-steam-id-value,
+  .pz-steam-id-line {
+    transition-delay: 0ms !important;
+  }
+}
+
+.pz-steam-id-toggle:focus-visible {
+  outline: 2px solid rgb(var(--pz-accent-rgb) / 65%);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Page-level polish for views that previously relied on inline props. */
+/* ------------------------------------------------------------------ */
+
+/* Workshop result footer and pagination */
+.pz-workshop-result-summary {
+  flex: 0 0 auto;
+  margin-top: 0 !important;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-workshop-pagination {
+  flex: 0 0 auto;
+  padding: 0.7rem 0 0.15rem;
+}
+
+.pz-workshop-tags-inline,
+.pz-resource-download-title-row,
+.pz-resource-download-tags {
+  min-width: 0;
+}
+
+/* Lua mod management */
+.pz-lua-mods-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pz-lua-mod-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.pz-lua-mod-name,
+.pz-lua-mod-location {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-lua-mod-name {
+  flex: 0 1 auto;
+  font-size: var(--pz-font-base);
+  line-height: 1.25;
+}
+
+.pz-lua-mod-location {
+  margin-top: 0.08rem;
+  color: var(--pz-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--pz-font-xs);
+  line-height: 1.2;
+}
+
+.pz-lua-mod-title-row {
+  min-width: 0;
+  align-items: baseline !important;
+}
+
+.pz-lua-mod-description {
+  overflow: hidden;
+  margin-top: 0.08rem;
+  font-size: var(--pz-font-xs);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pz-jar-mod-name {
+  font-size: var(--pz-font-base);
+  line-height: 1.25;
+}
+
+/* JAR mod list */
+.pz-jar-mod-list {
+  width: 100%;
+}
+
+/* JAR conflict analysis disclosure */
+.pz-jar-conflict-summary {
+  display: flex;
+  width: 100%;
+  min-height: 2.6rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0.6rem !important;
+  border: 1px solid var(--pz-tint-warning-line) !important;
+  border-radius: var(--pz-radius-md) !important;
+  background: var(--pz-surface-card) !important;
+}
+
+.pz-jar-conflict-chevron {
+  flex: 0 0 auto;
+  color: var(--pz-text-muted);
+  font-size: var(--pz-font-base);
+}
+
+.pz-jar-conflict-details-shell {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--pz-dur-slower) var(--pz-ease-out);
+}
+
+.pz-jar-conflict-details-shell[aria-hidden="false"] {
+  grid-template-rows: 1fr;
+}
+
+.pz-jar-conflict-details {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 冲突清单：一屏最多显示 12 行，更长的清单在这块区域内滚动，
+   不再把面板撑到上万像素（25 个已批准模组实测会产生 402 条冲突）。
+   行高与行距在这里下发、清单高度由它们算出，改行高或行数都不会算错；
+   想调整一屏行数只改 --pz-jar-conflict-visible-rows。 */
+.pz-jar-conflict-list {
+  --pz-jar-conflict-visible-rows: 12;
+  --pz-jar-conflict-row-height: 1.375rem;
+  --pz-jar-conflict-row-gap: 0.25rem;
+  max-height: calc(
+    var(--pz-jar-conflict-visible-rows) * var(--pz-jar-conflict-row-height) +
+      (var(--pz-jar-conflict-visible-rows) - 1) * var(--pz-jar-conflict-row-gap)
+  );
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  scrollbar-gutter: stable;
+}
+
+.pz-jar-conflict-row {
+  min-height: var(--pz-jar-conflict-row-height);
+}
+
+/* 支持库页的安装项分组：三行（.pz-support-option）统一放在一个面板里，
+   行外观复用模组行的卡片外壳 .pz-mod-row + .pz-jar-mod-details-shell 展开过渡。
+   刻意不套 .pz-jar-mod-row：那个类会带上模组的启用/拒绝状态底色（灰底 + 左侧状态条），
+   而这里表达的是安装状态，由右侧标签说明，行本身保持中性。 */
+.pz-support-option-list {
+  width: 100%;
+}
+
+/* Launch argument editor */
+.pz-launch-argument-input {
+  min-width: 0;
+}
+
+.pz-launch-argument-action {
+  flex: 0 0 auto;
+}
+
+/* Developer news */
+.pz-developer-news-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pz-developer-news-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.pz-developer-news-item {
+  padding: 1.1rem clamp(1rem, 2vw, 1.5rem) 1.3rem;
+  border-bottom: 1px solid var(--pz-line);
+}
+
+.pz-developer-news-item:last-child {
+  border-bottom: 0;
+}
+
+/* 开发者新闻：条目内每个文字段落、标题、列表项、图片按顺序弹出。
+   延迟由 App.tsx 的 DeveloperNewsItem 写入 --pz-reveal-index，只在条目挂载时执行一次，
+   翻译回填替换正文后新节点没有这个标记，因此不会重播。 */
+@keyframes pz-news-reveal-pop {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pz-news-reveal {
+  animation: pz-news-reveal-pop 280ms var(--pz-ease-out) backwards;
+  animation-delay: calc(var(--pz-reveal-index, 0) * 50ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-news-reveal {
+    animation: none;
+  }
+}
+
+.pz-developer-news-content {
+  max-width: 78ch;
+  color: var(--pz-text);
+  font-size: var(--pz-font-base);
+  line-height: 1.75;
+}
+
+.pz-developer-news-content h1,
+.pz-developer-news-content h2,
+.pz-developer-news-content h3,
+.pz-developer-news-content h4 {
+  margin: 1.1rem 0 0.45rem;
+  color: var(--pz-text-strong);
+  font-size: var(--pz-font-lg);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.pz-developer-news-content p {
+  margin: 0.5rem 0;
+}
+
+.pz-developer-news-content ul,
+.pz-developer-news-content ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.pz-developer-news-content li {
+  margin: 0.2rem 0;
+}
+
+.pz-developer-news-content img {
+  height: auto;
+  max-width: 100%;
+  border-radius: var(--pz-radius-sm);
+}
+
+.pz-developer-news-content a {
+  color: var(--pz-accent-strong);
+}
+
+.pz-news-source-link {
+  margin-top: 0.5rem;
+  padding-inline: 0 !important;
+  color: var(--pz-accent-strong) !important;
+}
+
+.pz-news-engine-share {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-fill-subtle);
+  color: var(--pz-text-muted) !important;
+  font-size: var(--pz-font-xs) !important;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* Downloader settings form */
+.pz-download-settings-form {
+  display: flex;
+  width: 100%;
+  max-width: 40rem;
+  flex-direction: column;
+}
+
+.pz-download-settings-form > p {
+  margin: 0 0 0.3rem;
+  color: var(--pz-text-label);
+  font-size: var(--pz-font-md);
+  font-weight: 600;
+}
+
+.pz-download-settings-form > * + p {
+  margin-top: 0.95rem;
+}
+
+.pz-download-settings-form > input[type="number"] {
+  max-width: 10rem;
+}
+
+.pz-download-progress {
+  overflow: hidden;
+  height: 6px;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-fill);
+}
+
+.pz-download-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--pz-accent);
+  transition: width var(--pz-dur-base) ease;
+}
+
+@media (max-width: 640px) {
+  .pz-launch-account,
+  .pz-launch-command {
+    min-width: 0;
+  }
+
+  .pz-download-settings-form {
+    max-width: 100%;
+  }
+}
+
+/* PCL2 style selection controls for both mod pages. */
+.pz-mod-management .pz-resource-center-sidebar {
+  flex-basis: 11.5rem;
+  width: 11.5rem;
+}
+
+/* 侧栏高度跟随正文区域，内容超出时在侧栏内部纵向滚动（筛选 / 排序 / 预设）。 */
+.pz-mod-management .pz-resource-center-sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.pz-mod-sidebar-section-title {
+  margin-top: 1rem;
+  padding: 0 0.55rem 0.35rem;
+  color: var(--pz-text-muted);
+  font-size: var(--pz-font-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.pz-mod-page-header {
+  flex: 0 0 auto;
+  padding: 0.7rem clamp(0.8rem, 2vw, 1.2rem);
+  border-bottom: 1px solid var(--pz-line);
+}
+
+.pz-mod-header-tools input {
+  width: min(28vw, 22rem);
+  min-width: 13rem;
+}
+
+.pz-jar-mods-page {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.pz-mod-batch-bar {
+  flex: 0 0 auto;
+  min-height: 2rem;
+  padding: 0.3rem clamp(0.8rem, 2vw, 1.2rem);
+  border-bottom: 1px solid var(--pz-line);
+}
+
+.pz-mod-batch-count {
+  min-width: 4.5rem;
+  color: var(--pz-text-label);
+  font-size: var(--pz-font-sm);
+  font-weight: 700;
+}
+
+.pz-mod-batch-spacer {
+  flex: 1 1 auto;
+  min-width: 0.5rem;
+}
+
+/* 布局声明（flex/溢出）在「模组列表」一节，这里只补内边距。 */
+.pz-lua-mod-list {
+  padding: 0.45rem clamp(0.8rem, 2vw, 1.2rem) 0.75rem;
+}
+
+.pz-lua-mod-row.is-enabled .pz-lua-mod-name {
+  color: var(--pz-text-accent-strong) !important;
+}
+
+.pz-lua-mod-row:not(.is-enabled):not(.is-selected) {
+  border-color: var(--pz-line-strong);
+  background: var(--pz-fill-gray);
+}
+
+.pz-jar-mod-row:not(.is-enabled):not(.is-rejected):not(.is-selected) {
+  border-color: var(--pz-line-strong);
+  background: var(--pz-fill-gray);
+}
+
+.pz-lua-mod-row:not(.is-enabled):not(.is-selected) .pz-lua-mod-name {
+  color: var(--pz-text-disabled) !important;
+  text-decoration: line-through;
+  text-decoration-color: var(--pz-text-disabled-strike);
+}
+
+.pz-lua-mod-row:not(.is-enabled):not(.is-selected) .pz-jar-mod-badges {
+  opacity: 0.76;
+}
+
+.pz-lua-mod-actions {
+  padding-left: 0.2rem;
+  border-left: 1px solid var(--pz-line);
+}
+
+.pz-lua-mod-order-button {
+  width: 1.6rem !important;
+  min-width: 1.6rem !important;
+  padding: 0 !important;
+  color: var(--pz-text-label) !important;
+  font-size: var(--pz-font-base) !important;
+  line-height: 1;
+}
+
+.pz-lua-mod-order-button:disabled {
+  opacity: 0.32;
+}
+
+/* 这两条规则作用在同一批按钮上（TSX 里 class 是
+   "pz-lua-mod-detail-button pz-mod-more-button"），原先 font-size / padding 互相覆盖、
+   其中一条几乎整段是死代码。这里按实际生效的值合并成一条。 */
+.pz-jar-mod-detail-button,
+.pz-lua-mod-detail-button,
+.pz-mod-more-button {
+  flex: 0 0 auto;
+  width: 1.65rem !important;
+  min-width: 1.65rem !important;
+  padding: 0 !important;
+  color: var(--pz-text-label) !important;
+  font-size: var(--pz-font-lg) !important;
+  white-space: nowrap;
+}
+
+.pz-mod-switch-shell {
+  display: flex;
+  align-items: center;
+  padding: 0 0.18rem;
+}
+
+.pz-mod-switch-shell [data-part="control"] {
+  transform: scale(0.82);
+}
+
+.pz-mod-hover-actions {
+  display: flex;
+  align-items: center;
+}
+
+@media (max-width: 900px) {
+  .pz-mod-header-tools {
+    width: 100%;
+  }
+
+  .pz-mod-header-tools input {
+    width: auto;
+    min-width: 0;
+    flex: 1 1 12rem;
+  }
+
+  .pz-jar-mod-badges,
+  .pz-jar-mod-description,
+  .pz-lua-mod-description {
+    display: none !important;
+  }
+
+  .pz-mod-hover-actions {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 640px) {
+  .pz-mod-page-header,
+  .pz-mod-batch-bar,
+  .pz-lua-mod-list {
+    padding-inline: 0.75rem;
+  }
+
+  .pz-mod-batch-spacer {
+    display: none;
+  }
+
+  .pz-mod-management .pz-resource-center-sidebar {
+    flex-basis: auto;
+    width: auto;
+    overflow-y: visible;
+  }
+}
+
+.pz-mod-preset-list {
+  max-height: 16rem;
+  padding-top: 0.2rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.pz-mod-preset-item {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.pz-mod-preset-apply {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 全局任务中心：标题栏按钮 + 右上角浮层。 */
+.pz-task-trigger {
+  position: relative;
+  display: inline-flex;
+  height: var(--pz-control-height);
+  flex: 0 0 auto;
+  align-self: center;
+  align-items: center;
+  gap: 0.35rem;
+  margin-right: 0.5rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--pz-line-strong);
+  border-radius: var(--pz-radius-sm);
+  background: var(--pz-fill-glass-soft);
+  color: var(--pz-text-label);
+  font-size: var(--pz-font-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pz-task-trigger:hover,
+.pz-task-trigger.is-open {
+  border-color: var(--pz-accent-line-strong);
+  background: var(--pz-fill-glass);
+  color: var(--pz-accent-deep);
+}
+
+.pz-task-trigger.is-busy {
+  border-color: var(--pz-accent-line-strong);
+  color: var(--pz-accent-deep);
+}
+
+.pz-task-trigger-badge {
+  display: inline-grid;
+  min-width: 1rem;
+  height: 1rem;
+  place-items: center;
+  padding: 0 0.18rem;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-accent);
+  color: var(--pz-text-inverse);
+  font-size: 0.58rem;
+  line-height: 1;
+}
+
+.pz-task-panel {
+  position: fixed;
+  top: calc(var(--pz-titlebar-height) + 0.5rem);
+  right: 0.75rem;
+  z-index: calc(var(--pz-z-titlebar) - 1);
+  display: flex;
+  width: min(25rem, calc(100vw - 1rem));
+  max-height: calc(100vh - var(--pz-titlebar-height) - 1rem);
+  flex-direction: column;
+  padding: 0.9rem;
+  border: 1px solid var(--pz-line-strong);
+  border-radius: var(--pz-radius-md);
+  /* 菜单亚克力（§2.3）：浮层叠在任意页面上，用真的背景模糊 + 半透明底 + 颗粒 +
+     顶边内高光，与菜单、启动页上弹面板同一套材质；面板本身不滚动，
+     颗粒直接当背景层即可（滚动的是里面的 .pz-task-list）。 */
+  background-color: var(--pz-menu-tint);
+  background-image: var(--pz-menu-noise-image);
+  box-shadow:
+    var(--pz-shadow-menu),
+    inset 0 1px 0 var(--pz-menu-highlight);
+  backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
+  animation: pz-task-panel-in var(--pz-dur-base) var(--pz-ease-out) both;
+}
+
+.pz-task-list {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0.55rem;
+  overflow-y: auto;
+  padding-right: 0.15rem;
+}
+
+.pz-task-row {
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-sm);
+  background: var(--pz-surface-card);
+}
+
+.pz-task-running {
+  border-left: 3px solid var(--pz-accent);
+}
+
+.pz-task-success {
+  border-left: 3px solid var(--pz-success);
+}
+
+.pz-task-error {
+  border-left: 3px solid var(--pz-danger);
+}
+
+.pz-task-progress {
+  height: 5px;
+}
+
+@keyframes pz-task-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.3rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 设置 › 控制台：通知记录。 */
+.pz-notification-console {
+  max-width: 60rem;
+}
+
+.pz-notification-console-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-notification-row {
+  padding: 0.55rem 0.15rem;
+  border-bottom: 1px solid var(--pz-line);
+}
+
+.pz-notification-time {
+  flex: 0 0 auto;
+  color: var(--pz-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--pz-font-2xs);
+  line-height: 1.5;
+}
+
+.pz-notification-message {
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+/* 内置四季壁纸（SeasonalWallpaper.tsx）：每秒由 React 更新 opacity / 色调，这里只负责图层与过渡。
+   壁纸用 z-index: -1 垫在页面最底层，所以外壳不能再画自己的底色，也不能 isolation：
+   否则底色会盖住壁纸，外壳成为独立采样范围后，毛玻璃面板也看不到壁纸。 */
+.pz-app-shell.pz-app-shell-seasonal {
+  background-color: transparent;
+}
+
+/* 图片加载失败时的替换占位（FallbackImage）：铺满父容器，图标按容器大小缩放。 */
+.pz-image-fallback {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--pz-fill-gray);
+  color: var(--pz-text-muted);
+  opacity: 0.85;
+}
+
+.pz-image-fallback svg {
+  width: 40%;
+  max-width: 1.75rem;
+  min-width: 0.75rem;
+  height: auto;
+  aspect-ratio: 1;
+}
+
+/* 没有固定高度的大图预览（如弹窗内的图片）用这个修饰类，保证有可见的占位高度。 */
+.pz-image-fallback.is-large {
+  min-height: 12rem;
+}
+
+.pz-image-fallback.is-large svg {
+  max-width: 3.5rem;
+}
+
+.pz-seasonal-wallpaper {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pz-seasonal-wallpaper-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.pz-seasonal-wallpaper-images {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+}
+
+.pz-seasonal-wallpaper-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 1s linear;
+}
+
+.pz-seasonal-wallpaper-lights {
+  position: absolute;
+  inset: 0;
+}
+
+/* 光照方向层：soft-light 叠在季节图上，和 a(1).html 的 .lighting-overlay 一致 */
+.pz-seasonal-wallpaper-light {
+  position: absolute;
+  inset: 0;
+  mix-blend-mode: soft-light;
+  transition: opacity 1s linear, background 1s linear;
+}
+
+/* 中心死黑提亮：screen 叠在最上层，和 a(1).html 的 .center-boost 一致 */
+.pz-seasonal-wallpaper-boost {
+  position: absolute;
+  inset: 0;
+  mix-blend-mode: screen;
+  transition: opacity 1s linear, background 1s linear;
+}

@@ -1,0 +1,31 @@
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# WebView2 用户数据目录。正常机器上它位于 %LOCALAPPDATA%，
+# 但当该位置不可写（受限/沙箱环境）时，程序会回退到项目根或可执行文件旁。
+.webview2-data
+pzmanager-webview2
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+pzmodsample/
