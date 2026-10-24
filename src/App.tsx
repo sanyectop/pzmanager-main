@@ -6850,8 +6850,19 @@ function App() {
       </Box>
       <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
         <Text color="gray.800" fontSize="sm" fontWeight="700">作者</Text>
-        <Text color="gray.600" fontSize="sm" mt="1">叁葉</Text>
-        <Text color="gray.600" fontSize="sm" mt="0.5">邮箱 / QQ：757739990@qq.com</Text>
+        <HStack gap="3" mt="2" align="center">
+          <Avatar.Root colorPalette="blue" size="md">
+            <Avatar.Image src="/avatars/developer.png" alt="叁葉" />
+            <Avatar.Fallback name="叁葉" />
+          </Avatar.Root>
+          <Box>
+            <HStack gap="2" align="center">
+              <Text color="gray.600" fontSize="sm">叁葉</Text>
+              <Text color="gray.500" fontSize="xs">邮箱 / QQ：757739990@qq.com</Text>
+            </HStack>
+            <Text color="gray.500" fontSize="xs" mt="0.5">Project Zomboid Manager的开发者!</Text>
+          </Box>
+        </HStack>
       </Box>
       <Box mt="4">
         <Text color="gray.800" fontSize="sm" fontWeight="700">项目仓库</Text>
