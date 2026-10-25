@@ -1,0 +1,3 @@
+/api/latest.json
+  Access-Control-Allow-Origin: *
+  Cache-Control: public, max-age=60

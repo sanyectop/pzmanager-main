@@ -1,0 +1,12 @@
+{
+  "name": "PZManager",
+  "version": "1.1.261025",
+  "pubDate": "2026-10-25",
+  "notes": "v1.1.261025 更新内容:\n· 新增启动器更新检查:启动时自动检测新版本,设置 › 关于 可查看详情并一键下载更新(默认 123 云盘);\n· 游戏内存默认值改为物理内存的一半,四舍五入到整 GB(如 23.8 GB 内存默认 12 GB);\n· 修复覆盖层红屏无字的问题,并增强注入诊断日志;\n· 新增启动器窗口大小调整,以及自定义界面字体与字号;\n· 关于页新增项目仓库与官方网站入口;\n· 移除配置3D模组所已经不需要的Temporary 42.21 Fix for ZombieBuddy补丁要求。",
+  "downloads": {
+    "cloudDrive": "https://1813934047.share.123pan.cn/123pan/7AH7Vv-qA21A?pwd=PZMa",
+    "windowsX64Installer": "https://github.com/sanyectop/pzmanager-main/releases/download/v1.0.261025/PZManager_1.0.261025_x64-setup.exe",
+    "windowsX64Portable": "https://github.com/sanyectop/pzmanager-main/releases/download/v1.0.261025/PZManager_1.0.261025_x64_portable.zip"
+  },
+  "releasePage": "https://github.com/sanyectop/pzmanager-main/releases"
+}

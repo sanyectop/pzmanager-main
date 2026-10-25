@@ -43,6 +43,7 @@ import { steamWorkshopUrl } from "./externalLinks";
 import { shaderpackSearchQueries } from "./shaderpackSearch";
 import appManifest from "../package.json";
 import { defaultLaunchArguments, joinLaunchArguments } from "./launchArgs";
+import { MIN_MEMORY_MB, defaultMemoryLimitMb } from "./memorySettings";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import {
   DEFAULT_SEASON_FEATURES,
@@ -258,6 +259,18 @@ type OverlayZbProgress = {
 type StartupTiming = {
   lastMs: number | null;
   previousMs: number | null;
+};
+
+/** 后端 check_launcher_update 的返回（src-tauri/src/update.rs）。 */
+type LauncherUpdateStatus = {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  pubDate: string | null;
+  notes: string | null;
+  /** 「下载更新」按钮地址:后端已做 123 云盘 → GitHub 安装包 → 便携版回落。 */
+  downloadUrl: string | null;
+  releasePageUrl: string | null;
 };
 
 type ActivePage = "launch" | "overview" | "shots" | "shaderpacks" | "workshop" | "mods" | "settings";
@@ -553,9 +566,7 @@ const initialShaderDownloadFilters: ResourceFilters = {
   pageSize: 20,
 };
 
-const MIN_MEMORY_MB = 1024;
 const MEMORY_STEP_MB = 512;
-const RECOMMENDED_MEMORY_MB = 8192;
 const MEMORY_WARNING_MB = 16384;
 // 静默内存清理的阈值范围：与后端 memclean::normalize_threshold 保持一致。
 const MIN_SILENT_MEMORY_PERCENT = 30;
@@ -2791,6 +2802,9 @@ function App() {
   const launchCommandRef = useRef<HTMLDivElement | null>(null);
   const [resourceCenterPage, setResourceCenterPage] = useState<ResourceCenterPage>("workshop");
   const [settingsPage, setSettingsPage] = useState<SettingsPage>("general");
+  const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateStatus | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
 
   const [modManagementPage, setModManagementPage] = useState<ModManagementPage>("lua");
   const [luaModFilters, setLuaModFilters] = useState<Set<LuaModFilter>>(new Set());
@@ -2929,6 +2943,39 @@ function App() {
 
   function clearNotificationHistory() {
     setNotificationHistory([]);
+  }
+
+  // 检查启动器更新。manual=false 用于启动时的静默检查:失败完全无感,
+  // 有新版本只弹一次 toast,详情和下载入口都在 设置 › 关于。
+  async function runUpdateCheck(manual: boolean): Promise<void> {
+    if (!isTauriRuntime()) {
+      if (manual) {
+        showToast("当前环境不支持检查更新（仅桌面端可用）。", "info");
+      }
+      return;
+    }
+    setUpdateChecking(true);
+    setUpdateCheckError(null);
+    try {
+      const status = await invoke<LauncherUpdateStatus>("check_launcher_update");
+      setLauncherUpdate(status);
+      if (manual) {
+        showToast(
+          status.updateAvailable
+            ? `发现新版本 v${status.latestVersion}，可在下方查看并下载。`
+            : `已是最新版本（v${status.currentVersion}）。`,
+          status.updateAvailable ? "success" : "info",
+        );
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setUpdateCheckError(message);
+      if (manual) {
+        showToast(message, "error");
+      }
+    } finally {
+      setUpdateChecking(false);
+    }
   }
 
   async function updateDeveloperMode(enabled: boolean) {
@@ -4067,6 +4114,25 @@ function App() {
     };
   }, []);
 
+  // 启动几秒后静默检查一次启动器更新：网络失败静默忽略；
+  // 有新版本弹 toast 引导去 设置 › 关于，手动检查/下载也在那里。
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      invoke<LauncherUpdateStatus>("check_launcher_update")
+        .then((status) => {
+          setLauncherUpdate(status);
+          if (status.updateAvailable) {
+            showToast(`发现新版本 v${status.latestVersion}，到 设置 › 关于 查看并下载。`, "success");
+          }
+        })
+        .catch(() => undefined);
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   // 对比度只影响颜色：写在 documentElement 上（不是 .pz-app-shell），
   // 这样 Portal 到 body 的菜单、弹窗、toast 也能继承到。
   useEffect(() => {
@@ -4224,13 +4290,7 @@ function App() {
         }
         const totalMemoryMb = memoryResult.value;
         const settings = settingsResult.status === "fulfilled" ? settingsResult.value : null;
-        const defaultMemoryMb = Math.min(
-          RECOMMENDED_MEMORY_MB,
-          Math.max(
-            MIN_MEMORY_MB,
-            Math.floor(Math.min(totalMemoryMb, RECOMMENDED_MEMORY_MB) / MEMORY_STEP_MB) * MEMORY_STEP_MB,
-          ),
-        );
+        const defaultMemoryMb = defaultMemoryLimitMb(totalMemoryMb);
         setSystemMemoryMb(totalMemoryMb);
         setMemoryLimitMb(
           settings?.memoryLimitMb !== null &&
@@ -5450,11 +5510,9 @@ function App() {
                   <Text>系统上限 {formatMemoryMb(systemMemoryMb)}</Text>
                 </HStack>
                 <HStack className="pz-memory-recommendations" gap="3" mt="2" wrap="wrap">
-                  {RECOMMENDED_MEMORY_MB <= systemMemoryMb && (
-                    <Text color="green.700" fontSize="xs">
-                      推荐：8 GB
-                    </Text>
-                  )}
+                  <Text color="green.700" fontSize="xs">
+                    默认：物理内存的一半
+                  </Text>
                   {MEMORY_WARNING_MB <= systemMemoryMb && (
                     <Text color="orange.700" fontSize="xs">
                       参考线：16 GB
@@ -7147,6 +7205,82 @@ function App() {
           Project Zomboid（僵尸毁灭工程）的 Windows 桌面启动器 + 模组管理器：
           整合创意工坊订阅、JAR 模组管理、内置翻译器与下载器，不修改游戏本体。
         </Text>
+      </Box>
+      <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
+        <HStack justify="space-between" align="center" gap="3" wrap="wrap">
+          <Box>
+            <Text color="gray.800" fontSize="sm" fontWeight="700">检查更新</Text>
+            <Text color="gray.500" fontSize="xs" mt="0.5">启动时会自动检查一次，这里可以手动检查。</Text>
+          </Box>
+          <Button
+            colorPalette="blue"
+            loading={updateChecking}
+            onClick={() => void runUpdateCheck(true)}
+            size="sm"
+            variant="outline"
+          >
+            检查更新
+          </Button>
+        </HStack>
+        {updateCheckError ? (
+          <Text color="red.500" fontSize="xs" mt="2" whiteSpace="pre-wrap">检查失败：{updateCheckError}</Text>
+        ) : launcherUpdate ? (
+          <Box mt="2">
+            {launcherUpdate.updateAvailable ? (
+              <>
+                <HStack gap="2" wrap="wrap" align="center">
+                  <Text color="gray.500" fontSize="sm">最新版本</Text>
+                  <Badge colorPalette="green" size="sm">v{launcherUpdate.latestVersion}</Badge>
+                  {launcherUpdate.pubDate ? (
+                    <Text color="gray.400" fontSize="xs">发布于 {launcherUpdate.pubDate}</Text>
+                  ) : null}
+                </HStack>
+                {launcherUpdate.notes ? (
+                  <Box mt="2">
+                    <Text color="gray.800" fontSize="sm" fontWeight="700">更新日志</Text>
+                    <Text color="gray.500" fontSize="xs" mt="1" whiteSpace="pre-wrap">{launcherUpdate.notes}</Text>
+                  </Box>
+                ) : null}
+                <HStack gap="2" mt="3" wrap="wrap">
+                  {launcherUpdate.downloadUrl ? (
+                    <Button
+                      colorPalette="blue"
+                      onClick={() => void openUrl(launcherUpdate.downloadUrl ?? "")}
+                      size="sm"
+                    >
+                      下载更新
+                    </Button>
+                  ) : null}
+                  {launcherUpdate.releasePageUrl ? (
+                    <Button
+                      onClick={() => void openUrl(launcherUpdate.releasePageUrl ?? "")}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      打开发布页 ↗
+                    </Button>
+                  ) : null}
+                </HStack>
+              </>
+            ) : (
+              <>
+                <Text color="gray.500" fontSize="sm">已是最新版本（v{launcherUpdate.currentVersion}）。</Text>
+                {/* 最新版同样展示更新日志：就是当前版本自身的发布说明。 */}
+                {launcherUpdate.notes ? (
+                  <Box mt="2">
+                    <Text color="gray.800" fontSize="sm" fontWeight="700">更新日志</Text>
+                    {launcherUpdate.pubDate ? (
+                      <Text color="gray.400" fontSize="xs" mt="0.5">发布于 {launcherUpdate.pubDate}</Text>
+                    ) : null}
+                    <Text color="gray.500" fontSize="xs" mt="1" whiteSpace="pre-wrap">{launcherUpdate.notes}</Text>
+                  </Box>
+                ) : null}
+              </>
+            )}
+          </Box>
+        ) : (
+          <Text color="gray.400" fontSize="xs" mt="2">还没有检查结果。</Text>
+        )}
       </Box>
       <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
         <Text color="gray.800" fontSize="sm" fontWeight="700">作者</Text>

@@ -51,6 +51,30 @@
     line-height: 1.75;
     -webkit-font-smoothing: antialiased;
     transition: background 0.3s ease, color 0.3s ease;
+    overflow-x: hidden;
+  }
+  /* 全页极光背景 */
+  body::before {
+    content: ""; position: fixed; inset: -20%; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(38vw 38vw at 12% 18%, rgba(43, 125, 224, 0.14), transparent 65%),
+      radial-gradient(34vw 34vw at 88% 28%, rgba(124, 92, 255, 0.11), transparent 65%),
+      radial-gradient(30vw 30vw at 55% 90%, rgba(34, 184, 207, 0.1), transparent 65%);
+    animation: aurora 16s ease-in-out infinite alternate;
+  }
+  html[data-theme="dark"] body::before {
+    background:
+      radial-gradient(38vw 38vw at 12% 18%, rgba(77, 163, 255, 0.12), transparent 65%),
+      radial-gradient(34vw 34vw at 88% 28%, rgba(157, 124, 255, 0.09), transparent 65%),
+      radial-gradient(30vw 30vw at 55% 90%, rgba(63, 208, 232, 0.08), transparent 65%);
+  }
+  @keyframes aurora {
+    0%   { transform: translate(0, 0) scale(1); }
+    50%  { transform: translate(2.5%, -2%) scale(1.06); }
+    100% { transform: translate(-2%, 2.5%) scale(1.03); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body::before { animation: none; }
   }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
@@ -62,6 +86,10 @@
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
     animation: navIn 0.5s ease both;
+  }
+  .topnav::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(43, 125, 224, 0.55), rgba(124, 92, 255, 0.55), transparent);
   }
   @keyframes navIn { from { transform: translateY(-100%); } to { transform: none; } }
   .nav-inner {
@@ -112,7 +140,12 @@
     to { opacity: 1; transform: none; }
   }
   .hero-line { padding: 8px 0 32px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
-  .hero-line h1 { font-size: 30px; letter-spacing: 1px; }
+  .hero-line h1 {
+    font-size: 32px; letter-spacing: 1px; font-weight: 800;
+    background: linear-gradient(120deg, var(--text) 30%, var(--accent) 75%, #9d7cff);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+  }
   .hero-line p { color: var(--text-dim); margin-top: 8px; }
 
   section.doc { padding: 36px 0 8px; border-bottom: 1px solid var(--border); }
@@ -121,7 +154,13 @@
     font-size: 22px; margin-bottom: 18px;
     display: flex; align-items: center; gap: 12px;
   }
-  section.doc h2 i { color: var(--accent); font-size: 19px; }
+  section.doc h2 i {
+    color: #fff; font-size: 15px;
+    width: 34px; height: 34px; border-radius: 10px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, var(--accent), #9d7cff);
+    box-shadow: 0 4px 12px rgba(43, 125, 224, 0.3);
+  }
   section.doc h3 { font-size: 16px; margin: 26px 0 10px; color: var(--text); }
   section.doc p { color: var(--text-dim); margin-bottom: 12px; font-size: 14.5px; }
   section.doc ul, section.doc ol { margin: 0 0 14px 22px; color: var(--text-dim); font-size: 14.5px; }
@@ -153,9 +192,14 @@
   .back-top { display: inline-block; margin: 40px 0 0; font-size: 13.5px; }
 
   footer {
+    position: relative;
     border-top: 1px solid var(--border);
     padding: 32px 24px 44px; text-align: center;
     color: var(--text-dim); font-size: 13px;
+  }
+  footer::before {
+    content: ""; position: absolute; top: -1px; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(43, 125, 224, 0.5), rgba(124, 92, 255, 0.5), transparent);
   }
 
   @media (max-width: 860px) {
