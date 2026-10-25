@@ -1,0 +1,19 @@
+[Unit]
+Description=PZ Manager Steam relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 假设项目放在 /opt/pzm-steam-relay；按实际路径与 node 位置调整
+# （which node 查位置；Debian/Ubuntu 用 apt 装的 node 通常在 /usr/bin/node）。
+WorkingDirectory=/opt/pzm-steam-relay
+ExecStart=/usr/bin/node server.js
+Environment=PORT=8787
+Restart=always
+RestartSec=3
+# 可选收紧权限（二选一）：
+# DynamicUser=yes
+# User=www-data
+
+[Install]
+WantedBy=multi-user.target
