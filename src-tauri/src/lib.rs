@@ -27,8 +27,6 @@ const VIEWPOINT_MOD_ID: &str = "3809306528";
 const ZOMBIE_BUDDY_MOD_ID: &str = "3619862853";
 const PZ_OPTIMIZATION_MOD_ID: &str = "3805285544";
 const ZOMBIE_BUDDY_WORKSHOP_ID: u64 = 3_619_862_853;
-const TEMPORARY_VIEWPOINT_FIX_MOD_ID: &str = "3807686870";
-const TEMPORARY_VIEWPOINT_FIX_MOD_NAME: &str = "ZombieBuddy_B42.21_TemporaryFix";
 const ZOMBIE_BUDDY_AGENT: &str = "-agentlib:zbNative";
 const ZOMBIE_BUDDY_POLICY_AGENT: &str = "-agentlib:zbNative=policy=allow-all";
 
@@ -831,35 +829,6 @@ fn viewpoint_source_from_libraries(libraries: &[PathBuf]) -> Option<PathBuf> {
         .find(|path| workshop_content_is_available(path))
 }
 
-fn temporary_viewpoint_fix_from_library(library: &Path) -> Option<PathBuf> {
-    let mods_root = workshop_content_path(library, TEMPORARY_VIEWPOINT_FIX_MOD_ID).join("mods");
-    let mod_root = mods_root.join(TEMPORARY_VIEWPOINT_FIX_MOD_NAME);
-    let preferred = mod_root.join("42.21").join("ZombieBuddy.jar");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-
-    // Steam can leave the Workshop folder under a renamed revision, and newer
-    // builds ship the JAR under `42/` instead of `42.21/`. Only accept a
-    // replacement JAR found below this exact Workshop item.
-    fs::read_dir(&mods_root)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find_map(|path| {
-            ["42.21", "42"]
-                .iter()
-                .map(|version| path.join(version).join("ZombieBuddy.jar"))
-                .find(|candidate| candidate.is_file())
-        })
-}
-
-fn first_temporary_viewpoint_fix(libraries: &[PathBuf]) -> Option<PathBuf> {
-    libraries
-        .iter()
-        .find_map(|library| temporary_viewpoint_fix_from_library(library))
-}
-
 fn workshop_mod_status(
     name: &str,
     workshop_id: &str,
@@ -882,7 +851,6 @@ fn workshop_mod_status(
 
 fn viewpoint_three_d_status(_game_path: Option<&Path>, libraries: &[PathBuf]) -> Viewpoint3dStatus {
     let zombie_buddy_source = zombie_buddy_source_from_libraries(libraries);
-    let temporary_fix = first_temporary_viewpoint_fix(libraries);
     let viewpoint_source = viewpoint_source_from_libraries(libraries);
     let mods = vec![
         workshop_mod_status(
@@ -897,12 +865,6 @@ fn viewpoint_three_d_status(_game_path: Option<&Path>, libraries: &[PathBuf]) ->
             libraries,
             zombie_buddy_source.clone(),
         ),
-        workshop_mod_status(
-            "Temporary 42.21 Fix for ZombieBuddy",
-            TEMPORARY_VIEWPOINT_FIX_MOD_ID,
-            libraries,
-            temporary_fix.clone(),
-        ),
     ];
     let mut missing_components = mods
         .iter()
@@ -916,11 +878,6 @@ fn viewpoint_three_d_status(_game_path: Option<&Path>, libraries: &[PathBuf]) ->
         }
     } else if !zombie_buddy_source_has_files(zombie_buddy_source.as_deref().unwrap()) {
         missing_components.push("ZombieBuddy/libs 文件".to_string());
-    }
-    if temporary_fix.is_none() {
-        if mods[2].subscribed {
-            missing_components.push("Temporary Fix/ZombieBuddy.jar".to_string());
-        }
     }
 
     Viewpoint3dStatus {
@@ -1467,8 +1424,6 @@ fn configure_viewpoint_three_d_at_paths(
 
     let source_path = zombie_buddy_source_from_libraries(libraries)
         .ok_or_else(|| "找不到 ZombieBuddy Workshop 文件".to_string())?;
-    let temporary_fix = first_temporary_viewpoint_fix(libraries)
-        .ok_or_else(|| "找不到 Temporary Fix 的 ZombieBuddy.jar".to_string())?;
     let library_files = regular_files_in_directory(&source_path.join("libs"))?;
     if library_files.is_empty() {
         return Err("ZombieBuddy/libs 目录中没有可复制的文件".to_string());
@@ -1502,22 +1457,12 @@ fn configure_viewpoint_three_d_at_paths(
             .file_name()
             .ok_or_else(|| format!("无效 Workshop 文件路径: {}", source_file.display()))?;
         let name = name.to_string_lossy().into_owned();
-        if name.eq_ignore_ascii_case("ZombieBuddy.jar") {
-            continue;
-        }
         let target = game_path.join(&name);
         if target_paths.insert(target.clone()) {
             files.push((target, content));
         }
     }
 
-    let zombie_buddy_jar = game_path.join("ZombieBuddy.jar");
-    target_paths.insert(zombie_buddy_jar.clone());
-    files.push((
-        zombie_buddy_jar,
-        fs::read(&temporary_fix)
-            .map_err(|error| format!("读取 Temporary Fix 的 ZombieBuddy.jar 失败: {error}"))?,
-    ));
     files.push((json_path.clone(), json_patched.into_bytes()));
     files.push((batch_path.clone(), batch_patched.into_bytes()));
 
@@ -5860,7 +5805,7 @@ mod tests {
         JarModStateEntry, JarModStateFile, JavaPatchMethod, LuaModEntry, ScannedJarMod,
         SteamProfile, FAST_LAUNCH_BACKUP_MANIFEST, FAST_LAUNCH_BACKUP_VERSION,
         FAST_LAUNCH_CACHE_FILE, FAST_LAUNCH_CACHE_FORMAT, PROJECT_ZOMBOID_APP_ID,
-        TEMPORARY_VIEWPOINT_FIX_MOD_ID, VIEWPOINT_MOD_ID, ZOMBIE_BUDDY_AGENT, ZOMBIE_BUDDY_MOD_ID,
+        VIEWPOINT_MOD_ID, ZOMBIE_BUDDY_AGENT, ZOMBIE_BUDDY_MOD_ID,
         ZOMBIE_BUDDY_POLICY_AGENT,
     };
     use image::{GenericImageView, RgbaImage};
@@ -7678,28 +7623,7 @@ javaPkgName={package_name}
     }
 
     #[test]
-    fn detects_temporary_fix_jar_under_renamed_mod_folder_and_42_version() {
-        let temp = tempfile::tempdir().unwrap();
-        let library = temp.path().join("SteamLibrary");
-        let workshop = library
-            .join("steamapps")
-            .join("workshop")
-            .join("content")
-            .join(PROJECT_ZOMBOID_APP_ID);
-        let jar = workshop
-            .join(TEMPORARY_VIEWPOINT_FIX_MOD_ID)
-            .join("mods")
-            .join("ZombieBuddy_Extensions")
-            .join("42")
-            .join("ZombieBuddy.jar");
-        fs::create_dir_all(jar.parent().unwrap()).unwrap();
-        fs::write(&jar, b"temporary-fix").unwrap();
-
-        assert_eq!(crate::first_temporary_viewpoint_fix(&[library]), Some(jar));
-    }
-
-    #[test]
-    fn detects_viewpoint_three_mod_subscription() {
+    fn detects_viewpoint_mod_subscription() {
         let temp = tempfile::tempdir().unwrap();
         let library = temp.path().join("SteamLibrary");
         let workshop = library
@@ -7752,24 +7676,6 @@ javaPkgName={package_name}
             b"jar",
         )
         .unwrap();
-        fs::create_dir_all(
-            workshop
-                .join(TEMPORARY_VIEWPOINT_FIX_MOD_ID)
-                .join("mods")
-                .join("ZombieBuddy_B42.21_TemporaryFix")
-                .join("42.21"),
-        )
-        .unwrap();
-        fs::write(
-            workshop
-                .join(TEMPORARY_VIEWPOINT_FIX_MOD_ID)
-                .join("mods")
-                .join("ZombieBuddy_B42.21_TemporaryFix")
-                .join("42.21")
-                .join("ZombieBuddy.jar"),
-            b"temporary-fix",
-        )
-        .unwrap();
 
         let status = viewpoint_three_d_status(None, &[library]);
 
@@ -7779,7 +7685,7 @@ javaPkgName={package_name}
     }
 
     #[test]
-    fn configures_viewpoint_files_and_replaces_loader_jar() {
+    fn configures_viewpoint_files_and_copies_loader_jar() {
         let temp = tempfile::tempdir().unwrap();
         let library = temp.path().join("SteamLibrary");
         let workshop = library
@@ -7791,16 +7697,9 @@ javaPkgName={package_name}
             .join(ZOMBIE_BUDDY_MOD_ID)
             .join("mods")
             .join("ZombieBuddy");
-        let temporary_fix = workshop
-            .join(TEMPORARY_VIEWPOINT_FIX_MOD_ID)
-            .join("mods")
-            .join("ZombieBuddy_B42.21_TemporaryFix")
-            .join("42.21")
-            .join("ZombieBuddy.jar");
         let game = temp.path().join("ProjectZomboid");
 
         fs::create_dir_all(zombie_buddy.join("libs")).unwrap();
-        fs::create_dir_all(temporary_fix.parent().unwrap()).unwrap();
         fs::create_dir_all(&game).unwrap();
         fs::create_dir_all(
             workshop
@@ -7821,7 +7720,6 @@ javaPkgName={package_name}
         fs::write(zombie_buddy.join("libs/zbNative.dll"), b"dll").unwrap();
         fs::write(zombie_buddy.join("libs/ZombieBuddy.jar"), b"loader").unwrap();
         fs::write(zombie_buddy.join("libs/extra-native.dll"), b"extra").unwrap();
-        fs::write(&temporary_fix, b"temporary-fix").unwrap();
         fs::write(game.join("ProjectZomboid64.json"), r#"{"vmArgs":[]}"#).unwrap();
         fs::write(game.join("ProjectZomboid64.bat"), "start game\r\n").unwrap();
 
@@ -7830,10 +7728,8 @@ javaPkgName={package_name}
         assert!(result.changed);
         assert_eq!(fs::read(game.join("zbNative.dll")).unwrap(), b"dll");
         assert_eq!(fs::read(game.join("extra-native.dll")).unwrap(), b"extra");
-        assert_eq!(
-            fs::read(game.join("ZombieBuddy.jar")).unwrap(),
-            b"temporary-fix"
-        );
+        // 不再用 Temporary Fix 覆盖：游戏目录的 jar 直接来自 ZombieBuddy 工坊自带的 libs。
+        assert_eq!(fs::read(game.join("ZombieBuddy.jar")).unwrap(), b"loader");
         assert!(fs::read_to_string(game.join("ProjectZomboid64.bat"))
             .unwrap()
             .contains(ZOMBIE_BUDDY_POLICY_AGENT));
