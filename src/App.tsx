@@ -44,6 +44,11 @@ import { shaderpackSearchQueries } from "./shaderpackSearch";
 import appManifest from "../package.json";
 import { defaultLaunchArguments, joinLaunchArguments } from "./launchArgs";
 import { MIN_MEMORY_MB, defaultMemoryLimitMb } from "./memorySettings";
+import {
+  DEFAULT_STEAM_RELAY_BASE,
+  STEAM_RELAY_MODE_OPTIONS,
+  previewImageFallbackUrl,
+} from "./steamRelay";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import {
   DEFAULT_SEASON_FEATURES,
@@ -479,6 +484,10 @@ type AppSettings = {
   silentMemoryCleanup: boolean;
   silentMemoryCleanupThreshold: number;
   cleanMemoryOnLaunch: boolean;
+  /** 「Steam 网络加速」模式：auto / relay / direct；null = 没写过，按 auto。 */
+  steamRelayMode: string | null;
+  /** 「Steam 网络加速」的中转地址；null/空 = 内置默认。 */
+  steamRelayBase: string | null;
 };
 
 /** 后端 save_fast_launch 的返回值：是否创建/恢复了备份。 */
@@ -2761,6 +2770,14 @@ function App() {
   const [shaderDownloadSaving, setShaderDownloadSaving] = useState(false);
   const [shaderDownloadDirectory, setShaderDownloadDirectory] = useState("");
   const [shaderDownloadThreads, setShaderDownloadThreads] = useState(4);
+  const [steamRelayMode, setSteamRelayMode] = useState("auto");
+  const [steamRelayBase, setSteamRelayBase] = useState("");
+  const [steamRelaySaving, setSteamRelaySaving] = useState(false);
+  const [steamRelayTesting, setSteamRelayTesting] = useState(false);
+  /** 「测试连接」的结果文案；null = 还没测过。 */
+  const [steamRelayPing, setSteamRelayPing] = useState<string | null>(null);
+  /** 实际生效的中转地址：输入框留空 = 内置默认。 */
+  const effectiveSteamRelayBase = steamRelayBase.trim() || DEFAULT_STEAM_RELAY_BASE;
   const [backgroundUrl, setBackgroundUrl] = useState<string | null>(null);
   const [wallpaperEffectSettings, setWallpaperEffectSettings] = useState<WallpaperEffectSettings>(
     DEFAULT_WALLPAPER_EFFECT,
@@ -3021,6 +3038,42 @@ function App() {
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setTranslationLanguageSaving(false);
+    }
+  }
+
+  /** 设置页「通用 › Steam 网络加速」：模式与中转地址的保存、测试连接。 */
+  async function saveSteamRelaySettings(mode: string, base: string) {
+    setSteamRelaySaving(true);
+    try {
+      await invoke("save_steam_relay_settings", { mode, base });
+      setSteamRelayPing(null);
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setSteamRelaySaving(false);
+    }
+  }
+
+  async function testSteamRelay() {
+    if (steamRelayTesting) {
+      return;
+    }
+    setSteamRelayTesting(true);
+    setSteamRelayPing(null);
+    try {
+      const result = await invoke<{ ok: boolean; latencyMs: number; error: string | null }>(
+        "ping_steam_relay",
+        { base: effectiveSteamRelayBase },
+      );
+      setSteamRelayPing(
+        result.ok
+          ? `连接正常，往返 ${result.latencyMs} ms`
+          : `连接失败：${result.error ?? "未知错误"}`,
+      );
+    } catch (error: unknown) {
+      setSteamRelayPing(`连接失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSteamRelayTesting(false);
     }
   }
 
@@ -4281,6 +4334,13 @@ function App() {
           setShaderDownloadUrl(settingsResult.value.shaderDownloadUrl ?? "");
           setShaderDownloadDirectory(settingsResult.value.shaderDownloadDirectory ?? "");
           setShaderDownloadThreads(settingsResult.value.shaderDownloadThreads ?? 4);
+          setSteamRelayMode(settingsResult.value.steamRelayMode ?? "auto");
+          // 等于默认值的地址按「没自定义」显示，输入框留空、placeholder 展示默认。
+          setSteamRelayBase(
+            settingsResult.value.steamRelayBase === DEFAULT_STEAM_RELAY_BASE
+              ? ""
+              : (settingsResult.value.steamRelayBase ?? ""),
+          );
         }
         if (memoryResult.status === "rejected") {
           setMemoryError(
@@ -6218,7 +6278,16 @@ function App() {
                         >
                           <Box className="pz-workshop-list-preview">
                             {item.previewUrl ? (
-                              <FallbackImage alt="" loading="lazy" src={item.previewUrl} />
+                              <FallbackImage
+                                alt=""
+                                fallbackSrc={previewImageFallbackUrl(
+                                  item.previewUrl,
+                                  effectiveSteamRelayBase,
+                                  steamRelayMode,
+                                )}
+                                loading="lazy"
+                                src={item.previewUrl}
+                              />
                             ) : (
                               <Text color="gray.500" fontSize="xs">
                                 无预览图
@@ -6808,6 +6877,51 @@ function App() {
           </Button>
         </HStack>
       </HStack>
+      <Box mt="5">
+        <Text color="gray.800" fontSize="sm" fontWeight="700">Steam 网络加速</Text>
+        <Text color="gray.500" fontSize="xs" mt="1">
+          大陆网络直连 Steam 创意工坊会失败：开启后经中转服务器访问工坊列表、项目详情和开发者新闻，预览图加载失败时也走中转兜底。
+        </Text>
+        <HStack align="center" gap="2" mt="3" wrap="wrap">
+          <WorkshopDropdown
+            ariaLabel="Steam 网络加速模式"
+            disabled={steamRelaySaving}
+            onChange={(value) => {
+              setSteamRelayMode(value);
+              void saveSteamRelaySettings(value, steamRelayBase);
+            }}
+            options={STEAM_RELAY_MODE_OPTIONS}
+            value={steamRelayMode}
+            width="11rem"
+          />
+          <Input
+            aria-label="Steam 中转服务器地址"
+            placeholder={`默认：${DEFAULT_STEAM_RELAY_BASE}`}
+            value={steamRelayBase}
+            width="18rem"
+            onBlur={() => void saveSteamRelaySettings(steamRelayMode, steamRelayBase)}
+            onChange={(event) => setSteamRelayBase(event.currentTarget.value)}
+          />
+          <Button
+            colorPalette="blue"
+            disabled={steamRelayTesting}
+            size="sm"
+            variant="outline"
+            onClick={() => void testSteamRelay()}
+          >
+            {steamRelayTesting ? "测试中…" : "测试连接"}
+          </Button>
+        </HStack>
+        {steamRelayPing && (
+          <Text
+            color={steamRelayPing.startsWith("连接失败") ? "red.500" : "green.700"}
+            fontSize="xs"
+            mt="2"
+          >
+            {steamRelayPing}
+          </Text>
+        )}
+      </Box>
     </Box>
   );
 

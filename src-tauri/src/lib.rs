@@ -20,6 +20,7 @@ mod news_translation;
 mod overlay;
 mod overlay_session;
 mod resource;
+mod steam_relay;
 mod update;
 mod workshop;
 
@@ -1955,6 +1956,10 @@ struct AppSettings {
     /// 内置四季壁纸的手动 / 固定设置，前端 builtinWallpaper.ts 的 WallpaperEffectSettings 原样存取。
     #[serde(default)]
     wallpaper_effect: Option<serde_json::Value>,
+    /// 「Steam 网络加速」模式：auto（直连失败自动切中转）/ relay（中转优先）/ direct（仅直连）。
+    steam_relay_mode: Option<String>,
+    /// 「Steam 网络加速」的中转地址；空 = 内置默认（steam_relay::DEFAULT_RELAY_BASE）。
+    steam_relay_base: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2366,11 +2371,11 @@ fn pzmanager_directory() -> Result<PathBuf, String> {
     Ok(user_zomboid_directory()?.join(".pzmanager"))
 }
 
-fn app_settings_path() -> Result<PathBuf, String> {
+pub(crate) fn app_settings_path() -> Result<PathBuf, String> {
     Ok(pzmanager_directory()?.join("settings.json"))
 }
 
-fn load_app_settings_at(path: &Path) -> Result<AppSettings, String> {
+pub(crate) fn load_app_settings_at(path: &Path) -> Result<AppSettings, String> {
     if !path.is_file() {
         return Ok(AppSettings::default());
     }
@@ -4451,6 +4456,17 @@ fn get_app_settings() -> Result<AppSettings, String> {
         .font_family
         .as_deref()
         .and_then(normalize_font_family);
+    // Steam 网络加速：坏值回落默认（auto + 内置中转地址）。
+    settings.steam_relay_mode = Some(
+        settings
+            .steam_relay_mode
+            .as_deref()
+            .and_then(steam_relay::normalize_relay_mode)
+            .unwrap_or_else(|| steam_relay::DEFAULT_RELAY_MODE.to_string()),
+    );
+    settings.steam_relay_base = Some(steam_relay::normalize_relay_base(
+        settings.steam_relay_base.as_deref().unwrap_or(""),
+    ));
     Ok(settings)
 }
 
@@ -4478,6 +4494,56 @@ fn save_translation_language(language: String) -> Result<(), String> {
     let mut settings = load_app_settings_at(&path)?;
     settings.translation_language = Some(normalized);
     save_app_settings_at(&path, &settings)
+}
+
+#[tauri::command]
+fn save_steam_relay_settings(mode: String, base: String) -> Result<(), String> {
+    let mode = steam_relay::normalize_relay_mode(&mode)
+        .ok_or_else(|| format!("不支持的 Steam 网络加速模式: {mode}"))?;
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.steam_relay_mode = Some(mode);
+    settings.steam_relay_base = Some(steam_relay::normalize_relay_base(&base));
+    save_app_settings_at(&path, &settings)
+}
+
+/// 设置页「Steam 网络加速 › 测试连接」：探一下中转的 /healthz，报耗时。
+/// 探测失败也返回 Ok（结果里的 ok=false），让前端展示原因而不是当命令错误。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SteamRelayPingResult {
+    ok: bool,
+    latency_ms: u64,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn ping_steam_relay(base: String) -> Result<SteamRelayPingResult, String> {
+    let base = steam_relay::normalize_relay_base(&base);
+    let started = std::time::Instant::now();
+    let result = reqwest::Client::new()
+        .get(format!("{base}/healthz"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(response) if response.status().is_success() => Ok(SteamRelayPingResult {
+            ok: true,
+            latency_ms,
+            error: None,
+        }),
+        Ok(response) => Ok(SteamRelayPingResult {
+            ok: false,
+            latency_ms,
+            error: Some(format!("中转服务返回 {}", response.status())),
+        }),
+        Err(error) => Ok(SteamRelayPingResult {
+            ok: false,
+            latency_ms,
+            error: Some(error.to_string()),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -5720,6 +5786,8 @@ pub fn run() {
             save_fast_launch,
             save_silent_memory_cleanup,
             save_clean_memory_on_launch,
+            save_steam_relay_settings,
+            ping_steam_relay,
             get_memory_status,
             clean_memory_now,
             fast_launch_cache_status,
@@ -5902,6 +5970,8 @@ mod tests {
             silent_memory_cleanup_threshold: 85,
             clean_memory_on_launch: true,
             wallpaper_effect: None,
+            steam_relay_mode: Some("relay".to_string()),
+            steam_relay_base: Some("https://mirror.example/steam".to_string()),
         };
 
         save_app_settings_at(&path, &settings).unwrap();
