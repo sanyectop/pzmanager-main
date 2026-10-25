@@ -2,7 +2,7 @@
  * Steam 网络加速（中转）的前端纯逻辑。
  *
  * 白名单与默认地址必须和三处保持一致：
- * - 中转 Worker：steam-api/worker.js（IMAGE_HOSTS）
+ * - 中转 Pages Function：update-api/functions/steam/[[path]].js（IMAGE_HOSTS）
  * - 后端：src-tauri/src/steam_relay.rs（STEAM_IMAGE_HOSTS、DEFAULT_RELAY_BASE）
  */
 
