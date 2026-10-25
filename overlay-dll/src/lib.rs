@@ -25,7 +25,7 @@ mod ui;
 mod overlay {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use minhook::MinHook;
@@ -116,6 +116,10 @@ mod overlay {
     static UI_CONTEXT_CHANGES: AtomicU32 = AtomicU32::new(0);
     /// 「界面纹理首次上传成功」只记一次日志的打点。
     static UI_UPLOAD_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// 「GL 视口异常」只记一次日志的打点。
+    static VIEWPORT_PROBLEM_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// 「glGenTextures 失败」只记一次日志的打点。
+    static TEXTURE_GEN_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     /// `glActiveTexture`（GL 1.3）地址缓存，opengl32.dll 不导出，只能运行时解析。
     static ACTIVE_TEXTURE: AtomicU64 = AtomicU64::new(PTR_UNRESOLVED);
     /// 上一次强制换帧的时间戳（毫秒，来自 Instant 的单调时钟）。
@@ -127,6 +131,8 @@ mod overlay {
     static MAKE_CURRENT_TARGET: AtomicU64 = AtomicU64::new(0);
     /// 日志时间的相对基准。
     static LOG_START: OnceLock<Instant> = OnceLock::new();
+    /// 日志文件写锁：hook 线程 / 界面线程 / 初始化线程都会写，不加锁会出现行交错。
+    static LOG_LOCK: Mutex<()> = Mutex::new(());
 
     /// 原始 `wglSwapBuffers` 签名：`BOOL wglSwapBuffers(HDC)`。
     /// 这里用 `*mut c_void` 表示 `HDC`、`i32` 表示 `BOOL`，避免依赖 windows crate 里句柄类型的具体封装形式。
@@ -306,6 +312,8 @@ mod overlay {
 
         if !FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
             log("首次进入 wglSwapBuffers Hook，注入链路已打通。");
+            // 通知界面线程：游戏开始换帧了，GDI 直接贴窗口 DC 的路径可以退场。
+            crate::ui::mark_swap_seen();
             // 通知启动器：覆盖层已经真正画上第一帧（红色已可见）。
             let started = STARTED_EVENT.load(Ordering::Acquire);
             if started != 0 {
@@ -382,8 +390,14 @@ mod overlay {
             unsafe { std::mem::transmute(original as usize as *const c_void) };
         let result = unsafe { original_fn(hdc, hglrc) };
 
-        // 只在"上下文已经变成 current"且覆盖层生效时，限流地替游戏换一帧。
-        if result != 0 && OVERLAY_ACTIVE.load(Ordering::Acquire) && can_force_frame() {
+        // 只在"上下文已经变成 current"且**游戏还没开始换帧**时，限流地替游戏画一帧。
+        // 这个 hook 的用途是补"上下文已绑定、但渲染循环还没跑起来"的空档；
+        // 游戏开始换帧之后再强制呈现，只会在主菜单等场景里周期性闪出覆盖层帧。
+        if result != 0
+            && OVERLAY_ACTIVE.load(Ordering::Acquire)
+            && !crate::ui::swap_seen()
+            && can_force_frame()
+        {
             // SAFETY: 刚刚 MakeCurrent 成功，当前线程持有 GL 上下文。
             unsafe { force_present_frame() };
         }
@@ -599,6 +613,12 @@ mod overlay {
             let viewport_width = viewport[2] as f32;
             let viewport_height = viewport[3] as f32;
             if viewport_width <= 0.0 || viewport_height <= 0.0 {
+                // 视口为 0 时四边形画不出来，界面"看起来"就只有红底 —— 留下线索。
+                if !VIEWPORT_PROBLEM_LOGGED.swap(true, Ordering::Relaxed) {
+                    log(&format!(
+                        "GL 视口异常（{viewport_width}x{viewport_height}），本帧跳过界面绘制（只记一次）。"
+                    ));
+                }
                 return;
             }
 
@@ -620,6 +640,9 @@ mod overlay {
             if texture == 0 {
                 glGenTextures(1, &mut texture);
                 if texture == 0 {
+                    if !TEXTURE_GEN_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
+                        log("glGenTextures 返回 0，界面纹理无法创建（只记一次）。");
+                    }
                     return;
                 }
                 glBindTexture(GL_TEXTURE_2D, texture);
@@ -849,6 +872,8 @@ mod overlay {
     pub(super) fn log(message: &str) {
         use std::io::Write as _;
 
+        // 行写入持锁：避免两个线程的行交错（用户日志里出现过半行拼接）。
+        let _guard = LOG_LOCK.lock();
         let start = LOG_START.get_or_init(Instant::now);
         let path = std::env::temp_dir().join("overlay.log");
         if let Ok(mut file) = std::fs::OpenOptions::new()
