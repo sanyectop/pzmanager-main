@@ -454,6 +454,13 @@ type AppSettings = {
   fontContrast: number | null;
   /** 0–200：毛玻璃 / 亚克力的模糊强度，100 = 设计基准。 */
   blurStrength: number | null;
+  /** 界面字体：完整的 CSS font-family 列表；空 = 默认字体栈。 */
+  fontFamily: string | null;
+  /** 界面字号缩放百分比（80–130），100 = 设计基准。 */
+  fontScale: number | null;
+  /** 记住的窗口尺寸（逻辑像素）；null = 使用默认 840×560。 */
+  windowWidth: number | null;
+  windowHeight: number | null;
   modLoaderScheme: string | null;
   fastLaunch: boolean;
   silentMemoryCleanup: boolean;
@@ -560,6 +567,43 @@ const MIN_BLUR_STRENGTH = 0;
 const MAX_BLUR_STRENGTH = 200;
 const BLUR_STRENGTH_STEP = 10;
 const DEFAULT_BLUR_STRENGTH = 100;
+// 界面字号（设置 › 通用）：根 font-size = 16px × 百分比/100，范围与后端 normalize_font_scale 一致。
+const MIN_FONT_SCALE = 80;
+const MAX_FONT_SCALE = 130;
+const FONT_SCALE_STEP = 5;
+const DEFAULT_FONT_SCALE = 100;
+// 启动器窗口尺寸下限与两份 tauri conf 的 minWidth/minHeight 一致。
+const DEFAULT_WINDOW_WIDTH = 840;
+const DEFAULT_WINDOW_HEIGHT = 560;
+// 界面字体预设（设置 › 通用）：存进 settings.json 的是完整 CSS font-family 列表。
+// "custom" 不是真实取值——选中后由旁边的输入框决定实际字体（可填任意本机字体名或 CSS 列表）。
+const FONT_FAMILY_PRESETS: WorkshopMenuOption[] = [
+  { value: "default", label: "默认（Inter / 系统字体）" },
+  { value: "yahei", label: "微软雅黑" },
+  { value: "segoe", label: "Segoe UI" },
+  { value: "simsun", label: "宋体（SimSun）" },
+  { value: "consolas", label: "等宽（Consolas）" },
+  { value: "custom", label: "自定义…" },
+];
+const FONT_FAMILY_PRESET_CSS: Record<string, string> = {
+  yahei: '"Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
+  segoe: '"Segoe UI Variable Text", "Segoe UI", sans-serif',
+  simsun: 'SimSun, "Microsoft YaHei", serif',
+  consolas: 'Consolas, "Courier New", monospace',
+};
+
+/** 由存储的字体值推导下拉选中项：空 = 默认；等于某预设 = 该预设；其余（自定义串）= custom。 */
+function fontFamilyChoiceFromValue(value: string): string {
+  if (!value.trim()) {
+    return "default";
+  }
+  for (const [key, css] of Object.entries(FONT_FAMILY_PRESET_CSS)) {
+    if (css === value) {
+      return key;
+    }
+  }
+  return "custom";
+}
 const PAGE_TRANSITION_MS = 200;
 // 与 App.css 里光影包信息弹框退场动画（.pz-resource-file-overlay.is-closing）时长保持一致。
 const RESOURCE_DIALOG_EXIT_MS = 170;
@@ -2670,6 +2714,17 @@ function App() {
   // 模糊度（0–200，设置 › 通用）：全站毛玻璃 / 亚克力的 blur 半径都乘这个百分比。
   const [blurStrength, setBlurStrength] = useState(DEFAULT_BLUR_STRENGTH);
   const blurStrengthSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 界面字号（80–130，设置 › 通用）：根 font-size = 16px × 百分比/100，全站 rem 文字随之缩放。
+  const [fontScale, setFontScale] = useState(DEFAULT_FONT_SCALE);
+  const fontScaleSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 界面字体（设置 › 通用）：存完整 CSS font-family 列表，空串 = 默认字体栈。
+  const [fontFamily, setFontFamily] = useState("");
+  const fontFamilySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 下拉框当前选中的预设项（与 fontFamily 分开记：选「自定义」时保留原值给输入框编辑）。
+  const [fontFamilyChoice, setFontFamilyChoice] = useState("default");
+  // 记住的窗口尺寸（仅用于设置页展示；启动时的实际恢复由后端 setup 完成）。
+  const [savedWindowSize, setSavedWindowSize] = useState<[number, number] | null>(null);
+  const windowSizeSaveTimerRef = useRef<number | null>(null);
   // 模组加载器方案（设置 › 模组加载器）：启动时按它决定要不要挂加载器 agent。
   const [modLoaderScheme, setModLoaderScheme] = useState(DEFAULT_MOD_LOADER_SCHEME);
   const [modLoaderSchemeSaving, setModLoaderSchemeSaving] = useState(false);
@@ -3953,6 +4008,35 @@ function App() {
     }, 250);
   }
 
+  /** 界面字号：拖动时只改状态（CSS 变量立刻生效），落盘做 250ms 防抖。 */
+  function updateFontScale(nextValue: number) {
+    const clamped = Math.min(MAX_FONT_SCALE, Math.max(MIN_FONT_SCALE, Math.round(nextValue)));
+    setFontScale(clamped);
+    if (fontScaleSaveTimerRef.current !== null) {
+      window.clearTimeout(fontScaleSaveTimerRef.current);
+    }
+    fontScaleSaveTimerRef.current = window.setTimeout(() => {
+      fontScaleSaveTimerRef.current = null;
+      void invoke("save_font_scale", { value: clamped }).catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : String(error), "error");
+      });
+    }, 250);
+  }
+
+  /** 界面字体：改完立即生效（CSS 变量），落盘做 250ms 防抖。空串 = 默认字体栈。 */
+  function updateFontFamily(nextValue: string) {
+    setFontFamily(nextValue);
+    if (fontFamilySaveTimerRef.current !== null) {
+      window.clearTimeout(fontFamilySaveTimerRef.current);
+    }
+    fontFamilySaveTimerRef.current = window.setTimeout(() => {
+      fontFamilySaveTimerRef.current = null;
+      void invoke("save_font_family", { value: nextValue }).catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : String(error), "error");
+      });
+    }, 250);
+  }
+
   /** 静默内存清理：轮询系统占用（设置页要显示），并接收后端"已清理"事件。 */
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -4001,6 +4085,62 @@ function App() {
     };
   }, [blurStrength]);
 
+  // 界面字号同理：App.css 根 font-size 写成 calc(16px * var(--pz-font-scale, 1))，
+  // 全站 rem 字号（含 Chakra 的 rem 令牌）随一个变量整体缩放；控件高度等 px 值保持不变。
+  useEffect(() => {
+    document.documentElement.style.setProperty("--pz-font-scale", String(fontScale / 100));
+    return () => {
+      document.documentElement.style.removeProperty("--pz-font-scale");
+    };
+  }, [fontScale]);
+
+  // 界面字体：空串 = 默认字体栈（不写变量，回落 App.css font-family 里的完整 fallback 列表）。
+  useEffect(() => {
+    const trimmed = fontFamily.trim();
+    if (trimmed) {
+      document.documentElement.style.setProperty("--pz-font-family", trimmed);
+    } else {
+      document.documentElement.style.removeProperty("--pz-font-family");
+    }
+  }, [fontFamily]);
+
+  // 记住窗口尺寸：拖动结束后防抖落盘，下次启动由后端 setup 恢复。
+  // 尺寸由后端自行读取（省掉 inner-size / scale-factor 两个窗口权限），最大化时不记忆；
+  // 恢复默认是失败可见的操作，这里的静默失败只影响"下次是否记住"，不值得打断用户。
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    const currentWindow = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    void currentWindow.onResized(() => {
+      if (windowSizeSaveTimerRef.current !== null) {
+        window.clearTimeout(windowSizeSaveTimerRef.current);
+      }
+      windowSizeSaveTimerRef.current = window.setTimeout(() => {
+        windowSizeSaveTimerRef.current = null;
+        void currentWindow.isMaximized().then((maximized) => {
+          if (maximized) {
+            return;
+          }
+          return invoke<[number, number]>("save_window_size").then((size) => {
+            setSavedWindowSize(size);
+          });
+        }).catch(() => undefined);
+      }, 500);
+    })
+      .then((cleanup) => {
+        unlisten = cleanup;
+      })
+      .catch(() => undefined);
+    return () => {
+      unlisten?.();
+      if (windowSizeSaveTimerRef.current !== null) {
+        window.clearTimeout(windowSizeSaveTimerRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!isTauriRuntime()) {
       return;
@@ -4047,6 +4187,19 @@ function App() {
           setTranslatorLanguage(loadedTranslationLanguage);
           setFontContrast(settingsResult.value.fontContrast ?? 0);
           setBlurStrength(settingsResult.value.blurStrength ?? DEFAULT_BLUR_STRENGTH);
+          setFontScale(settingsResult.value.fontScale ?? DEFAULT_FONT_SCALE);
+          const loadedFontFamily = settingsResult.value.fontFamily ?? "";
+          setFontFamily(loadedFontFamily);
+          setFontFamilyChoice(fontFamilyChoiceFromValue(loadedFontFamily));
+          if (
+            settingsResult.value.windowWidth != null &&
+            settingsResult.value.windowHeight != null
+          ) {
+            setSavedWindowSize([
+              settingsResult.value.windowWidth,
+              settingsResult.value.windowHeight,
+            ]);
+          }
           setModLoaderScheme(settingsResult.value.modLoaderScheme ?? DEFAULT_MOD_LOADER_SCHEME);
           setFastLaunch(Boolean(settingsResult.value.fastLaunch));
           setSilentMemoryCleanup(Boolean(settingsResult.value.silentMemoryCleanup));
@@ -6487,6 +6640,115 @@ function App() {
             </Slider.Control>
           </Slider.Root>
         </Box>
+      </HStack>
+      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
+        <Box flex="1" minW="240px">
+          <Text color="gray.800" fontSize="sm" fontWeight="700">界面字号</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            整体放大或缩小界面文字：往左更紧凑，往右更大更易读。窗口和控件大小保持不变。
+          </Text>
+        </Box>
+        <Box flex="1" maxW="320px" minW="200px">
+          <HStack justify="space-between" mb="1">
+            <Text color="gray.500" fontSize="xs">
+              {fontScale === DEFAULT_FONT_SCALE
+                ? "默认"
+                : fontScale < DEFAULT_FONT_SCALE
+                  ? "更紧凑"
+                  : "更大"}
+            </Text>
+            <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+              {fontScale}%
+            </Text>
+          </HStack>
+          {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
+          <Slider.Root
+            aria-label={["界面字号"]}
+            className="pz-memory-slider"
+            max={MAX_FONT_SCALE}
+            min={MIN_FONT_SCALE}
+            step={FONT_SCALE_STEP}
+            value={[fontScale]}
+            onValueChange={({ value }) => {
+              const nextValue = value[0];
+              if (nextValue !== undefined) {
+                updateFontScale(nextValue);
+              }
+            }}
+          >
+            <Slider.Control>
+              <Slider.Track>
+                <Slider.Range />
+              </Slider.Track>
+              <Slider.Thumb index={0}>
+                <Slider.HiddenInput />
+              </Slider.Thumb>
+            </Slider.Control>
+          </Slider.Root>
+        </Box>
+      </HStack>
+      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
+        <Box flex="1" minW="240px">
+          <Text color="gray.800" fontSize="sm" fontWeight="700">界面字体</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            选择系统常见字体；选「自定义…」后可填入本机安装的任意字体名，也可以直接粘贴 CSS font-family 列表。
+          </Text>
+        </Box>
+        <HStack gap="2" align="center">
+          <WorkshopDropdown
+            ariaLabel="界面字体"
+            onChange={(value) => {
+              setFontFamilyChoice(value);
+              if (value === "custom") {
+                // 保留当前值（可能是预设的 CSS 列表），由旁边的输入框直接编辑。
+                return;
+              }
+              updateFontFamily(FONT_FAMILY_PRESET_CSS[value] ?? "");
+            }}
+            options={FONT_FAMILY_PRESETS}
+            value={fontFamilyChoice}
+            width="11rem"
+          />
+          {fontFamilyChoice === "custom" && (
+            <Input
+              aria-label="自定义字体"
+              placeholder="字体名，如 思源黑体 / Sarasa Gothic SC"
+              value={fontFamily}
+              width="13rem"
+              onChange={(event) => updateFontFamily(event.target.value)}
+            />
+          )}
+        </HStack>
+      </HStack>
+      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
+        <Box flex="1" minW="240px">
+          <Text color="gray.800" fontSize="sm" fontWeight="700">窗口大小</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            直接拖动窗口边缘即可调整大小（最小 {DEFAULT_WINDOW_WIDTH} × {DEFAULT_WINDOW_HEIGHT}），
+            启动器会自动记住，下次启动按这个尺寸打开。
+          </Text>
+        </Box>
+        <HStack gap="2" align="center">
+          <Text color="gray.500" fontSize="xs">
+            {savedWindowSize
+              ? `已记住 ${savedWindowSize[0]} × ${savedWindowSize[1]}`
+              : `默认 ${DEFAULT_WINDOW_WIDTH} × ${DEFAULT_WINDOW_HEIGHT}`}
+          </Text>
+          <Button
+            aria-label="恢复默认窗口大小"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void invoke("restore_default_window_size")
+                .then(() => setSavedWindowSize(null))
+                .catch((error: unknown) => {
+                  showToast(error instanceof Error ? error.message : String(error), "error");
+                });
+            }}
+          >
+            恢复默认
+          </Button>
+        </HStack>
       </HStack>
     </Box>
   );

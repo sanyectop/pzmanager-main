@@ -1929,6 +1929,45 @@ fn normalize_blur_strength(value: u8) -> u8 {
     value.min(BLUR_STRENGTH_MAX)
 }
 
+/// 界面字号缩放（百分比）：80–130，100 = 设计基准。
+/// 前端换算成 `--pz-font-scale` 作用到根 font-size，全站 rem 字号随之缩放。设置页「通用 › 界面字号」。
+const FONT_SCALE_MIN: u8 = 80;
+const FONT_SCALE_MAX: u8 = 130;
+const FONT_SCALE_DEFAULT: u8 = 100;
+
+fn normalize_font_scale(value: u8) -> u8 {
+    value.clamp(FONT_SCALE_MIN, FONT_SCALE_MAX)
+}
+
+/// 界面字体：存完整的 CSS font-family 列表；空 / 缺失 = 回落 App.css 的默认字体栈。
+const FONT_FAMILY_MAX_LEN: usize = 200;
+
+fn normalize_font_family(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(FONT_FAMILY_MAX_LEN).collect())
+}
+
+/// 启动器窗口尺寸（逻辑像素）：下限与两份 tauri conf 的 minWidth/minHeight 一致；
+/// 上限只是防御性的，防止手改 settings.json 写进离谱数值。
+const WINDOW_WIDTH_MIN: u32 = 840;
+const WINDOW_HEIGHT_MIN: u32 = 560;
+const WINDOW_SIZE_MAX: u32 = 10000;
+
+fn normalize_window_width(value: u32) -> Option<u32> {
+    (WINDOW_WIDTH_MIN..=WINDOW_SIZE_MAX)
+        .contains(&value)
+        .then_some(value)
+}
+
+fn normalize_window_height(value: u32) -> Option<u32> {
+    (WINDOW_HEIGHT_MIN..=WINDOW_SIZE_MAX)
+        .contains(&value)
+        .then_some(value)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
@@ -1941,6 +1980,13 @@ struct AppSettings {
     font_contrast: Option<u8>,
     /// 「模糊度」百分比：0 = 关掉模糊，100 = 设计基准，上限 200。没写过按 100 处理。
     blur_strength: Option<u8>,
+    /// 「界面字体」：完整的 CSS font-family 列表；空 / 缺失 = App.css 的默认字体栈。
+    font_family: Option<String>,
+    /// 「界面字号」缩放百分比：80–130，100 = 设计基准。没写过按 100 处理。
+    font_scale: Option<u8>,
+    /// 记住的窗口尺寸（逻辑像素）。缺失 = 用 tauri.conf.json 的默认 840×560。
+    window_width: Option<u32>,
+    window_height: Option<u32>,
     /// 「模组加载器方案」（`zombieBuddy` / `none`），决定启动前要不要挂加载器 agent。
     mod_loader_scheme: Option<String>,
     /// 「极速启动（实验性）」：把启动器预扫描出的模组/补丁清单喂给 ZombieBuddy，
@@ -4448,6 +4494,17 @@ fn get_app_settings() -> Result<AppSettings, String> {
             .and_then(normalize_mod_loader_scheme)
             .unwrap_or_else(|| DEFAULT_MOD_LOADER_SCHEME.to_string()),
     );
+    // 界面字号没写过按 100（设计基准）处理。
+    settings.font_scale = Some(
+        settings
+            .font_scale
+            .map_or(FONT_SCALE_DEFAULT, normalize_font_scale),
+    );
+    // 界面字体：空串按「默认字体栈」处理（回落 None，前端就不写 CSS 变量）。
+    settings.font_family = settings
+        .font_family
+        .as_deref()
+        .and_then(normalize_font_family);
     Ok(settings)
 }
 
@@ -4490,6 +4547,81 @@ fn save_blur_strength(value: u8) -> Result<(), String> {
     let path = app_settings_path()?;
     let mut settings = load_app_settings_at(&path)?;
     settings.blur_strength = Some(normalize_blur_strength(value));
+    save_app_settings_at(&path, &settings)
+}
+
+#[tauri::command]
+fn save_font_scale(value: u8) -> Result<(), String> {
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.font_scale = Some(normalize_font_scale(value));
+    save_app_settings_at(&path, &settings)
+}
+
+#[tauri::command]
+fn save_font_family(value: String) -> Result<(), String> {
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.font_family = normalize_font_family(&value);
+    save_app_settings_at(&path, &settings)
+}
+
+/// 记住当前窗口尺寸（前端在拖动结束后防抖调用）。
+///
+/// 尺寸由后端自己读取（物理像素 ÷ 缩放系数 = 逻辑像素），前端就不需要
+/// inner-size / scale-factor 两个窗口权限；最大化时不记忆（那不是用户想要的固定尺寸）。
+#[tauri::command]
+fn save_window_size(app: tauri::AppHandle) -> Result<(u32, u32), String> {
+    use tauri::Manager;
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口。".to_string())?;
+    if window
+        .is_maximized()
+        .map_err(|error| format!("查询窗口状态失败: {error}"))?
+    {
+        return Err("窗口处于最大化状态，不记录尺寸。".to_string());
+    }
+    let size = window
+        .inner_size()
+        .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
+    let factor = window
+        .scale_factor()
+        .map_err(|error| format!("读取屏幕缩放系数失败: {error}"))?;
+    let width = (size.width as f64 / factor).round() as u32;
+    let height = (size.height as f64 / factor).round() as u32;
+    // 拖动过程会有低于下限的中间态：不落盘也不算错误，等拖完的下一帧再记。
+    let (Some(width), Some(height)) =
+        (normalize_window_width(width), normalize_window_height(height))
+    else {
+        return Err("窗口尺寸超出可记忆范围，已忽略。".to_string());
+    };
+
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.window_width = Some(width);
+    settings.window_height = Some(height);
+    save_app_settings_at(&path, &settings)?;
+    Ok((width, height))
+}
+
+/// 恢复默认窗口尺寸：立即生效，同时清掉记住的尺寸（下次启动回到 conf 默认值）。
+#[tauri::command]
+fn restore_default_window_size(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口。".to_string())?;
+    window
+        .set_size(tauri::LogicalSize::new(WINDOW_WIDTH_MIN, WINDOW_HEIGHT_MIN))
+        .map_err(|error| format!("设置窗口尺寸失败: {error}"))?;
+
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.window_width = None;
+    settings.window_height = None;
     save_app_settings_at(&path, &settings)
 }
 
@@ -5588,8 +5720,11 @@ pub fn run() {
         .setup(|app| {
             // 静默内存清理：把持久化的开关/阈值交给后台轮询线程。
             // 读配置失败就按"关闭"处理——启动流程绝不能被清理功能拖住。
-            let (enabled, threshold) = app_settings_path()
+            let loaded_settings = app_settings_path()
                 .and_then(|path| load_app_settings_at(&path))
+                .ok();
+            let (enabled, threshold) = loaded_settings
+                .as_ref()
                 .map(|settings| {
                     (
                         settings.silent_memory_cleanup,
@@ -5599,6 +5734,26 @@ pub fn run() {
                 .unwrap_or((false, memclean::DEFAULT_THRESHOLD_PERCENT));
             memclean::set_silent_cleanup(enabled, threshold);
             memclean::start_silent_loop(app.handle().clone());
+
+            // 恢复上一次记住的窗口尺寸（拖动窗口边缘调整后会自动记住）。
+            // 默认 840×560 由 tauri.conf.json 提供，这里只在有有效记录时覆盖。
+            if let Some(settings) = loaded_settings.as_ref() {
+                let remembered_size = match (settings.window_width, settings.window_height) {
+                    (Some(width), Some(height)) => {
+                        match (normalize_window_width(width), normalize_window_height(height)) {
+                            (Some(width), Some(height)) => Some((width, height)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some((width, height)) = remembered_size {
+                    use tauri::Manager;
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+                    }
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -5611,6 +5766,10 @@ pub fn run() {
             save_translation_language,
             save_font_contrast,
             save_blur_strength,
+            save_font_scale,
+            save_font_family,
+            save_window_size,
+            restore_default_window_size,
             save_mod_loader_scheme,
             save_fast_launch,
             save_silent_memory_cleanup,
@@ -5682,8 +5841,9 @@ mod tests {
         is_builtin_background_path, jar_scan_candidates, jar_scan_inputs,
         library_paths_from_config, list_viewpoint_shaderpacks_at, list_viewpoint_shots_at,
         load_app_settings_at, merge_lua_mod_entry, mod_jar_path, mod_loader_policy_agent,
-        mod_poster_path, normalize_blur_strength, normalize_font_contrast,
-        normalize_mod_loader_scheme, normalize_translation_language, order_mod_ids_by_requires,
+        mod_poster_path, normalize_blur_strength, normalize_font_contrast, normalize_font_family,
+        normalize_font_scale, normalize_mod_loader_scheme, normalize_translation_language,
+        normalize_window_height, normalize_window_width, order_mod_ids_by_requires,
         parse_default_mod_ids, parse_java_mod_info, parse_lua_mod_info, parse_lua_sorting_rules,
         patch_batch_content, patch_batch_content_with_memory, patch_batch_with_agent,
         patch_json_launcher_content, patch_json_launcher_content_with_memory,
@@ -5783,6 +5943,10 @@ mod tests {
             translation_language: Some("ja".to_string()),
             font_contrast: Some(45),
             blur_strength: Some(120),
+            font_family: Some("\"Microsoft YaHei UI\", sans-serif".to_string()),
+            font_scale: Some(110),
+            window_width: Some(970),
+            window_height: Some(600),
             mod_loader_scheme: Some("none".to_string()),
             fast_launch: false,
             developer_mode: true,
@@ -5813,6 +5977,32 @@ mod tests {
         assert_eq!(settings.font_contrast, None);
         assert_eq!(settings.blur_strength, None);
         assert_eq!(settings.mod_loader_scheme, None);
+        assert_eq!(settings.font_family, None);
+        assert_eq!(settings.font_scale, None);
+        assert_eq!(settings.window_width, None);
+        assert_eq!(settings.window_height, None);
+    }
+
+    /// 界面字号/字体与窗口尺寸的归一化：坏值要么夹到范围内，要么按"没设置过"处理。
+    #[test]
+    fn clamps_font_scale_and_validates_window_size() {
+        use super::{FONT_SCALE_MAX, FONT_SCALE_MIN, WINDOW_WIDTH_MIN};
+
+        assert_eq!(normalize_font_scale(0), FONT_SCALE_MIN);
+        assert_eq!(normalize_font_scale(100), 100);
+        assert_eq!(normalize_font_scale(255), FONT_SCALE_MAX);
+        // 空字体 = 默认字体栈；前后空白要裁掉。
+        assert_eq!(normalize_font_family("   "), None);
+        assert_eq!(
+            normalize_font_family("  Consolas, monospace "),
+            Some("Consolas, monospace".to_string())
+        );
+        // 窗口尺寸低于下限 / 超过防御上限都不落盘。
+        assert_eq!(normalize_window_width(WINDOW_WIDTH_MIN - 1), None);
+        assert_eq!(normalize_window_width(WINDOW_WIDTH_MIN), Some(WINDOW_WIDTH_MIN));
+        assert_eq!(normalize_window_height(560), Some(560));
+        assert_eq!(normalize_window_height(559), None);
+        assert_eq!(normalize_window_width(10001), None);
     }
 
     fn scanned_jar(id: &str, decision: Option<bool>, disabled: bool) -> ScannedJarMod {
