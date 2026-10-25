@@ -158,7 +158,7 @@ pzm/
 | [resource.rs](../src-tauri/src/resource.rs) | Modrinth + CurseForge 光影资源检索 | 注释明确对齐 PCL2 的 `DlSourceModGet` |
 | [downloader.rs](../src-tauri/src/downloader.rs) | 多线程分块 HTTP 下载（`RANGE`/`CONTENT-RANGE`）+ 进度事件 | 供光影下载器使用 |
 | [news.rs](../src-tauri/src/news.rs) | Steam 新闻 API + 正文清洗，切分成可翻译片段 | 夹具 `tests/fixtures/news_split_cases.json` |
-| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（15 条/批，单条 ≤2000 字），引擎 Google `translate_a/single` + Yandex detect/translate | 带内存缓存 |
+| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（15 条/批，单条 ≤2000 字），引擎 Google `translate_a/single` → 失败回退 MyMemory（按文字系统猜源语言），Google 失败后熔断 10 分钟直接走 MyMemory；`engine == "none"` 视为失败触发逐句重试，`none` 结果不进缓存 | 带内存缓存 |
 | [overlay.rs](../src-tauri/src/overlay.rs) | 注入入口：路径校验、进程轮询（优先 `ProjectZomboid64.exe`，其次 `javaw.exe`）、重复注入检测 | 编译期二选一注入后端 |
 | `overlay_inject_win32.rs` / `overlay_inject_dll_syringe.rs` | 两套等价后端，对外都是 `inject_dll(pid, dll_path)` | 后者需 nightly |
 | [overlay_session.rs](../src-tauri/src/overlay_session.rs) | 会话编排：等窗口 → 注入 → 解析控制台 → 写状态文件 → 判定完成 → 发停止事件；并提供游戏进程查询/停止命令；顺带记录「检测到窗口 → 移除覆盖层」的启动时长（落盘 `startup-timing.json`，发 `startup-timing` 事件，`startup_timing` 命令读回） | ⚠️ 正在大改 |
