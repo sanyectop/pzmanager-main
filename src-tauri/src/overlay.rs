@@ -40,10 +40,16 @@ pub(crate) mod imp {
     const PROCESS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
     /// 进程轮询间隔。
     const PROCESS_LOOKUP_INTERVAL: Duration = Duration::from_millis(500);
+    /// 新版覆盖层 DLL（带加载界面）里必然包含的状态文件名字符串。
+    ///
+    /// 早期的"纯红探针"DLL 没有这个标记：它只会把游戏窗口刷红、不画任何界面，
+    /// 注入它得到的就是"红屏无字"。注入前先做内容校验，给出可操作的错误。
+    const UI_DLL_MARKER: &[u8] = b"pz_overlay_status.txt";
 
     /// 阻塞式注入流程，由命令层放到阻塞线程池里执行。
     pub(super) fn inject_overlay_blocking(dll_path: &str) -> Result<String, String> {
         let dll_path = normalize_dll_path(dll_path)?;
+        ensure_overlay_dll_is_current(&dll_path)?;
         let dll_name = dll_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -55,10 +61,21 @@ pub(crate) mod imp {
         // 目标进程已有同名模块时不再重复 LoadLibrary：
         // 会多一次引用计数，而且 DLL 端的 Hook 也只需要一份。
         // 这里枚举失败（例如 32 位进程）不作为错误处理，交给注入阶段给出更准确的报错。
-        if is_module_loaded(pid, &dll_name).unwrap_or(false) {
-            return Ok(format!(
+        if let Some(loaded_path) = loaded_module_path(pid, &dll_name).unwrap_or(None) {
+            let mut message = format!(
                 "{dll_name} 已在 {process_name}（PID {pid}）中加载，本次跳过重复注入。"
-            ));
+            );
+            // 预载的不是我们要注入的这份：多半是旧版残留（只刷红、没界面），
+            // 或极速启动 -agentpath 指向了别的位置 —— 必须明确告诉用户，否则
+            // "红屏无字"时用户根本想不到去看这个路径。
+            if !module_path_matches(&loaded_path, &dll_path) {
+                message.push_str(&format!(
+                    "\n注意：进程里加载的是另一份副本（{loaded_path}），与本次的 {} 不一致；\
+                     若出现红屏且没有文字，请清理旧版残留或重装 PZManager。",
+                    dll_path.display()
+                ));
+            }
+            return Ok(message);
         }
 
         super::injector::inject_dll(pid, &dll_path)?;
@@ -67,6 +84,57 @@ pub(crate) mod imp {
             "已向 {process_name}（PID {pid}）注入覆盖层 DLL：{}",
             dll_path.display()
         ))
+    }
+
+    /// 校验 DLL 是否为带加载界面的新版覆盖层（旧探针 DLL 直接拒绝注入）。
+    pub(crate) fn ensure_overlay_dll_is_current(path: &Path) -> Result<(), String> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("读取覆盖层 DLL 失败（{}）: {error}", path.display()))?;
+        if bytes
+            .windows(UI_DLL_MARKER.len())
+            .any(|window| window == UI_DLL_MARKER)
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "覆盖层 DLL 版本过旧（{}）：缺少新版界面标记，注入后只会显示红屏、没有任何文字。\
+             请更新或重新安装 PZManager，或用界面上的「选择 DLL」指定新版 pz_overlay.dll。",
+            path.display()
+        ))
+    }
+
+    /// 目标进程里同名模块的完整路径（用于区分"预载的就是这份"与"别的位置的旧副本"）。
+    pub(crate) fn loaded_module_path(pid: u32, dll_name: &str) -> Result<Option<String>, String> {
+        // SAFETY: 只做只读枚举。
+        let snapshot =
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) }
+                .map_err(|error| format!("枚举 PID {pid} 的模块列表失败: {error}"))?;
+
+        let mut entry: MODULEENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+
+        let mut loaded = None;
+        // SAFETY: entry 已按 API 要求设置 dwSize。
+        if unsafe { Module32FirstW(snapshot, &mut entry) }.is_ok() {
+            loop {
+                if wide_fixed_string(&entry.szModule).eq_ignore_ascii_case(dll_name) {
+                    loaded = Some(wide_fixed_string(&entry.szExePath));
+                    break;
+                }
+                // SAFETY: 链表遍历结束会返回错误。
+                if unsafe { Module32NextW(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+        }
+
+        let _ = unsafe { CloseHandle(snapshot) };
+        Ok(loaded)
+    }
+
+    /// 模块路径与预期路径是否指向同一文件（不区分大小写，不触盘）。
+    pub(crate) fn module_path_matches(loaded: &str, expected: &Path) -> bool {
+        loaded.trim().to_ascii_lowercase() == expected.to_string_lossy().trim().to_ascii_lowercase()
     }
 
     /// 解析相对 DLL 路径时依次尝试的基目录。
