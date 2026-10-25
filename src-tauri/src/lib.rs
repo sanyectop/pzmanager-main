@@ -20,6 +20,7 @@ mod news_translation;
 mod overlay;
 mod overlay_session;
 mod resource;
+mod update;
 mod workshop;
 
 const PROJECT_ZOMBOID_APP_ID: &str = "108600";
@@ -5768,7 +5769,8 @@ pub fn run() {
             download_shader_file,
             fetch_minecraft_versions,
             fetch_developer_news,
-            translate_developer_news_batch
+            translate_developer_news_batch,
+            check_launcher_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -8683,4 +8685,9 @@ async fn fetch_developer_news(
     only_gid: Option<String>,
 ) -> Result<news::DeveloperNewsResponse, String> {
     news::fetch_developer_news(count, language, only_gid).await
+}
+
+#[tauri::command]
+async fn check_launcher_update() -> Result<update::LauncherUpdateStatus, String> {
+    update::fetch_launcher_update(update::UPDATE_FEED_URL).await
 }
