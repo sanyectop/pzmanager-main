@@ -3913,7 +3913,7 @@ body {
   white-space: pre-wrap;
 }
 
-/* 内置四季壁纸（SeasonalWallpaper.tsx）：每秒由 React 更新 opacity / 色调，这里只负责图层与过渡。
+/* 内置四季轮转（SeasonalWallpaper.tsx）：每秒由 React 更新 opacity / 色调，这里只负责图层与过渡。
    壁纸用 z-index: -1 垫在页面最底层，所以外壳不能再画自己的底色，也不能 isolation：
    否则底色会盖住壁纸，外壳成为独立采样范围后，毛玻璃面板也看不到壁纸。 */
 .pz-app-shell.pz-app-shell-seasonal {

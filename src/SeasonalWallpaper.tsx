@@ -51,7 +51,7 @@ export async function loadSeasonFeatures(): Promise<SeasonFeatures> {
 }
 
 /**
- * 内置四季壁纸的绘制层（移植自 a(1).html 的渲染管线）：
+ * 内置「四季轮转」壁纸的绘制层（移植自 a(1).html 的渲染管线）：
  *  1. 四张季节图按权重叠放（权重即透明度，换季时交叉淡化），整体套 SVG 逐通道曲线 + 亮度 / 饱和度 / 对比度；
  *  2. 每张季节图各自的光照方向用 soft-light 叠在上面，按权重淡入淡出；
  *  3. 中心死黑提亮用 screen 叠在最上层。

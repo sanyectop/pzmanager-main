@@ -18,9 +18,9 @@ const SUPPORTS_PATH_CLIP =
   CSS.supports("clip-path", 'path("M0 0h1v1Z")');
 
 export type AcrylicGlassProps = {
-  /** 当前背景图（自定义 / 创意工坊 / 内置）；四季壁纸时是 null。 */
+  /** 当前背景图（自定义 / 创意工坊 / 内置）；四季轮转时是 null。 */
   backgroundUrl: string | null;
-  /** 是否四季壁纸：它由 DOM 图层逐秒重绘，靠再渲染一次 <SeasonalWallpaper> 复制。 */
+  /** 是否四季轮转：它由 DOM 图层逐秒重绘，靠再渲染一次 <SeasonalWallpaper> 复制。 */
   seasonal: boolean;
   effect: WallpaperEffect;
 };
@@ -147,11 +147,11 @@ export function AcrylicGlass({ backgroundUrl, seasonal, effect }: AcrylicGlassPr
       observer.disconnect();
       window.removeEventListener("resize", onResize);
     };
-    // 换背景只有两种变化：图片 URL 变、或切进/切出四季壁纸；
+    // 换背景只有两种变化：图片 URL 变、或切进/切出四季轮转；
     // 创意工坊胶囊的出现/消失也随背景变化，所以这两项就够了。
   }, [backgroundUrl, seasonal]);
 
-  // 每次渲染后再量一次，作为 ResizeObserver 的兜底：四季壁纸每秒都会重渲染一次，
+  // 每次渲染后再量一次，作为 ResizeObserver 的兜底：四季轮转每秒都会重渲染一次，
   // 即使窗口被遮挡 / 帧被节流导致 RO 通知迟到，几何也最多晚一秒收敛。
   // measure 内部有"结果没变就不写"的判断，正常情况这里几乎不产生布局开销。
   useEffect(() => {

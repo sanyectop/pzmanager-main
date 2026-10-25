@@ -22,3 +22,17 @@
 > yandex: "Yandex"
 
 位置:`App.tsx:7993` 引擎标签映射,改为 mymemory: "MyMemory"(引擎缓存仅在内存中,无旧数据兼容问题)。
+
+## 2026-10-25 关于页「项目仓库」占位文案与内置壁纸名称(src/App.tsx,仓库补链 + 壁纸改名前的快照)
+
+> 项目仓库
+>
+> 尚未上传，敬请期待。
+
+位置:`App.tsx` aboutSettingsContent 末尾。仓库已发布(GitHub:sanyectop/pzmanager-main),
+占位文案替换为真实链接,并在其上方新增「官方网站」(https://pzm.sanyec.top) 一行。
+
+> 四季壁纸
+
+位置:`builtinBackgrounds` 数组项 `name` 字段与启动页时长标签,改名为「四季轮转」;
+关联注释同步更新。
