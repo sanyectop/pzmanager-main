@@ -6,15 +6,15 @@
 //! 失败会熔断一段时间（照 `news_translation` 的 Google 熔断思路），大陆
 //! 用户不用每次都先白等一次直连超时；中转故障时对称地临时切回直连。
 //!
-//! 中转服务本体是 `steam-api/` 目录里的 Cloudflare Worker，部署在
-//! `pzmapi.sanyec.top/steam/*`。workers.dev 域名在大陆被墙，自建中转
-//! 必须用自有域名。
+//! 中转服务本体是 `update-api/functions/steam/[[path]].js`（Pages Function，
+//! 与更新源同项目部署在 `pzmapi.sanyec.top/steam/*`）。workers.dev 域名在
+//! 大陆被墙，自建中转必须用自有域名。
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// 默认中转地址。与 `steam-api/worker.js` 的路由前缀（`/steam`）对应；
-/// 换地址 = 改这里 + 重新部署 Worker + 更新 README。
+/// 默认中转地址。与 `update-api/functions/steam/[[path]].js` 的路由前缀（`/steam`）
+/// 对应；换地址 = 改这里 + 重新部署 Pages 项目 + 更新 README。
 pub(crate) const DEFAULT_RELAY_BASE: &str = "https://pzmapi.sanyec.top/steam";
 /// 设置页「Steam 网络加速」的三种模式。
 pub(crate) const RELAY_MODES: [&str; 3] = ["auto", "relay", "direct"];
@@ -22,8 +22,9 @@ pub(crate) const DEFAULT_RELAY_MODE: &str = "auto";
 /// 直连熔断时长：自动模式下直连失败后，这段时间内中转优先。
 const LINK_BACKOFF: Duration = Duration::from_secs(600);
 
-/// Steam 图片 CDN 主机白名单。与 `steam-api/worker.js` 的 `IMAGE_HOSTS`、
-/// `src/steamRelay.ts` 的 `STEAM_IMAGE_HOSTS` 保持一致；改这里必须同步另外两处。
+/// Steam 图片 CDN 主机白名单。与 `update-api/functions/steam/[[path]].js` 的
+/// `IMAGE_HOSTS`、`src/steamRelay.ts` 的 `STEAM_IMAGE_HOSTS` 保持一致；
+/// 改这里必须同步另外两处。
 pub(crate) const STEAM_IMAGE_HOSTS: [&str; 6] = [
     "shared.cloudflare.steamstatic.com",
     "clan.cloudflare.steamstatic.com",
