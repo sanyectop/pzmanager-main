@@ -194,23 +194,29 @@
   --pz-control-height: 26px;
   --pz-sidebar-height: 0;
   --pz-content-gap: 0.8rem;
+  /* 界面字号（设置 › 通用）的缩放倍率：JS 在 documentElement 上覆写，这里留兜底值。
+     根 font-size 变化时全站 rem 字号（含 Chakra 的 rem 令牌）一起缩放。 */
+  --pz-font-scale: 1;
   font-family:
-    Inter,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI Variable Display",
-    "Segoe UI",
-    "Microsoft YaHei UI",
-    "Microsoft YaHei",
-    "PingFang SC",
-    "Hiragino Sans GB",
-    "Noto Sans CJK SC",
-    ui-sans-serif,
-    Helvetica,
-    Arial,
-    sans-serif;
-  font-size: 16px;
-  line-height: 22px;
+    var(
+      --pz-font-family,
+      Inter,
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI Variable Display",
+      "Segoe UI",
+      "Microsoft YaHei UI",
+      "Microsoft YaHei",
+      "PingFang SC",
+      "Hiragino Sans GB",
+      "Noto Sans CJK SC",
+      ui-sans-serif,
+      Helvetica,
+      Arial,
+      sans-serif
+    );
+  font-size: calc(16px * var(--pz-font-scale, 1));
+  line-height: calc(22px * var(--pz-font-scale, 1));
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
