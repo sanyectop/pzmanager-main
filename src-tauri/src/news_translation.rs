@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BATCH_SIZE: usize = 15;
 const MAX_TEXT_LEN: usize = 2000;
@@ -346,6 +346,26 @@ fn append_spans(
     }
 }
 
+/// Google 不可用（超时 / 被墙 / 限流）后的熔断时长：期间所有请求直接走 MyMemory，
+/// 不再每次都等 Google 超时（一次超时 5 秒，新闻页十几批就是一两分钟）。
+const GOOGLE_BACKOFF: Duration = Duration::from_secs(600);
+/// Google 熔断的截止时刻（Instant），None = 未熔断。
+static GOOGLE_DISABLED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn google_enabled_now() -> bool {
+    match GOOGLE_DISABLED_UNTIL.lock() {
+        Ok(until) => until.map_or(true, |deadline| Instant::now() >= deadline),
+        // 锁中毒按可用处理：宁可多等一次超时，也不能永久停掉 Google。
+        Err(_) => true,
+    }
+}
+
+fn disable_google_for_a_while() {
+    if let Ok(mut until) = GOOGLE_DISABLED_UNTIL.lock() {
+        *until = Some(Instant::now() + GOOGLE_BACKOFF);
+    }
+}
+
 async fn google(client: &Client, text: &str, language: &str) -> Option<String> {
     let value: Value = client
         .get(GOOGLE_URL)
@@ -373,9 +393,19 @@ async fn google(client: &Client, text: &str, language: &str) -> Option<String> {
         .collect::<String>();
     (!value.is_empty()).then_some(value)
 }
-async fn translate_one(client: &Client, text: &str, language: &str) -> (String, String) {
-    if let Some(value) = google(client, text, language).await {
-        return (value, "google".into());
+async fn translate_one(
+    client: &Client,
+    text: &str,
+    language: &str,
+    use_google: bool,
+) -> (String, String) {
+    if use_google && google_enabled_now() {
+        if let Some(value) = google(client, text, language).await {
+            return (value, "google".into());
+        }
+        // Google 这次没成功（超时 / 被墙 / 限流）：接下来一段时间不再等它超时，
+        // 否则一批 15 句逐句重试时每句都要先白等满一个超时，回退看起来像卡死。
+        disable_google_for_a_while();
     }
     if let Some(value) = mymemory(client, text, language).await {
         return (value, "mymemory".into());
@@ -406,9 +436,12 @@ async fn translate_jobs(
             .map(|job| job.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let (translated, engine) = translate_one(client, &joined, language).await;
+        let (translated, engine) = translate_one(client, &joined, language, true).await;
         let parts = translated.split('\n').collect::<Vec<_>>();
-        if parts.len() == pending.len() {
+        // 引擎全失败时 translate_one 返回 (原文, "none")，而原文按 \n 拆开的行数
+        // 恰好等于任务数——会伪装成"翻译成功"。必须把 engine == "none" 视为失败，
+        // 落到下面的逐句重试，否则 MyMemory 根本没有出场机会，还会把 none 写进缓存。
+        if engine != "none" && parts.len() == pending.len() {
             for (job, text) in pending.iter().zip(parts) {
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
@@ -422,7 +455,9 @@ async fn translate_jobs(
             }
         } else {
             for job in pending {
-                let value = translate_one(client, &job.text, language).await;
+                // 批量请求失败说明 Google 也不可用（刚才那次调用已触发熔断），
+                // 逐句重试直接走 MyMemory，避免每句再白等一个 Google 超时。
+                let value = translate_one(client, &job.text, language, false).await;
                 if value.1 != "none" {
                     if let Ok(mut map) = cache().lock() {
                         map.insert((job.text.clone(), language.into()), value.clone());
@@ -479,6 +514,21 @@ mod tests {
         // 假名优先于汉字：日语文本里的汉字不应误判成中文
         assert_eq!(guess_source_lang("_zombie_は死んだ"), "ja");
         assert_eq!(guess_source_lang(""), "en");
+    }
+
+    /// Google 失败后进入熔断：期间不再探测，到期后恢复；测试之间要清掉全局状态。
+    #[test]
+    fn google_backoff_skips_google_until_deadline() {
+        GOOGLE_DISABLED_UNTIL.lock().unwrap().take();
+        assert!(google_enabled_now());
+
+        disable_google_for_a_while();
+        assert!(!google_enabled_now());
+
+        *GOOGLE_DISABLED_UNTIL.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
+        assert!(google_enabled_now());
+
+        GOOGLE_DISABLED_UNTIL.lock().unwrap().take();
     }
     #[test]
     fn parses_mymemory_response_and_rejects_quota_warning() {
