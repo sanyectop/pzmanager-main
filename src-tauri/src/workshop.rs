@@ -18,6 +18,7 @@ const STEAM_REFERER: &str = "https://steamcommunity.com/";
 const STEAM_FILE_DETAILS_API: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 const STEAM_DETAIL_TIMEOUT: Duration = Duration::from_secs(25);
+const STEAM_HTML_TIMEOUT: Duration = Duration::from_secs(25);
 
 static HTML_CACHE: OnceLock<Mutex<HashMap<String, CachedHtml>>> = OnceLock::new();
 
@@ -406,17 +407,15 @@ async fn fetch_steam_html(url: &str) -> Result<String, String> {
         return Ok(html);
     }
 
-    let response = reqwest::Client::new()
-        .get(url)
-        .header("User-Agent", STEAM_USER_AGENT)
-        .header("Accept-Language", STEAM_ACCEPT_LANGUAGE)
-        .header("Referer", STEAM_REFERER)
-        .timeout(Duration::from_secs(25))
-        .send()
-        .await
-        .map_err(|error| format!("请求 Steam 失败: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("请求 Steam 失败: {error}"))?;
+    // 直连被墙时自动切中转（设置「Steam 网络加速」），见 steam_relay 模块。
+    let response = crate::steam_relay::send_with_relay(url, STEAM_HTML_TIMEOUT, |client, url| {
+        client
+            .get(url)
+            .header("User-Agent", STEAM_USER_AGENT)
+            .header("Accept-Language", STEAM_ACCEPT_LANGUAGE)
+            .header("Referer", STEAM_REFERER)
+    })
+    .await?;
     let html = response
         .text()
         .await
@@ -545,23 +544,24 @@ pub(crate) async fn fetch_workshop_item_detail(
     if id.is_empty() || !id.chars().all(|character| character.is_ascii_digit()) {
         return Err("创意工坊项目 ID 无效。".to_string());
     }
-    let payload: Value = reqwest::Client::new()
-        .post(STEAM_FILE_DETAILS_API)
-        .header("User-Agent", STEAM_USER_AGENT)
-        .header("Accept-Language", STEAM_ACCEPT_LANGUAGE)
-        .form(&[
-            ("itemcount", "1".to_string()),
-            ("publishedfileids[0]", id.clone()),
-        ])
-        .timeout(STEAM_DETAIL_TIMEOUT)
-        .send()
-        .await
-        .map_err(|error| format!("请求 Steam 失败: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("请求 Steam 失败: {error}"))?
-        .json()
-        .await
-        .map_err(|error| format!("解析 Steam 响应失败: {error}"))?;
+    let payload: Value = crate::steam_relay::send_with_relay(
+        STEAM_FILE_DETAILS_API,
+        STEAM_DETAIL_TIMEOUT,
+        |client, url| {
+            client
+                .post(url)
+                .header("User-Agent", STEAM_USER_AGENT)
+                .header("Accept-Language", STEAM_ACCEPT_LANGUAGE)
+                .form(&[
+                    ("itemcount", "1".to_string()),
+                    ("publishedfileids[0]", id.clone()),
+                ])
+        },
+    )
+    .await?
+    .json()
+    .await
+    .map_err(|error| format!("解析 Steam 响应失败: {error}"))?;
 
     let raw = payload
         .get("response")

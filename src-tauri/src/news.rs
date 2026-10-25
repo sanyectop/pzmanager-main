@@ -1,5 +1,4 @@
 use regex::Regex;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 const APP_ID: u64 = 108600;
@@ -338,27 +337,22 @@ pub(crate) async fn fetch_developer_news(
     language: String,
     only_gid: Option<String>,
 ) -> Result<DeveloperNewsResponse, String> {
-    let client = Client::builder()
-        .user_agent("ProjectZomboidManager/0.1")
-        .timeout(NEWS_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| e.to_string())?;
-    let payload = client
-        .get(STEAM_NEWS_API)
-        .query(&[
-            ("appid", APP_ID.to_string()),
-            ("count", count.clamp(1, 50).to_string()),
-            ("maxlength", "0".to_string()),
-            ("format", "json".to_string()),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("Steam 新闻获取失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Steam 新闻请求失败: {e}"))?
-        .json::<SteamNewsResponse>()
-        .await
-        .map_err(|e| format!("Steam 新闻解析失败: {e}"))?;
+    // 直连被墙时自动切中转（设置「Steam 网络加速」），见 steam_relay 模块。
+    let payload = crate::steam_relay::send_with_relay(STEAM_NEWS_API, NEWS_REQUEST_TIMEOUT, |client, url| {
+        client
+            .get(url)
+            .header("User-Agent", "ProjectZomboidManager/0.1")
+            .query(&[
+                ("appid", APP_ID.to_string()),
+                ("count", count.clamp(1, 50).to_string()),
+                ("maxlength", "0".to_string()),
+                ("format", "json".to_string()),
+            ])
+    })
+    .await?
+    .json::<SteamNewsResponse>()
+    .await
+    .map_err(|e| format!("Steam 新闻解析失败: {e}"))?;
     let mut items = Vec::new();
     let mut translation_jobs = Vec::new();
     for (index, item) in payload.appnews.newsitems.into_iter().enumerate() {
