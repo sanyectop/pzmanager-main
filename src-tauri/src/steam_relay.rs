@@ -13,18 +13,26 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// 默认中转地址。自建服务器上线后按实际域名修改（`src/steamRelay.ts` 的
-/// DEFAULT_STEAM_RELAY_BASE 必须同步），用户也能在设置页覆盖。
-pub(crate) const DEFAULT_RELAY_BASE: &str = "https://pzmapi.sanyec.top/steam";
+/// 默认中转地址：自建中转服务器（steam-relay/ 项目，部署在 pzmlan.sanyec.top）。
+/// 换服务器 = 改这里 + 同步 `src/steamRelay.ts` 的 DEFAULT_STEAM_RELAY_BASE；
+/// 用户也能在设置页覆盖。
+pub(crate) const DEFAULT_RELAY_BASE: &str = "https://pzmlan.sanyec.top";
 /// 设置页「Steam 网络加速」的三种模式。
 pub(crate) const RELAY_MODES: [&str; 3] = ["auto", "relay", "direct"];
 pub(crate) const DEFAULT_RELAY_MODE: &str = "auto";
 /// 直连熔断时长：自动模式下直连失败后，这段时间内中转优先。
 const LINK_BACKOFF: Duration = Duration::from_secs(600);
 
-/// Steam 图片 CDN 主机白名单。与 `steam-relay/server.js` 的 `IMAGE_HOSTS`、
-/// `src/steamRelay.ts` 的 `STEAM_IMAGE_HOSTS` 保持一致；改这里必须同步另外两处。
-pub(crate) const STEAM_IMAGE_HOSTS: [&str; 6] = [
+/// Steam 图片 CDN 主机白名单。Steam 会按出口地区返回不同 CDN 域名
+/// （2026-10 实测工坊预览图走 images.steamusercontent.com / fastly 系，
+/// cloudflare / akamai 系是其它地区的变体），所以全都放行。
+/// 与 `steam-relay/server.js` 的 `IMAGE_HOSTS`、`src/steamRelay.ts` 的
+/// `STEAM_IMAGE_HOSTS` 保持一致；改这里必须同步另外两处。
+pub(crate) const STEAM_IMAGE_HOSTS: [&str; 10] = [
+    "images.steamusercontent.com",
+    "cdn.fastly.steamstatic.com",
+    "shared.fastly.steamstatic.com",
+    "store.steamstatic.com",
     "shared.cloudflare.steamstatic.com",
     "clan.cloudflare.steamstatic.com",
     "steamuserimages-a.akamaihd.net",
@@ -296,6 +304,15 @@ mod tests {
             )
             .as_deref(),
             Some("https://mirror.example/steam/images/shared.cloudflare.steamstatic.com/ugc/123/preview.jpg")
+        );
+        // 工坊预览图实际返回的主机（2026-10 实测），必须放行。
+        assert_eq!(
+            relay_url_for(
+                "https://pzmlan.sanyec.top",
+                "https://images.steamusercontent.com/ugc/123/ABC/?imw=320"
+            )
+            .as_deref(),
+            Some("https://pzmlan.sanyec.top/images/images.steamusercontent.com/ugc/123/ABC/?imw=320")
         );
     }
 
