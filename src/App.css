@@ -3597,6 +3597,15 @@ body {
   min-width: 13rem;
 }
 
+/* 页头的「刷新 / 刷新 JAR 列表」按钮与旁边搜索框同高：
+   Chakra size="sm" 的按钮不在全站 26px 控件高度规则的覆盖范围里（那条只管输入框 /
+   原生下拉 / 菜单触发器），这里照资源中心筛选行的写法单独补齐。 */
+.pz-mod-header-tools button {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-block: 0 !important;
+}
+
 .pz-jar-mods-page {
   display: flex;
   min-height: 0;
