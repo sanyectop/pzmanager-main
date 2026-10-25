@@ -18,7 +18,9 @@ const STEAM_REFERER: &str = "https://steamcommunity.com/";
 const STEAM_FILE_DETAILS_API: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 const STEAM_DETAIL_TIMEOUT: Duration = Duration::from_secs(25);
-const STEAM_HTML_TIMEOUT: Duration = Duration::from_secs(25);
+/// 列表 HTML 超时给得比详情短:直连被墙的网络会在 OS 连接超时(~21s)上白等,
+/// 12s 足够正常网络拿完页面(实测 ~530KB 约 2s),超了就快点切中转。
+const STEAM_HTML_TIMEOUT: Duration = Duration::from_secs(12);
 
 static HTML_CACHE: OnceLock<Mutex<HashMap<String, CachedHtml>>> = OnceLock::new();
 
@@ -402,39 +404,68 @@ fn cache_html(url: &str, html: String) {
     }
 }
 
-async fn fetch_steam_html(url: &str) -> Result<String, String> {
-    if let Some(html) = cached_html(url) {
-        return Ok(html);
-    }
-
-    // 直连被墙时自动切中转（设置「Steam 网络加速」），见 steam_relay 模块。
-    let response = crate::steam_relay::send_with_relay(url, STEAM_HTML_TIMEOUT, |client, url| {
-        client
-            .get(url)
-            .header("User-Agent", STEAM_USER_AGENT)
-            .header("Accept-Language", STEAM_ACCEPT_LANGUAGE)
-            .header("Referer", STEAM_REFERER)
-    })
-    .await?;
-    let html = response
+async fn fetch_html_from(url: &str) -> Result<String, String> {
+    let response = reqwest::Client::new()
+        .get(url)
+        .header("User-Agent", STEAM_USER_AGENT)
+        .header("Accept-Language", STEAM_ACCEPT_LANGUAGE)
+        .header("Referer", STEAM_REFERER)
+        .timeout(STEAM_HTML_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| format!("请求 Steam 失败: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("请求 Steam 失败: {error}"))?;
+    response
         .text()
         .await
-        .map_err(|error| format!("读取 Steam 响应失败: {error}"))?;
-    cache_html(url, html.clone());
-    Ok(html)
+        .map_err(|error| format!("读取 Steam 响应失败: {error}"))
+}
+
+/// HTML → 响应结构;解析不出 SSR 数据(Steam 的风控页 / 插页也是 200)返回 None。
+fn workshop_response_from(html: &str, steam_url: &str) -> Option<WorkshopResponse> {
+    let context = extract_render_context(html)?;
+    let (items, meta) = parse_workshop_items(&context).ok()?;
+    Some(WorkshopResponse {
+        items,
+        meta,
+        steam_url: steam_url.to_string(),
+    })
 }
 
 pub(crate) async fn fetch_workshop(filters: WorkshopFilters) -> Result<WorkshopResponse, String> {
     let steam_url = build_workshop_url(&filters);
-    let html = fetch_steam_html(&steam_url).await?;
-    let Some(context) = extract_render_context(&html) else {
-        return Err("无法解析 Steam 页面".to_string());
-    };
-    let (items, meta) = parse_workshop_items(&context)?;
-    Ok(WorkshopResponse {
-        items,
-        meta,
-        steam_url,
+    // 缓存里只存解析成功的页面,命中即直接返回。
+    if let Some(html) = cached_html(&steam_url) {
+        if let Some(response) = workshop_response_from(&html, &steam_url) {
+            return Ok(response);
+        }
+    }
+
+    // 逐源尝试(直连 / 中转,见 steam_relay 模块):除网络失败外,200 但解析
+    // 不出 SSR 数据的页面同样按该源失败处理、继续换源——Steam 偶尔回 200
+    // 的风控 / 插页,不换源就会直接对用户报「无法解析 Steam 页面」。
+    let mut errors = Vec::new();
+    for source in crate::steam_relay::sources_for(&steam_url) {
+        let label = if source.relay { "中转" } else { "直连" };
+        let failure = match fetch_html_from(&source.url).await {
+            Ok(html) => match workshop_response_from(&html, &steam_url) {
+                Some(response) => {
+                    crate::steam_relay::note_source_result(&source, true);
+                    cache_html(&steam_url, html);
+                    return Ok(response);
+                }
+                None => format!("Steam 返回了无法解析的页面({label})"),
+            },
+            Err(error) => error,
+        };
+        crate::steam_relay::note_source_result(&source, false);
+        errors.push(failure);
+    }
+    Err(if errors.is_empty() {
+        "无法解析 Steam 页面".to_string()
+    } else {
+        errors.join("; ")
     })
 }
 
@@ -628,6 +659,17 @@ window.SSR.renderContext = JSON.parse("{\"queryData\":\"x(y)\"}");
     #[test]
     fn returns_none_when_render_context_is_missing() {
         assert!(extract_render_context("<html>no context</html>").is_none());
+    }
+
+    #[test]
+    fn workshop_response_from_rejects_interstitial_html() {
+        // Steam 偶尔回 200 的风控 / 插页:必须判为 None,fetch_workshop 才会换源重试。
+        for junk in [
+            "<html><body>Rate limit exceeded</body></html>",
+            "<html><script id=\"valve-ssr-data\">{\"noContext\":1}</script></html>",
+        ] {
+            assert!(super::workshop_response_from(junk, "https://x").is_none());
+        }
     }
 
     #[test]

@@ -195,7 +195,14 @@ async function handle(req, res) {
     headersOut["cache-control"] = `public, max-age=${Math.round(cacheTtlMs / 1000)}`;
   }
 
-  if (cacheTtlMs > 0 && upstreamResponse.status === 200 && req.method === "GET") {
+  // 工坊 HTML 只有真带 SSR 数据的才缓存:Steam 偶尔回 200 的风控 / 插页,
+  // 缓存它们会把坏页面钉住整个 TTL,客户端集体「无法解析」。
+  if (
+    cacheTtlMs > 0 &&
+    upstreamResponse.status === 200 &&
+    req.method === "GET" &&
+    (path.startsWith("api/") || body.includes("renderContext"))
+  ) {
     cacheSet(`GET ${url.pathname}${url.search}`, {
       status: upstreamResponse.status,
       contentType,
