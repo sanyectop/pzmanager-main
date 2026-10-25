@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
@@ -40,6 +40,9 @@ const MAX_LINES: usize = 6;
 const REFRESH_INTERVAL: Duration = Duration::from_millis(40);
 /// 无边框且未前台时，最多用这个间隔主动触发一次窗口重绘。
 const BACKGROUND_REDRAW_INTERVAL: Duration = Duration::from_millis(200);
+/// DLL 可能随 JVM 极速启动提前加载，游戏窗口晚几秒出现是正常的；
+/// 超过这个时长仍找不到窗口才记日志，避免把正常等待当成故障。
+const WINDOW_FIND_WARN_DELAY: Duration = Duration::from_secs(15);
 
 /// GL 纹理版本号（内容变化时自增），供 hook 判断是否需要重新上传。
 pub static IMAGE_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -47,6 +50,14 @@ pub static IMAGE_VERSION: AtomicU64 = AtomicU64::new(0);
 static WINDOW_ACTIVATION_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 /// 上一次后台重绘触发时间（毫秒，基于 UNIX_EPOCH）。
 static LAST_BACKGROUND_REDRAW_MS: AtomicU64 = AtomicU64::new(0);
+/// 是否已成功找到过游戏窗口。
+static WINDOW_FOUND: AtomicBool = AtomicBool::new(false);
+/// 「迟迟找不到游戏窗口」只记一次日志的打点。
+static WINDOW_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 「DIB 创建失败」只记一次日志的打点。
+static DIB_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 「界面状态互斥锁中毒」只记一次日志的打点。
+static MUTEX_POISON_LOGGED: AtomicBool = AtomicBool::new(false);
 
 struct UiState {
     phase: String,
@@ -72,10 +83,6 @@ struct UiState {
     body_font: isize,
     logo_big: isize,
     logo_small: isize,
-    /// 动画正方形的中心与边长（像素，y 向下）。
-    shape_x: f32,
-    shape_y: f32,
-    shape_size: f32,
 }
 
 // SAFETY: 上面保存的都是 GDI 句柄/内存地址，只在 UI 线程与渲染线程里受锁保护地使用。
@@ -107,9 +114,6 @@ fn state() -> &'static Mutex<UiState> {
             body_font: 0,
             logo_big: 0,
             logo_small: 0,
-            shape_x: 0.0,
-            shape_y: 0.0,
-            shape_size: 0.0,
         })
     })
 }
@@ -121,9 +125,28 @@ pub fn start(game_pid: u32) {
     }
     let spawned = std::thread::Builder::new()
         .name("pz-overlay-ui".to_string())
-        .spawn(move || run(game_pid));
+        .spawn(move || {
+            // 界面线程一旦死亡，GL 阶段就只剩红底、没有任何界面内容，
+            // 因此 panic 必须落日志，否则"红屏无字"无从排查。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(game_pid)));
+            if let Err(panic) = result {
+                crate::log_ui(&format!("界面线程 panic 退出: {}", panic_message(&panic)));
+            }
+        });
     if spawned.is_err() {
         STARTED.store(false, Ordering::SeqCst);
+        crate::log_ui("创建界面线程失败，覆盖层将只有红底、没有任何界面内容。");
+    }
+}
+
+/// 从 `catch_unwind` 的载荷里取出可读的 panic 信息。
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = panic.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = panic.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "未知 panic".to_string()
     }
 }
 
@@ -191,8 +214,19 @@ fn run(game_pid: u32) {
         )
     };
 
+    let run_start = Instant::now();
     loop {
-        let running = state().lock().map(|ui| ui.running).unwrap_or(false);
+        // 锁中毒意味着有线程在持锁时 panic 了：原实现静默退出循环，
+        // 界面从此消失且无任何线索 —— 这里至少要把原因落进日志。
+        let running = match state().lock() {
+            Ok(ui) => ui.running,
+            Err(_) => {
+                if !MUTEX_POISON_LOGGED.swap(true, Ordering::Relaxed) {
+                    crate::log_ui("界面状态互斥锁已中毒，界面线程退出（GL 侧此后只剩红底）。");
+                }
+                break;
+            }
+        };
         if !running {
             break;
         }
@@ -202,11 +236,23 @@ fn run(game_pid: u32) {
         // DIB 必须无条件渲染（GL 纹理依赖它）。BitBlt 也只写目标游戏窗口自己的 DC，
         // 不需要等待窗口进入前台；无窗口模式启动时否则会一直到切回焦点后才显示。
         if let Some(window) = find_game_window(game_pid) {
+            if !WINDOW_FOUND.swap(true, Ordering::Relaxed) {
+                crate::log_ui("已找到游戏窗口，开始绘制加载界面。");
+            }
             if let Ok(mut ui) = state().lock() {
                 paint_to_window(&mut ui, window, font, logo_big, logo_small);
                 blit_to_window(&ui, window);
             }
             ensure_window_active_or_redraw(window);
+        } else if !WINDOW_FOUND.load(Ordering::Acquire) {
+            let elapsed = run_start.elapsed().as_secs_f64();
+            if elapsed >= WINDOW_FIND_WARN_DELAY.as_secs_f64()
+                && !WINDOW_MISSING_LOGGED.swap(true, Ordering::Relaxed)
+            {
+                crate::log_ui(&format!(
+                    "启动 {elapsed:.0}s 后仍未找到游戏进程的可见窗口，GL 覆盖层将没有界面内容（只有红底）。"
+                ));
+            }
         }
 
         std::thread::sleep(REFRESH_INTERVAL);
@@ -292,6 +338,11 @@ fn paint_to_window(
         return;
     }
     if !ensure_dib(ui, width, height) {
+        if !DIB_FAILURE_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::log_ui(&format!(
+                "创建界面 DIB 失败（{width}x{height}），GL 覆盖层将没有界面内容（只有红底）。"
+            ));
+        }
         return;
     }
     // 字体与布局按 DIP 定义，乘上窗口 DPI 缩放（例如 150% → 1.5）。
@@ -792,16 +843,6 @@ fn progress_percent(progress: f32) -> i32 {
     (progress.clamp(0.0, 1.0) * 100.0).floor() as i32
 }
 
-/// 三次缓动（ease-in-out cubic）：t 在 0..1，返回加速后减速的进度。
-fn cubic_ease_in_out(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::progress_percent;
@@ -812,25 +853,6 @@ mod tests {
         assert_eq!(progress_percent(0.999), 99);
         assert_eq!(progress_percent(1.0), 100);
     }
-}
-
-/// 动画正方形的四个角点（GDI `Polygon` 用，像素坐标）。
-///
-/// 节奏：每 1 秒一个周期，前 0.3 秒用三次缓动旋转 90°，其余时间静止。
-fn animation_corners(ui: &UiState) -> [windows::Win32::Foundation::POINT; 4] {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|value| value.as_millis() as u64)
-        .unwrap_or(0);
-    let cycle_index = (now_ms / 1000) as f32;
-    let in_cycle = (now_ms % 1000) as f32 / 1000.0;
-    let progress_in_turn = (in_cycle / 0.3).min(1.0);
-    let angle_degrees = (cycle_index - 1.0 + cubic_ease_in_out(progress_in_turn)) * 90.0;
-    let points = rotated_square(ui.shape_x, ui.shape_y, ui.shape_size, angle_degrees);
-    points.map(|(x, y)| windows::Win32::Foundation::POINT {
-        x: x.round() as i32,
-        y: y.round() as i32,
-    })
 }
 
 /// 给定中心/边长/角度（度），返回正方形四个角点（y 向下坐标系）。
@@ -857,35 +879,6 @@ pub fn rotated_square(
         (-half, half),
     ];
     local.map(|(x, y)| (center_x + x * cos - y * sin, center_y + x * sin + y * cos))
-}
-
-/// 动画方框的 DPI 缩放（由界面线程写入，GL 阶段读取；0 表示还没写入）。
-pub static ANIMATION_SCALE: AtomicU32 = AtomicU32::new(0);
-/// 动画帧计数：每次 GL 绘制自增，用来生成"每帧轨迹"（不依赖时间函数，便于排查）。
-pub static ANIMATION_FRAMES: AtomicU64 = AtomicU64::new(0);
-
-/// GL 阶段每帧调用：**直接按视口尺寸**算出 (中心 X, 中心 Y, 边长, 角度°)。
-///
-/// 不再依赖界面线程是否已经把 DIB 渲染出来——否则"游戏窗口不是前台"时
-/// `shape_size` 一直是 0，GL 侧就永远不画（表现为完全不动）。
-pub fn animation_quad_for(viewport_width: f32, viewport_height: f32) -> (f32, f32, f32, f32) {
-    let stored = ANIMATION_SCALE.load(Ordering::Acquire);
-    let scale = if stored == 0 {
-        1.0
-    } else {
-        f32::from_bits(stored)
-    };
-    let size = (22.0 * scale).max(8.0);
-    let center_x = viewport_width / 2.0;
-    // 与 DIB 里的布局一致：LOGO 下方约 72 DIP 处。
-    let center_y = viewport_height / 2.0 + 72.0 * scale;
-    // 硬编码每帧轨迹：每 60 帧（≈1 秒）前进 90°，其中前 18 帧（≈0.3 秒）完成缓动旋转。
-    let frame = ANIMATION_FRAMES.fetch_add(1, Ordering::AcqRel);
-    let cycle = (frame / 60) as f32;
-    let in_cycle = (frame % 60) as f32 / 18.0;
-    let progress_in_turn = in_cycle.min(1.0);
-    let angle_degrees = (cycle + cubic_ease_in_out(progress_in_turn)) * 90.0;
-    (center_x, center_y, size, angle_degrees)
 }
 
 /// 按 DPI 缩放重建字体（字体大小以 DIP 定义）。

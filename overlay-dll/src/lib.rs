@@ -1,16 +1,16 @@
-//! Project Zomboid 覆盖层验证 DLL（第一阶段）
+//! Project Zomboid 覆盖层 DLL。
 //!
-//! 验证链路：注入 → Hook OpenGL（`wglSwapBuffers`）→ 在游戏窗口内绘制纯红 → 5 秒后自动恢复。
+//! 链路：注入 → Hook OpenGL（`wglSwapBuffers` / `wglMakeCurrent`）→ 在游戏窗口内部绘制加载界面。
 //!
-//! 本阶段刻意保持最小实现：
-//! * 不读取游戏进度，不绘制任何 UI，不依赖 ZombieBuddy 或任何模组；
-//! * 只用 OpenGL 1.1 固定管线调用（`opengl32.dll` 直接导出），不引入任何 GL 绑定 crate；
+//! 行为要点：
+//! * 界面（红底 + LOGO + JVM 内存条 + 控制台行 + 进度条）由 `ui` 模块用 GDI 画进 DIB；
+//!   游戏开始换帧前直接 `BitBlt` 到窗口 DC，换帧后由 GL 上传成纹理画满屏四边形；
+//!   只用 OpenGL 1.1 固定管线调用（`opengl32.dll` 直接导出），不引入任何 GL 绑定 crate；
 //! * Hook 由 `minhook` 完成，原始函数指针保存在 `AtomicU64`；
-//! * 覆盖不再按固定 5 秒关闭：由启动器通过命名事件（`Local\PZManagerOverlayStop_<pid>`）控制，
-//!   只有安全上限（默认 10 分钟）兜底，避免启动器异常时一直保持红色；
-//! * 游戏窗口出现但还没开始换帧时，用 GDI 直接把窗口刷成红色（GL 的 glClear 此时无从下手），
-//!   首次换帧后自动切换回 OpenGL 覆盖；
-//! * 首次真正换帧时会触发 `Local\PZManagerOverlayStarted_<pid>`，让启动器知道红色已经出现，
+//! * 阶段 / 进度 / 控制台行由启动器写入 `%TEMP%\pz_overlay_status.txt`；
+//! * 覆盖由启动器通过命名事件（`Local\PZManagerOverlayStop_<pid>`）控制停止，
+//!   另有安全上限（默认 10 分钟）兜底，避免启动器异常时覆盖层一直不消失；
+//! * 首次真正换帧时会触发 `Local\PZManagerOverlayStarted_<pid>`，让启动器知道第一帧已经画出，
 //!   避免在"游戏窗口已出现但还没开始渲染"的阶段就误判为加载完成；
 //! * 任何失败只写 `%TEMP%\overlay.log` 后静默退出，绝不影响游戏本体。
 
@@ -24,7 +24,7 @@ mod ui;
 #[cfg(windows)]
 mod overlay {
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
@@ -67,12 +67,17 @@ mod overlay {
     const GL_RGBA: u32 = 0x0000_1908;
     const GL_UNSIGNED_BYTE: u32 = 0x0000_1401;
     const GL_QUADS: u32 = 0x0000_0007;
-    const GL_LINE_LOOP: u32 = 0x0000_0002;
-    const GL_LINES: u32 = 0x0000_0001;
     const GL_PROJECTION: u32 = 0x0000_1701;
     const GL_MODELVIEW: u32 = 0x0000_1700;
     const GL_VIEWPORT: u32 = 0x0000_0BA2;
     const GL_UNPACK_ALIGNMENT: u32 = 0x0000_0CF5;
+    /// 画界面四边形前需要逐项关闭的游戏残留状态（任一开启都可能让四边形被整体丢弃）。
+    const GL_DEPTH_TEST: u32 = 0x0000_0B71;
+    const GL_CULL_FACE: u32 = 0x0000_0B44;
+    const GL_STENCIL_TEST: u32 = 0x0000_0B90;
+    const GL_BLEND: u32 = 0x0000_0BE2;
+    /// 默认纹理单元（GL 1.3 的 `glActiveTexture` 参数）。
+    const GL_TEXTURE0: u32 = 0x0000_84C0;
     /// 强制换帧的最小间隔。
     const FORCED_FRAME_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -96,8 +101,8 @@ mod overlay {
     static STARTED_EVENT: AtomicU64 = AtomicU64::new(0);
     /// 第一次进入 Hook 回调时打点，避免刷日志。
     static FIRST_CALL_LOGGED: AtomicBool = AtomicBool::new(false);
-    /// 动画首次绘制时打点（用于确认动画确实被执行）。
-    static ANIMATION_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// 「界面数据尚未就绪」只记一次日志的打点。
+    static UI_IMAGE_NONE_LOGGED: AtomicBool = AtomicBool::new(false);
     /// `wglSwapBuffers` 的原始函数指针（trampoline），由 MinHook 创建时返回。
     static ORIGINAL_SWAP_BUFFERS: AtomicU64 = AtomicU64::new(0);
     /// `glBindFramebuffer` 地址缓存（GL 3.0 函数，opengl32.dll 不导出，只能运行时解析）。
@@ -105,6 +110,14 @@ mod overlay {
     /// 界面纹理与版本（内容变化才重新上传）。
     static UI_TEXTURE: AtomicU64 = AtomicU64::new(0);
     static UI_TEXTURE_VERSION: AtomicU64 = AtomicU64::new(u64::MAX);
+    /// 界面纹理所在 GL 上下文（`wglGetCurrentContext`）。游戏重建上下文后旧纹理名失效，需重建。
+    static UI_CONTEXT: AtomicU64 = AtomicU64::new(0);
+    /// 检测到上下文变化的次数（用于给日志限流）。
+    static UI_CONTEXT_CHANGES: AtomicU32 = AtomicU32::new(0);
+    /// 「界面纹理首次上传成功」只记一次日志的打点。
+    static UI_UPLOAD_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// `glActiveTexture`（GL 1.3）地址缓存，opengl32.dll 不导出，只能运行时解析。
+    static ACTIVE_TEXTURE: AtomicU64 = AtomicU64::new(PTR_UNRESOLVED);
     /// 上一次强制换帧的时间戳（毫秒，来自 Instant 的单调时钟）。
     static LAST_FORCED_FRAME: AtomicU64 = AtomicU64::new(0);
     /// `wglMakeCurrent` 原始函数指针。
@@ -120,6 +133,8 @@ mod overlay {
     type WglSwapBuffersFn = unsafe extern "system" fn(hdc: *mut c_void) -> i32;
     /// `void glBindFramebuffer(GLenum target, GLuint framebuffer)`（GL 3.0）。
     type GlBindFramebufferFn = unsafe extern "system" fn(target: u32, framebuffer: u32);
+    /// `void glActiveTexture(GLenum texture)`（GL 1.3，opengl32.dll 不导出）。
+    type GlActiveTextureFn = unsafe extern "system" fn(texture: u32);
     /// `BOOL wglMakeCurrent(HDC, HGLRC)`。
     type WglMakeCurrentFn =
         unsafe extern "system" fn(hdc: *mut c_void, hglrc: *mut c_void) -> i32;
@@ -162,6 +177,7 @@ mod overlay {
         fn glPixelStorei(pname: u32, param: i32);
         fn wglGetProcAddress(lpszproc: PCSTR) -> *const c_void;
         fn wglGetCurrentDC() -> *mut c_void;
+        fn wglGetCurrentContext() -> *mut c_void;
     }
 
     /// DllMain 在 `DLL_PROCESS_ATTACH` 时调用：只做记录和起后台线程，绝不阻塞加载器。
@@ -199,6 +215,12 @@ mod overlay {
 
     /// 初始化线程主体：等模块 → 等导出 → 装 Hook。任何一步失败都静默退出。
     fn initialize_overlay() {
+        log(&format!(
+            "pz_overlay v{} 已加载（pid={}）。",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        ));
+
         // 同一个进程里如果已经有同名模块（例如从另一个路径再注入了一份副本），
         // 直接放弃，避免两个 MinHook 实例互相覆盖同一处补丁。
         let self_module = SELF_MODULE.load(Ordering::Acquire) as usize;
@@ -558,85 +580,14 @@ mod overlay {
         }
     }
 
-    /// 每帧绘制加载动画（空心方框，按帧计数旋转）。
-    ///
-    /// 独立成函数是因为：`draw_ui_texture()` 在"界面图还没准备好"时会提前返回，
-    /// 之前把动画写在那里面，导致某些阶段完全不画（表现为"永远不转"）。
-    fn draw_animation_overlay() {
-        // 写死的每帧角度表：60 帧一个周期（≈1s），前 18 帧用三次缓动走完 90°，其余 42 帧保持。
-        // 数值由 ease-in-out cubic 预先算好（0..90 度），不再做任何时间/公式推算。
-        const ANGLE_STEPS: [f32; 60] = [
-            0.00, 0.06, 0.49, 1.67, 3.95, 7.72, 13.33, 21.17, 31.61, 45.00, 58.39, 68.83,
-            76.67, 82.28, 86.05, 88.33, 89.51, 89.94, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00,
-            90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00,
-            90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00,
-            90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00, 90.00,
-        ];
-
-        let mut viewport = [0_i32; 4];
-        unsafe {
-            glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
-        }
-        let viewport_width = viewport[2] as f32;
-        let viewport_height = viewport[3] as f32;
-        if viewport_width <= 0.0 || viewport_height <= 0.0 {
-            return;
-        }
-        // 直接用视口算位置与大小（不依赖 DIB / DPI 记录，先保证一定画得出来）。
-        let size = (viewport_height * 0.045).clamp(16.0, 64.0);
-        let center_x = viewport_width / 2.0;
-        let center_y = viewport_height / 2.0 + size * 3.2;
-
-        let frame = crate::ui::ANIMATION_FRAMES.fetch_add(1, Ordering::AcqRel);
-        let angle_degrees = 90.0 * (frame / 60) as f32 + ANGLE_STEPS[(frame % 60) as usize];
-        let corners = crate::ui::rotated_square(center_x, center_y, size, angle_degrees);
-
-        if !ANIMATION_LOGGED.swap(true, Ordering::Relaxed) {
-            log(&format!(
-                "动画方框开始绘制: viewport={}x{} size={:.1} angle={:.1}°",
-                viewport_width, viewport_height, size, angle_degrees
-            ));
-        }
-
-        unsafe {
-            glDisable(GL_TEXTURE_2D);
-            glColor4f(1.0, 1.0, 1.0, 1.0);
-            glMatrixMode(GL_PROJECTION);
-            glPushMatrix();
-            glLoadIdentity();
-            glOrtho(0.0, viewport_width as f64, viewport_height as f64, 0.0, -1.0, 1.0);
-            glMatrixMode(GL_MODELVIEW);
-            glPushMatrix();
-            glLoadIdentity();
-            // 逐条边绘制（与参考实现一致）
-            glBegin(GL_LINES);
-            for index in 0..4 {
-                let (x1, y1) = corners[index];
-                let (x2, y2) = corners[(index + 1) % 4];
-                glVertex2f(x1, y1);
-                glVertex2f(x2, y2);
-            }
-            glEnd();
-            // 顶点小方块，强化"被画出来"的观感
-            let dot = (size * 0.12).max(1.5);
-            glBegin(GL_QUADS);
-            for (x, y) in corners {
-                glVertex2f(x - dot, y - dot);
-                glVertex2f(x + dot, y - dot);
-                glVertex2f(x + dot, y + dot);
-                glVertex2f(x - dot, y + dot);
-            }
-            glEnd();
-            glPopMatrix();
-            glMatrixMode(GL_PROJECTION);
-            glPopMatrix();
-            glMatrixMode(GL_MODELVIEW);
-        }
-    }
-
     /// 把 GDI 渲染好的界面（RGBA）上传成 GL 纹理并画满屏四边形。
     fn draw_ui_texture() {
         let Some((version, width, height, rgba)) = crate::ui::image() else {
+            // 界面数据没就绪时本帧只剩 glClear 的红底 —— 这正是"红屏无字"的形态之一，
+            // 必须留下日志线索（具体原因由 ui 模块负责记录）。
+            if !UI_IMAGE_NONE_LOGGED.swap(true, Ordering::Relaxed) {
+                log("界面数据尚未就绪（ui::image() 为空），本帧只画红底。");
+            }
             return;
         };
         if width <= 0 || height <= 0 || rgba.is_empty() {
@@ -649,6 +600,20 @@ mod overlay {
             let viewport_height = viewport[3] as f32;
             if viewport_width <= 0.0 || viewport_height <= 0.0 {
                 return;
+            }
+
+            // 游戏可能重建 WGL 上下文（LWJGL 常见）。纹理名属于创建它的上下文，
+            // 换了上下文后旧名字不再指向有效纹理对象，会永远画不出界面 ——
+            // 表现恰好是"只剩红底"。检测到变化就丢弃旧名字并强制重传。
+            let current_context = wglGetCurrentContext() as usize as u64;
+            let previous_context = UI_CONTEXT.swap(current_context, Ordering::AcqRel);
+            let context_changed = previous_context != 0 && previous_context != current_context;
+            if context_changed {
+                // 只记前几次，避免上下文异常抖动时在渲染线程里刷文件 I/O。
+                if UI_CONTEXT_CHANGES.fetch_add(1, Ordering::AcqRel) < 3 {
+                    log("检测到 GL 上下文变化，重建界面纹理。");
+                }
+                UI_TEXTURE.store(0, Ordering::Release);
             }
 
             let mut texture = UI_TEXTURE.load(Ordering::Acquire) as u32;
@@ -665,7 +630,7 @@ mod overlay {
                 glBindTexture(GL_TEXTURE_2D, texture);
             }
 
-            if UI_TEXTURE_VERSION.load(Ordering::Acquire) != version {
+            if context_changed || UI_TEXTURE_VERSION.load(Ordering::Acquire) != version {
                 glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                 glTexImage2D(
                     GL_TEXTURE_2D,
@@ -679,6 +644,20 @@ mod overlay {
                     rgba.as_ptr() as *const c_void,
                 );
                 UI_TEXTURE_VERSION.store(version, Ordering::Release);
+                if !UI_UPLOAD_LOGGED.swap(true, Ordering::Relaxed) {
+                    log(&format!("界面纹理已上传: {width}x{height}"));
+                }
+            }
+
+            // 游戏帧末可能残留深度测试 / 面剔除 / 模板 / 混合状态，且活动纹理单元未必是 0；
+            // 满屏四边形在 y 向下的正交投影下顶点序为背面，上述任何一项未中和都会让它被
+            // 整体丢弃（表现为只剩红底）。这些状态由外层 glPushAttrib/glPopAttrib 还原。
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_STENCIL_TEST);
+            glDisable(GL_BLEND);
+            if let Some(active_texture) = resolve_active_texture() {
+                active_texture(GL_TEXTURE0);
             }
 
             glEnable(GL_TEXTURE_2D);
@@ -709,13 +688,39 @@ mod overlay {
             glVertex2f(0.0, viewport_height);
             glEnd();
 
-            // 动画方块：每帧实时绘制（不能烘进纹理，否则纹理只上传一次就不动了）。
             glPopMatrix();
             glMatrixMode(GL_PROJECTION);
             glPopMatrix();
             glMatrixMode(GL_MODELVIEW);
             glDisable(GL_TEXTURE_2D);
         }
+    }
+
+    /// 解析 GL 1.3 的 `glActiveTexture`，只解析一次；解析不到就永久降级（不切换纹理单元）。
+    fn resolve_active_texture() -> Option<GlActiveTextureFn> {
+        let cached = ACTIVE_TEXTURE.load(Ordering::Acquire);
+        if cached == PTR_UNAVAILABLE {
+            return None;
+        }
+        if cached != PTR_UNRESOLVED {
+            // SAFETY: 缓存值只可能来自下方 wglGetProcAddress 返回的合法函数地址。
+            return Some(unsafe {
+                std::mem::transmute::<*const c_void, GlActiveTextureFn>(
+                    cached as usize as *const c_void,
+                )
+            });
+        }
+
+        // 这里只在当前 GL 上下文存在的回调线程里解析，避免 wglGetProcAddress 在无上下文时返回空。
+        let address = unsafe { wgl_get_proc_address(b"glActiveTexture\0") };
+        if address.is_null() {
+            ACTIVE_TEXTURE.store(PTR_UNAVAILABLE, Ordering::Release);
+            return None;
+        }
+
+        ACTIVE_TEXTURE.store(address as usize as u64, Ordering::Release);
+        // SAFETY: 地址来自 wglGetProcAddress，已按上面的规则过滤过非法小地址。
+        Some(unsafe { std::mem::transmute::<*const c_void, GlActiveTextureFn>(address) })
     }
 
     /// 解析 GL 3.0 的 `glBindFramebuffer`，只解析一次；解析不到就永久降级（不处理 FBO 绑定）。
@@ -841,7 +846,7 @@ mod overlay {
     }
 
     /// 追加一行日志到 `%TEMP%\overlay.log`。日志失败不影响任何逻辑。
-    fn log(message: &str) {
+    pub(super) fn log(message: &str) {
         use std::io::Write as _;
 
         let start = LOG_START.get_or_init(Instant::now);
@@ -864,6 +869,15 @@ mod overlay {
     const WGL_SWAP_BUFFERS: &[u8] = b"wglSwapBuffers\0";
     const WGL_MAKE_CURRENT: &[u8] = b"wglMakeCurrent\0";
 }
+
+/// 供 `ui` / `fastlaunch` 等模块写 `%TEMP%\overlay.log` 的统一入口。
+#[cfg(windows)]
+pub(crate) fn log_ui(message: &str) {
+    overlay::log(message);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn log_ui(_message: &str) {}
 
 /// DLL 入口。避免在加载器锁内做任何耗时操作：只记录模块句柄并起后台线程。
 ///

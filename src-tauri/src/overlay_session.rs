@@ -320,6 +320,7 @@ mod imp {
         started: Instant,
     ) -> Result<SessionOutcome, String> {
         let dll_path = overlay_imp::normalize_dll_path(dll_path)?;
+        overlay_imp::ensure_overlay_dll_is_current(&dll_path)?;
         let dll_name = dll_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -400,10 +401,28 @@ mod imp {
             started.elapsed(),
         );
 
-        let already_loaded = overlay_imp::is_module_loaded(pid, &dll_name).unwrap_or(false);
-        if !already_loaded {
-            crate::overlay::injector::inject_dll(pid, &dll_path)?;
+        // 目标进程已有同名模块时不再重复注入（极速启动经 -agentpath 预载是正常情况）；
+        // 但要区分预载的是不是我们这份：别的位置的副本往往是旧版（只刷红、没界面），
+        // 这是"红屏无字"的主要成因之一，必须把实际路径告诉用户。
+        let mut preloaded_from: Option<String> = None;
+        match overlay_imp::loaded_module_path(pid, &dll_name) {
+            Ok(Some(loaded_path)) => preloaded_from = Some(loaded_path),
+            // 枚举失败按未加载处理，交给注入阶段给出更准确的报错。
+            Ok(None) | Err(_) => {
+                crate::overlay::injector::inject_dll(pid, &dll_path)?;
+            }
         }
+        let already_loaded = preloaded_from.is_some();
+        let mismatch_warning = preloaded_from
+            .as_ref()
+            .filter(|loaded| !overlay_imp::module_path_matches(loaded, &dll_path))
+            .map(|loaded| {
+                format!(
+                    "警告：游戏进程里已加载另一份覆盖层 DLL（{loaded}），与本程序自带的 {} 不一致；\
+                     旧版只会显示红屏、没有文字，请检查极速启动残留的 -agentpath 或重装 PZManager。",
+                    dll_path.display()
+                )
+            });
         let injected_at = Instant::now();
 
         // 加载界面：只写状态文件，由 DLL 在游戏窗口**内部**绘制（红底 + 左下角控制台 + 底部进度条）。
@@ -411,9 +430,10 @@ mod imp {
         status.set_phase_only("等待 ZombieBuddy 输出");
 
         let console_path = crate::user_zomboid_directory()?.join("console.txt");
+        // 控制台记录里写"实际在进程里的那份 DLL"，预载旧副本时这条记录就是关键证据。
         let injection_record = format!(
             "[PZManager] 覆盖层 DLL {} 已{}（{}，PID {pid}）",
-            dll_path.display(),
+            preloaded_from.as_deref().unwrap_or(&dll_path.display().to_string()),
             if already_loaded {
                 "在游戏进程中加载"
             } else {
@@ -425,7 +445,12 @@ mod imp {
         emit_session(
             app,
             "loading",
-            "覆盖层已开启，正在读取 [ZB] 加载进度…",
+            &match &mismatch_warning {
+                Some(warning) => {
+                    format!("{warning} 覆盖层已开启，正在读取 [ZB] 加载进度…")
+                }
+                None => "覆盖层已开启，正在读取 [ZB] 加载进度…".to_string(),
+            },
             Some(pid),
             Some(process_name),
             0,

@@ -333,6 +333,7 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
 | 红色一直不消失 | 启动器没发出停止信号（会话线程异常/被杀） | 正常流程最多 9 分钟会由会话上限结束，DLL 自身还有 10 分钟安全上限；检查 `%TEMP%\overlay.log` 是否出现「收到启动器停止信号」 |
 | 红色消失得太早 | 命中了主菜单标记或 `[ZB]` 静默 10 秒 | 见 `docs` 中 4 节的停止条件，可调整 `overlay_session.rs` 里的 `ZB_IDLE_TIMEOUT` / `COMPLETION_MARKERS` |
 | 变红后花屏/渲染异常 | GL 状态或 FBO 绑定未还原 | 本实现用 `glPushAttrib/glPopAttrib` + 还原 FBO 绑定；若仍有问题，把 `%TEMP%\overlay.log` 与复现步骤一起记录，并临时把 `paint_red_frame` 里的 FBO 段落注释掉做对照实验 |
+| 红屏且完全没有文字/界面 | 红色本身就是覆盖层底色（每帧 `glClear` 刷红），"无字"说明界面这一环断了。按可能性：① 进程里跑的是旧版"纯红探针"DLL（游戏目录残留 `-agentpath` 指向旧路径，宿主发现同名模块已加载就跳过注入）；② GL 残留状态把界面四边形整体丢弃（旧版未关深度测试/面剔除，或活动纹理单元非 0）；③ 游戏重建 WGL 上下文后旧纹理名失效；④ 界面线程 panic/锁中毒死亡、或找不到游戏窗口 | ① 问用户：红屏出现前有没有几秒能看到文字界面（有 = GL 环节问题，没有 = DLL/线程问题）；红屏是否超过 3 分钟不消失（是 = DLL 不响应停止事件，旧 DLL 嫌疑大）。② 收集：`%TEMP%\overlay.log`（新版会先写「pz_overlay v1.0.261025 已加载」，旧 DLL 没有这行）、`%USERPROFILE%\Zomboid\console.txt` 里 `[PZManager]` 行记录的 DLL 完整路径、游戏目录 `ProjectZomboid64.json` 的 `vmArgs[0]` 与启动 `.bat` 的 `_JAVA_OPTIONS` 里 `-agentpath` 指向。③ 校验安装目录 `pz_overlay.dll` 是否新版：`findstr /m "pz_overlay_status.txt" pz_overlay.dll` 有输出 = 新版；新版宿主注入旧 DLL 会直接报「覆盖层 DLL 版本过旧」，进程内预载路径不一致时界面会显示警告 |
 | `error[E0554]: #![feature] ... stable release channel` | 启用了 `dll-syringe-inject` feature 但用的是 stable | 用 `cargo +nightly build --features dll-syringe-inject`，或去掉该 feature 使用默认后端 |
 | `cargo build` 报找不到 C 编译器 | 缺少 MSVC C++ 工具链 | 安装 Visual Studio Build Tools 的「使用 C++ 的桌面开发」组件（提供 `cl.exe`） |
 
