@@ -200,6 +200,27 @@ fn steam_sources(official_url: &str, mode: &str, relay_base: &str) -> Vec<SteamS
     )
 }
 
+/// 供需要「响应级校验」的调用方（工坊列表要确认 HTML 真能解析出 SSR 数据，
+/// 解析失败同样该换源）自己循环候选源用；每个源跑完调 `note_source_result`
+/// 上报成败，熔断语义与 [`send_with_relay`] 完全一致。
+pub(crate) fn sources_for(official_url: &str) -> Vec<SteamSource> {
+    let (mode, base) = relay_config();
+    steam_sources(official_url, &mode, &base)
+}
+
+pub(crate) fn note_source_result(source: &SteamSource, ok: bool) {
+    let breaker = if source.relay {
+        &RELAY_BREAKER
+    } else {
+        &DIRECT_BREAKER
+    };
+    if ok {
+        breaker.enable();
+    } else {
+        breaker.disable();
+    }
+}
+
 /// 依次尝试候选源。`build` 负责给每个地址补各自的请求头 / 方法 / 表单
 /// 参数（和中转无关的部分），这里统一处理超时、状态码检查、错误聚合和
 /// 熔断状态翻转。返回第一个成功（2xx）的响应。
@@ -223,19 +244,11 @@ pub(crate) async fn send_with_relay(
             });
         match response {
             Ok(response) => {
-                if source.relay {
-                    RELAY_BREAKER.enable();
-                } else {
-                    DIRECT_BREAKER.enable();
-                }
+                note_source_result(&source, true);
                 return Ok(response);
             }
             Err(error) => {
-                if source.relay {
-                    RELAY_BREAKER.disable();
-                } else {
-                    DIRECT_BREAKER.disable();
-                }
+                note_source_result(&source, false);
                 errors.push(error);
             }
         }
