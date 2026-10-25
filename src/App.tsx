@@ -508,13 +508,13 @@ type BackgroundEntry = {
     settings.json 的 backgroundPath 里存成 `builtin:<id>`（磁盘上没有对应文件）。 */
 type BuiltinBackground = { id: string; name: string; url: string };
 
-/** 内置「四季壁纸」：由 SeasonalWallpaper 每秒绘制，url 只用于菜单缩略图。 */
+/** 内置「四季轮转」：由 SeasonalWallpaper 每秒绘制，url 只用于菜单缩略图。 */
 const BUILTIN_SEASONAL_ID = "seasonal";
 const BUILTIN_BACKGROUNDS: BuiltinBackground[] = [
-  { id: BUILTIN_SEASONAL_ID, name: "四季壁纸", url: "/backgrounds/4.jpg" },
+  { id: BUILTIN_SEASONAL_ID, name: "四季轮转", url: "/backgrounds/4.jpg" },
 ];
 const BUILTIN_BACKGROUND_PREFIX = "builtin:";
-/** 旧版本的内置背景 id 是 default，读到它时当成四季壁纸。 */
+/** 旧版本的内置背景 id 是 default，读到它时当成四季轮转。 */
 const LEGACY_DEFAULT_BUILTIN_ID = "default";
 /** 手动时刻滑块的范围：一天的分钟数 0–1439。 */
 const MINUTES_PER_DAY = 1440;
@@ -2277,7 +2277,7 @@ function BackgroundMenu({
                 ))}
                 <Menu.Separator />
                 <Text color="gray.500" fontSize="xs" px="3" py="1">
-                  四季壁纸 · {wallpaperEffect.blendLabel} · {wallpaperEffect.clockLabel}
+                  四季轮转 · {wallpaperEffect.blendLabel} · {wallpaperEffect.clockLabel}
                   {wallpaperEffect.pinned ? " · 已固定" : wallpaperSettings.mode === "manual" ? " · 手动" : ""}
                 </Text>
                 <Menu.Item value="wallpaper-pin" onSelect={onToggleWallpaperPin}>
@@ -2756,7 +2756,7 @@ function App() {
   );
   const [wallpaperNow, setWallpaperNow] = useState(() => new Date());
   const [seasonFeatures, setSeasonFeatures] = useState<SeasonFeatures>(DEFAULT_SEASON_FEATURES);
-  /** 当前是否显示内置四季壁纸（没设置过背景时也是它）。 */
+  /** 当前是否显示内置四季轮转（没设置过背景时也是它）。 */
   const wallpaperSeasonal =
     !backgroundPath || builtinBackgroundFromPath(backgroundPath)?.id === BUILTIN_SEASONAL_ID;
   const wallpaperEffect = useMemo(
@@ -3802,7 +3802,7 @@ function App() {
     }
   }
 
-  /** 四季壁纸的手动 / 固定设置落盘；写失败时回退到改之前的状态。 */
+  /** 四季轮转的手动 / 固定设置落盘；写失败时回退到改之前的状态。 */
   async function updateWallpaperEffect(next: WallpaperEffectSettings) {
     const previous = wallpaperEffectSettings;
     setWallpaperEffectSettings(next);
@@ -4257,7 +4257,7 @@ function App() {
     if (!wallpaperSeasonal || wallpaperEffectSettings.pinned) {
       return;
     }
-    // 四季壁纸每秒重算一次，全年全天连续变化；固定时效果不再随时间变化，就不需要计时器。
+    // 四季轮转每秒重算一次，全年全天连续变化；固定时效果不再随时间变化，就不需要计时器。
     setWallpaperNow(new Date());
     const timer = window.setInterval(() => setWallpaperNow(new Date()), 1000);
     return () => window.clearInterval(timer);
@@ -4282,7 +4282,7 @@ function App() {
   useEffect(() => {
     const builtin = builtinBackgroundFromPath(backgroundPath);
     if (builtin?.id === BUILTIN_SEASONAL_ID || !backgroundPath) {
-      // 四季壁纸由 SeasonalWallpaper 逐层绘制，这里不设整张背景图。
+      // 四季轮转由 SeasonalWallpaper 逐层绘制，这里不设整张背景图。
       setBackgroundUrl(null);
       return;
     }
@@ -7165,8 +7165,32 @@ function App() {
         </HStack>
       </Box>
       <Box mt="4">
+        <Text color="gray.800" fontSize="sm" fontWeight="700">官方网站</Text>
+        <HStack gap="2" mt="1" align="center">
+          <Text color="gray.500" fontSize="sm" overflowWrap="anywhere">https://pzm.sanyec.top</Text>
+          <Button
+            onClick={() => void openUrl("https://pzm.sanyec.top")}
+            size="sm"
+            variant="ghost"
+          >
+            打开 ↗
+          </Button>
+        </HStack>
+      </Box>
+      <Box mt="4">
         <Text color="gray.800" fontSize="sm" fontWeight="700">项目仓库</Text>
-        <Text color="gray.400" fontSize="sm" mt="1">尚未上传，敬请期待。</Text>
+        <HStack gap="2" mt="1" align="center">
+          <Text color="gray.500" fontSize="sm" overflowWrap="anywhere">
+            https://github.com/sanyectop/pzmanager-main
+          </Text>
+          <Button
+            onClick={() => void openUrl("https://github.com/sanyectop/pzmanager-main")}
+            size="sm"
+            variant="ghost"
+          >
+            打开 ↗
+          </Button>
+        </HStack>
       </Box>
     </Box>
   );
