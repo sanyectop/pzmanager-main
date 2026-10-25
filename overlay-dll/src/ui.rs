@@ -58,6 +58,20 @@ static WINDOW_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 static DIB_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
 /// 「界面状态互斥锁中毒」只记一次日志的打点。
 static MUTEX_POISON_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 「客户区拿不到 / 为 0×0」只记一次日志的打点（两个失败点共用，都是画不出界面的同因）。
+static CLIENT_RECT_PROBLEM_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 游戏是否已经调用过一次 `wglSwapBuffers`：换帧开始后 GL 覆盖会随每一帧出现，
+/// GDI 直接贴窗口 DC 的路径就该退场——否则它只会在低帧率/呈现间隙里"闪"出界面。
+pub static SWAP_SEEN: AtomicBool = AtomicBool::new(false);
+
+/// 由 hook 线程在第一次换帧时置位。
+pub fn mark_swap_seen() {
+    SWAP_SEEN.store(true, Ordering::Release);
+}
+
+pub fn swap_seen() -> bool {
+    SWAP_SEEN.load(Ordering::Acquire)
+}
 
 struct UiState {
     phase: String,
@@ -237,11 +251,21 @@ fn run(game_pid: u32) {
         // 不需要等待窗口进入前台；无窗口模式启动时否则会一直到切回焦点后才显示。
         if let Some(window) = find_game_window(game_pid) {
             if !WINDOW_FOUND.swap(true, Ordering::Relaxed) {
-                crate::log_ui("已找到游戏窗口，开始绘制加载界面。");
+                let mut client = RECT::default();
+                let size = if unsafe { GetClientRect(window, &mut client) }.is_ok() {
+                    format!("{}x{}", client.right - client.left, client.bottom - client.top)
+                } else {
+                    "未知".to_string()
+                };
+                crate::log_ui(&format!("已找到游戏窗口（客户区 {size}），开始绘制加载界面。"));
             }
             if let Ok(mut ui) = state().lock() {
                 paint_to_window(&mut ui, window, font, logo_big, logo_small);
-                blit_to_window(&ui, window);
+                // 游戏开始换帧后，GL 纹理会随每一帧覆盖全屏；
+                // BitBlt 只会卡在呈现间隙里闪现，此时停用它。
+                if !swap_seen() {
+                    blit_to_window(&ui, window);
+                }
             }
             ensure_window_active_or_redraw(window);
         } else if !WINDOW_FOUND.load(Ordering::Acquire) {
@@ -329,12 +353,20 @@ fn paint_to_window(
     let mut client = RECT::default();
     unsafe {
         if GetClientRect(window, &mut client).is_err() {
+            if !CLIENT_RECT_PROBLEM_LOGGED.swap(true, Ordering::Relaxed) {
+                crate::log_ui("获取游戏窗口客户区失败，加载界面无法绘制（只记一次）。");
+            }
             return;
         }
     }
     let width = client.right - client.left;
     let height = client.bottom - client.top;
     if width <= 0 || height <= 0 {
+        if !CLIENT_RECT_PROBLEM_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::log_ui(&format!(
+                "游戏窗口客户区为 {width}x{height}（最小化或辅助窗口？），加载界面暂不绘制（只记一次）。"
+            ));
+        }
         return;
     }
     if !ensure_dib(ui, width, height) {
@@ -795,10 +827,16 @@ pub fn image() -> Option<(u64, i32, i32, Vec<u8>)> {
     Some((ui.version, ui.width, ui.height, ui.rgba.clone()))
 }
 
-/// 找到目标进程的可见主窗口。
+/// 找到目标进程的可见主窗口（**客户区最大**的那个）。
+///
+/// 同一进程可能有多个"可见且带标题"的顶层窗口（辅助窗口等），
+/// 先枚举到的未必是真正用于渲染的那个；曾出现"找到了窗口但客户区是 0×0、
+/// 界面永远画不出来"的机器案例——最小化窗口的客户区也是 0×0。
+/// 因此跳过 0×0，并在全部枚举完后取客户区面积最大者。
 fn find_game_window(game_pid: u32) -> Option<HWND> {
     struct Search {
         pid: u32,
+        best_area: i64,
         window: Option<HWND>,
     }
 
@@ -810,14 +848,23 @@ fn find_game_window(game_pid: u32) -> Option<HWND> {
             && unsafe { IsWindowVisible(hwnd).as_bool() }
             && unsafe { GetWindowTextLengthW(hwnd) } > 0
         {
-            search.window = Some(hwnd);
-            return windows::Win32::Foundation::FALSE;
+            let mut client = RECT::default();
+            if unsafe { GetClientRect(hwnd, &mut client) }.is_ok() {
+                let area = (client.right - client.left) as i64
+                    * (client.bottom - client.top) as i64;
+                if area > search.best_area {
+                    search.best_area = area;
+                    search.window = Some(hwnd);
+                }
+            }
         }
+        // 继续枚举完所有窗口再挑最大的，不在第一个命中处停下。
         windows::Win32::Foundation::TRUE
     }
 
     let mut search = Search {
         pid: game_pid,
+        best_area: 0,
         window: None,
     };
     let _ = unsafe {
