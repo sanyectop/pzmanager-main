@@ -5820,7 +5820,7 @@ function App() {
               <SupportOptionRow
                 badge={detection.paths.viewpoint3d.ready ? "订阅完整" : "需要订阅"}
                 badgePalette={detection.paths.viewpoint3d.ready ? "green" : "orange"}
-                description="需要订阅 Project Viewpoint、ZombieBuddy 和 Temporary 42.21 Fix 三个创意工坊模组。"
+                description="需要订阅 Project Viewpoint 和 ZombieBuddy 两个创意工坊模组。"
                 expanded={supportViewpointExpanded}
                 name="Project Viewpoint 3D 模组配置"
                 onToggle={() => setSupportViewpointExpanded((value) => !value)}

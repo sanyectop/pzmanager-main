@@ -434,7 +434,6 @@ node --test tests/          # 或 node --test tests/*.test.ts
 | `PROJECT_ZOMBOID_APP_ID` | `108600` | Steam AppID |
 | `ZOMBIE_BUDDY_MOD_ID` / `ZOMBIE_BUDDY_WORKSHOP_ID` | `3619862853` | ZombieBuddy 加载器 |
 | `VIEWPOINT_MOD_ID` | `3809306528` | Viewpoint 光影模组 |
-| `TEMPORARY_VIEWPOINT_FIX_MOD_ID` | `3807686870`（名称 `ZombieBuddy_B42.21_TemporaryFix`） | Viewpoint 的临时修复 |
 | `ZOMBIE_BUDDY_AGENT` | `-agentlib:zbNative` | agent 前缀 |
 | `ZOMBIE_BUDDY_POLICY_AGENT` | `-agentlib:zbNative=policy=allow-all` | 强制策略（见 6.3 警告） |
 | `MOD_LOADER_SCHEMES` / `DEFAULT_MOD_LOADER_SCHEME` | `["zombieBuddy", "none"]` / 默认 `zombieBuddy` | 「模组加载器方案」（设置 › 模组加载器），决定启动时挂哪个加载器 |
