@@ -6,12 +6,17 @@
  * - 后端：src-tauri/src/steam_relay.rs（STEAM_IMAGE_HOSTS、DEFAULT_RELAY_BASE）
  */
 
-/** 与 steam_relay.rs 的 DEFAULT_RELAY_BASE 一致；后端 get_app_settings 会把
- *  空设置归一化成这个值，前端也用它区分「默认」和「用户自定义」。 */
-export const DEFAULT_STEAM_RELAY_BASE = "https://pzmapi.sanyec.top/steam";
+/** 与 steam_relay.rs 的 DEFAULT_RELAY_BASE 一致（自建中转，steam-relay/README.md）；
+ *  后端 get_app_settings 会把空设置归一化成这个值，前端也用它区分「默认」和「用户自定义」。 */
+export const DEFAULT_STEAM_RELAY_BASE = "https://pzmlan.sanyec.top";
 
-/** Steam 图片 CDN 主机白名单（Worker 端同名单会代理这些主机）。 */
+/** Steam 图片 CDN 主机白名单（steam-relay/server.js 同名单会代理这些主机）。
+ *  Steam 按地区返回不同 CDN 域名（steamusercontent / fastly / cloudflare / akamai 系）。 */
 export const STEAM_IMAGE_HOSTS = [
+  "images.steamusercontent.com",
+  "cdn.fastly.steamstatic.com",
+  "shared.fastly.steamstatic.com",
+  "store.steamstatic.com",
   "shared.cloudflare.steamstatic.com",
   "clan.cloudflare.steamstatic.com",
   "steamuserimages-a.akamaihd.net",

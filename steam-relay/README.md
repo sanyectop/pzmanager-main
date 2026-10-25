@@ -83,13 +83,14 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 - 客户端设置页「通用 › Steam 网络加速」可填任意中转地址,「测试连接」
   按钮就是探 `/healthz`。
-- 启动器**内置默认地址**在两处常量,自建服务器上线后改成实际域名并重新
-  编译(两处必须一致):
+- 启动器**内置默认地址**当前是 `https://pzmlan.sanyec.top`(本服务器的
+  实际地址),定义在两处常量(换服务器时同步改这两处并重新编译):
   - `src-tauri/src/steam_relay.rs` → `DEFAULT_RELAY_BASE`
   - `src/steamRelay.ts` → `DEFAULT_STEAM_RELAY_BASE`
 - 客户端策略:自动(直连失败熔断后走中转,默认)/ 中转优先 / 仅直连。
 - 图片主机白名单 `IMAGE_HOSTS` 与 `steam_relay.rs`、`steamRelay.ts`
-  三处保持一致,改一处要同步另外三处。
+  三处保持一致,改一处要同步另外三处。Steam 按地区返回不同 CDN 域名
+  (steamusercontent / fastly / cloudflare / akamai 系),列表需随实测补充。
 
 ## 可选加固
 

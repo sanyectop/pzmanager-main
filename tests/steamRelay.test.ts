@@ -44,6 +44,22 @@ test("keeps query strings and handles avatars host", () => {
   );
 });
 
+test("covers the cdn hosts steam actually returns today", () => {
+  // 2026-10 实测:工坊预览图走 images.steamusercontent.com,
+  // 页面资源还有 fastly / store 系 CDN,都必须能兜底。
+  for (const host of [
+    "images.steamusercontent.com",
+    "cdn.fastly.steamstatic.com",
+    "shared.fastly.steamstatic.com",
+    "store.steamstatic.com",
+  ]) {
+    assert.equal(
+      previewImageFallbackUrl(`https://${host}/ugc/1.jpg`, DEFAULT_STEAM_RELAY_BASE, "auto"),
+      `${DEFAULT_STEAM_RELAY_BASE}/images/${host}/ugc/1.jpg`,
+    );
+  }
+});
+
 test("returns null for unknown hosts, bad urls, direct mode, empty base", () => {
   assert.equal(
     previewImageFallbackUrl("https://example.com/a.jpg", DEFAULT_STEAM_RELAY_BASE, "auto"),

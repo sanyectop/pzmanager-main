@@ -29,7 +29,13 @@ const CACHE_MAX_ENTRIES = 300;
 
 // 与 src/steamRelay.ts 的 STEAM_IMAGE_HOSTS、src-tauri/src/steam_relay.rs 的
 // STEAM_IMAGE_HOSTS 保持一致；改这里必须同步另外两处。
+// Steam 按出口地区返回不同 CDN 域名（2026-10 实测工坊预览图走
+// images.steamusercontent.com / fastly 系，cloudflare / akamai 系是其它地区变体）。
 const IMAGE_HOSTS = new Set([
+  "images.steamusercontent.com",
+  "cdn.fastly.steamstatic.com",
+  "shared.fastly.steamstatic.com",
+  "store.steamstatic.com",
   "shared.cloudflare.steamstatic.com",
   "clan.cloudflare.steamstatic.com",
   "steamuserimages-a.akamaihd.net",
