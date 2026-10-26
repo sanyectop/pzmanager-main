@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "pz_overlay"
-version = "1.1.261026"
+version = "1.2.261026"
 dependencies = [
  "jni",
  "minhook",

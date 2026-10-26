@@ -1,6 +1,6 @@
 [package]
 name = "pzmanager"
-version = "1.1.261026"
+version = "1.2.261026"
 description = "Project Zomboid launcher + mod manager"
 authors = ["you"]
 edition = "2021"
