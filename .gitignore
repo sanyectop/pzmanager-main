@@ -29,3 +29,6 @@ pzmanager-webview2
 *.sln
 *.sw?
 pzmodsample/
+
+# 中转服务器本地运行时生成的反馈文件（服务器上由 FEEDBACK_DIR 管理）
+steam-relay/feedback/

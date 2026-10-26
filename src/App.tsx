@@ -2829,6 +2829,17 @@ function App() {
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateStatus | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
+  // 「设置 › 关于 › 反馈信息」：弹窗状态与上传结果。
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackClosing, setFeedbackClosing] = useState(false);
+  const [feedbackDescription, setFeedbackDescription] = useState("");
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [feedbackResult, setFeedbackResult] = useState<{
+    feedbackId: string;
+    uploaded: string[];
+    skipped: string[];
+  } | null>(null);
 
   const [modManagementPage, setModManagementPage] = useState<ModManagementPage>("lua");
   const [luaModFilters, setLuaModFilters] = useState<Set<LuaModFilter>>(new Set());
@@ -2999,6 +3010,47 @@ function App() {
       }
     } finally {
       setUpdateChecking(false);
+    }
+  }
+
+  /** 「设置 › 关于 › 反馈信息」：上传最近一次启动的日志 + 错误描述。 */
+  function openFeedbackDialog() {
+    setFeedbackResult(null);
+    setFeedbackError(null);
+    setFeedbackClosing(false);
+    setFeedbackOpen(true);
+  }
+
+  function closeFeedbackDialog() {
+    setFeedbackClosing(true);
+    window.setTimeout(() => {
+      setFeedbackOpen(false);
+      setFeedbackClosing(false);
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
+  async function submitFeedback() {
+    if (feedbackSubmitting || !feedbackDescription.trim()) {
+      return;
+    }
+    setFeedbackSubmitting(true);
+    setFeedbackError(null);
+    try {
+      const result = await invoke<{
+        feedbackId: string;
+        uploaded: string[];
+        skipped: string[];
+      }>("submit_feedback", { description: feedbackDescription });
+      setFeedbackResult(result);
+      setFeedbackDescription("");
+      showToast(
+        result.feedbackId ? `反馈已提交（编号 ${result.feedbackId}）` : "反馈已提交",
+        "success",
+      );
+    } catch (error: unknown) {
+      setFeedbackError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFeedbackSubmitting(false);
     }
   }
 
@@ -5405,6 +5457,19 @@ function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [workshopDetailTarget]);
 
+  useEffect(() => {
+    if (!feedbackOpen) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeFeedbackDialog();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [feedbackOpen]);
+
   const statusMessage =
     detection.status === "checking"
       ? "正在检查 Steam 游戏库..."
@@ -7398,6 +7463,16 @@ function App() {
     </Box>
   );
 
+  /** 反馈文案里的时间：精确到分钟（秒级变化会让整句文案不停跳动）。 */
+  const feedbackCutoffLabel = new Date().toLocaleString("zh-CN", {
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
   const aboutSettingsContent = (
     <Box className="pz-panel pz-about-panel">
       <Text color="gray.900" fontSize="lg" fontWeight="700">关于</Text>
@@ -7413,6 +7488,24 @@ function App() {
           Project Zomboid（僵尸毁灭工程）的 Windows 桌面启动器 + 模组管理器：
           整合创意工坊订阅、JAR 模组管理、内置翻译器与下载器，不修改游戏本体。
         </Text>
+      </Box>
+      <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
+        <HStack justify="space-between" align="center" gap="3" wrap="wrap">
+          <Box flex="1" minW="240px">
+            <Text color="gray.800" fontSize="sm" fontWeight="700">反馈问题</Text>
+            <Text color="gray.500" fontSize="xs" mt="0.5">
+              点击该按钮仅会上传 {feedbackCutoffLabel} 前最后一次启动的日志，请确保您的问题是该次启动时发生的。
+            </Text>
+          </Box>
+          <Button
+            colorPalette="blue"
+            onClick={openFeedbackDialog}
+            size="sm"
+            variant="outline"
+          >
+            反馈信息
+          </Button>
+        </HStack>
       </Box>
       <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
         <HStack justify="space-between" align="center" gap="3" wrap="wrap">
@@ -8525,6 +8618,87 @@ function App() {
             </HStack>
           </Box>
         </Box>
+      )}
+      {feedbackOpen && (
+        <Portal>
+          <Box
+            className={`pz-resource-file-overlay ${feedbackClosing ? "is-closing" : ""}`}
+            onClick={closeFeedbackDialog}
+          >
+            <Box
+              aria-label="反馈信息"
+              aria-modal="true"
+              className="pz-resource-file-dialog pz-feedback-dialog"
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+            >
+              <HStack justify="space-between" gap="3">
+                <Box minW="0">
+                  <Text color="gray.900" fontWeight="700">反馈问题</Text>
+                  <Text color="gray.500" fontSize="xs" mt="1">
+                    仅上传 {feedbackCutoffLabel} 前最后一次启动的日志
+                  </Text>
+                </Box>
+                <Button aria-label="关闭反馈" onClick={closeFeedbackDialog} size="sm" variant="ghost">
+                  ×
+                </Button>
+              </HStack>
+              {feedbackResult ? (
+                <Box mt="4">
+                  <Text color="gray.800" fontSize="sm" fontWeight="700">反馈已提交，感谢！</Text>
+                  {feedbackResult.feedbackId && (
+                    <Text color="gray.600" fontSize="xs" mt="1">编号：{feedbackResult.feedbackId}</Text>
+                  )}
+                  <Text color="gray.500" fontSize="xs" mt="2">
+                    已上传：{feedbackResult.uploaded.join("、") || "无"}
+                  </Text>
+                  {feedbackResult.skipped.length > 0 && (
+                    <Text color="gray.500" fontSize="xs" mt="1">
+                      未找到：{feedbackResult.skipped.join("、")}
+                    </Text>
+                  )}
+                  <HStack justify="flex-end" mt="4">
+                    <Button colorPalette="blue" onClick={closeFeedbackDialog} size="sm">关闭</Button>
+                  </HStack>
+                </Box>
+              ) : (
+                <>
+                  <Text color="gray.500" fontSize="xs" mt="2">
+                    将上传 %TEMP%\overlay.log（最近一次游戏启动的部分）与
+                    %USERPROFILE%\Zomboid\console.txt。日志可能包含游戏路径、Steam ID
+                    等信息，仅用于排查问题。
+                  </Text>
+                  <Textarea
+                    aria-label="错误详情"
+                    disabled={feedbackSubmitting}
+                    mt="3"
+                    onChange={(event) => setFeedbackDescription(event.currentTarget.value)}
+                    placeholder="请描述遇到的问题：做了什么操作、期望结果、实际结果。复现步骤越具体越好。"
+                    rows={6}
+                    value={feedbackDescription}
+                  />
+                  {feedbackError && (
+                    <Text color="red.500" fontSize="xs" mt="2">{feedbackError}</Text>
+                  )}
+                  <HStack justify="flex-end" gap="2" mt="3">
+                    <Button disabled={feedbackSubmitting} onClick={closeFeedbackDialog} size="sm" variant="ghost">
+                      取消
+                    </Button>
+                    <Button
+                      colorPalette="blue"
+                      disabled={feedbackSubmitting || !feedbackDescription.trim()}
+                      loading={feedbackSubmitting}
+                      onClick={() => void submitFeedback()}
+                      size="sm"
+                    >
+                      提交反馈
+                    </Button>
+                  </HStack>
+                </>
+              )}
+            </Box>
+          </Box>
+        </Portal>
       )}
       <ToastViewport onClose={dismissToast} toasts={toasts} />
     </Box>
