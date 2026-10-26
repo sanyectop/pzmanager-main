@@ -169,6 +169,55 @@
   }
   .hero .wrap { position: relative; }
 
+  /* 英雄区左右分栏:左侧标题/文案/按钮,右侧一张界面预览(挪自「界面一览」)。 */
+  .hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    gap: clamp(28px, 5vw, 56px);
+    align-items: center;
+  }
+  .hero-copy { text-align: left; min-width: 0; }
+  .hero-copy .logo-row { justify-content: flex-start; }
+  .hero-copy .tagline { margin: 20px 0 0; }
+  .hero-copy .chips { justify-content: flex-start; }
+  .hero-copy .downloads { justify-content: flex-start; }
+  .hero-shot {
+    margin: 0;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow), 0 24px 60px rgba(15, 23, 42, 0.22);
+    overflow: hidden;
+    background: var(--panel);
+    transform: perspective(1200px) rotateY(-4deg) rotateX(2deg);
+    transition: transform 0.45s ease, box-shadow 0.45s ease;
+  }
+  .hero-shot:hover {
+    transform: perspective(1200px) rotateY(0) rotateX(0);
+    box-shadow: var(--shadow), 0 30px 70px rgba(15, 23, 42, 0.3);
+  }
+  .hero-shot img { display: block; width: 100%; height: auto; }
+  .hero-shot figcaption {
+    padding: 10px 16px; font-size: 12.5px; color: var(--text-dim);
+    border-top: 1px solid var(--border); text-align: center;
+  }
+  @media (max-width: 980px) {
+    .hero-grid { grid-template-columns: 1fr; }
+    .hero-copy { text-align: center; }
+    .hero-copy .logo-row,
+    .hero-copy .chips,
+    .hero-copy .downloads { justify-content: center; }
+    .hero-copy .tagline { margin: 20px auto 0; }
+    .hero-shot { transform: none; max-width: 640px; margin: 0 auto; }
+  }
+  @media (max-width: 480px) {
+    .logo { width: 44px; height: 44px; }
+    .downloads { gap: 12px; }
+    .downloads .btn { flex: 1 1 100%; justify-content: center; }
+    /* 窄屏收起次级导航项,防止整页被导航撑出横向滚动 */
+    .nav-links { gap: 14px; }
+    .nav-links a.nav-secondary { display: none; }
+  }
+
   .logo-row { display: flex; align-items: center; justify-content: center; gap: 16px; }
   .logo {
     width: 60px; height: 60px; border-radius: 14px;
@@ -180,7 +229,7 @@
     50% { transform: translateY(-7px); }
   }
   .brand {
-    font-size: 44px; font-weight: 800; letter-spacing: 6px;
+    font-size: clamp(26px, 6.5vw, 44px); font-weight: 800; letter-spacing: clamp(2px, 0.5vw, 6px);
     background: var(--grad); background-size: 200% 100%;
     -webkit-background-clip: text; background-clip: text;
     -webkit-text-fill-color: transparent; color: transparent;
@@ -395,9 +444,9 @@
   <div class="wrap nav-inner">
     <a class="nav-brand" href="#"><img src="pzm-logo.png" alt="" />PZMANAGER</a>
     <div class="nav-links">
-      <a href="#screenshots">界面</a>
-      <a href="#features">功能</a>
-      <a href="#docs">文档</a>
+      <a class="nav-secondary" href="#screenshots">界面</a>
+      <a class="nav-secondary" href="#features">功能</a>
+      <a class="nav-secondary" href="#docs">文档</a>
       <a href="https://github.com/sanyectop/pzmanager-main" target="_blank" rel="noopener" title="GitHub"><i class="fa-brands fa-github"></i> GitHub</a>
       <button class="theme-btn" id="themeBtn" title="切换主题"><i class="fa-solid fa-moon"></i></button>
       <a class="nav-cta" href="#downloads">下载</a>
@@ -411,33 +460,42 @@
   <div class="orb o2"></div>
   <div class="orb o3"></div>
   <div class="wrap">
-    <div class="logo-row fade-in d1">
-      <img class="logo" src="pzm-logo.png" alt="PZManager Logo" />
-      <div class="brand">PZMANAGER</div>
-    </div>
-    <p class="tagline fade-in d2">Project Zomboid 桌面启动器 + 模组管理器——一键启动、模组与光影管理、创意工坊浏览下载、游戏内加载覆盖层,一个应用全搞定。</p>
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <div class="logo-row fade-in d1">
+          <img class="logo" src="pzm-logo.png" alt="PZManager Logo" />
+          <div class="brand">PZMANAGER</div>
+        </div>
+        <p class="tagline fade-in d2">Project Zomboid 桌面启动器 + 模组管理器——一键启动、模组与光影管理、创意工坊浏览下载、游戏内加载覆盖层,一个应用全搞定。</p>
 
-    <div class="chips fade-in d3">
-      <span class="chip">Windows x64</span>
-      <span class="chip">Tauri 2 · Rust · React</span>
-      <span class="chip">免费使用</span>
-    </div>
+        <div class="chips fade-in d3">
+          <span class="chip">Windows x64</span>
+          <span class="chip">Tauri 2 · Rust · React</span>
+          <span class="chip">大陆网络可用</span>
+          <span class="chip">免费使用</span>
+        </div>
 
-    <div class="downloads fade-in d4">
-      <a class="btn btn-primary" href="https://github.com/sanyectop/pzmanager-main/releases/latest" target="_blank" rel="noopener">
-        <i class="fa-brands fa-github"></i>
-        <span>GitHub Releases<small>最新版本 · 稳定渠道</small></span>
-      </a>
-      <a class="btn" href="https://1813934047.share.123pan.cn/123pan/7AH7Vv-qA21A?pwd=PZMa" target="_blank" rel="noopener">
-        <i class="fa-solid fa-cloud-arrow-down"></i>
-        <span>123 云盘<small>国内直连 · 提取码 PZMa</small></span>
-      </a>
-      <a class="btn" href="docs.html">
-        <i class="fa-solid fa-book-open"></i>
-        <span>阅读文档<small>快速上手 · 常见问题</small></span>
-      </a>
+        <div class="downloads fade-in d4">
+          <a class="btn btn-primary" href="https://github.com/sanyectop/pzmanager-main/releases/latest" target="_blank" rel="noopener">
+            <i class="fa-brands fa-github"></i>
+            <span>GitHub Releases<small>最新版本 · 稳定渠道</small></span>
+          </a>
+          <a class="btn" href="https://1813934047.share.123pan.cn/123pan/7AH7Vv-qA21A?pwd=PZMa" target="_blank" rel="noopener">
+            <i class="fa-solid fa-cloud-arrow-down"></i>
+            <span>123 云盘<small>国内直连 · 提取码 PZMa</small></span>
+          </a>
+          <a class="btn" href="docs.html">
+            <i class="fa-solid fa-book-open"></i>
+            <span>阅读文档<small>快速上手 · 常见问题</small></span>
+          </a>
+        </div>
+        <p class="dl-note fade-in d5">GitHub Releases 与 123 云盘均可下载。当前版本:v1.2.261026</p>
+      </div>
+      <figure class="hero-shot fade-in d3">
+        <img src="shots/01-launch.jpg" alt="PZManager 启动页界面预览" />
+        <figcaption>启动页 · 自动检测游戏环境,选好内存与背景,点击即玩</figcaption>
+      </figure>
     </div>
-    <p class="dl-note fade-in d5">GitHub Releases 与 123 云盘均可下载。当前版本:v1.2.261026</p>
   </div>
 </header>
 
@@ -478,6 +536,16 @@
         <h3>游戏内覆盖层</h3>
         <p>注入 DLL + Hook OpenGL,在游戏加载时叠加进度界面,等待不再是黑屏干瞪眼。</p>
       </div>
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-tower-broadcast"></i></div>
+        <h3>Steam 网络加速</h3>
+        <p>大陆网络直连创意工坊被墙?直连失败自动经中转切换,列表、详情、新闻、预览图全覆盖;Clash / V2Ray 用户还能接入本地代理。</p>
+      </div>
+      <div class="feature reveal">
+        <div class="icon"><i class="fa-solid fa-paper-plane"></i></div>
+        <h3>问题反馈</h3>
+        <p>一键上传最近一次启动的运行日志并描述问题,生成反馈编号,无需手动翻目录找文件、贴附件。</p>
+      </div>
     </div>
   </div>
 </section>
@@ -490,16 +558,12 @@
 
     <div class="shots">
       <figure class="shot reveal">
-        <img src="shots/01-launch.jpg" alt="PZManager 启动页" loading="lazy" />
-        <figcaption><b>一眼启动</b>自动检查 Steam 游戏库,选好内存与背景,点击即玩。</figcaption>
-      </figure>
-      <figure class="shot reveal">
         <img src="shots/02-menus.jpg" alt="启动设置菜单" loading="lazy" />
         <figcaption><b>启动设置</b>调整内存、切换内置 / 自定义背景,还能直达创意工坊订阅。</figcaption>
       </figure>
       <figure class="shot reveal">
         <img src="shots/03-settings.jpg" alt="设置面板" loading="lazy" />
-        <figcaption><b>该调的都能调</b>翻译语言、字体对比度、模糊强度等,细节尽在设置面板。</figcaption>
+        <figcaption><b>该调的都能调</b>Steam 网络加速、翻译语言、字体对比度、模糊强度等,细节尽在设置面板。</figcaption>
       </figure>
     </div>
   </div>

@@ -230,9 +230,11 @@
     <a href="#launch"><i class="fa-solid fa-rocket"></i>启动游戏</a>
     <a href="#support-mods"><i class="fa-solid fa-puzzle-piece"></i>支持库与模组</a>
     <a href="#resources"><i class="fa-solid fa-cloud-arrow-down"></i>资源中心</a>
+    <a href="#steam-relay"><i class="fa-solid fa-tower-broadcast"></i>Steam 网络加速</a>
     <a href="#shots-shaders"><i class="fa-solid fa-image"></i>截图与光影</a>
     <a href="#overlay"><i class="fa-solid fa-gamepad"></i>游戏内覆盖层</a>
     <a href="#settings"><i class="fa-solid fa-sliders"></i>设置详解</a>
+    <a href="#feedback"><i class="fa-solid fa-paper-plane"></i>问题反馈</a>
     <a href="#faq"><i class="fa-solid fa-circle-question"></i>常见问题</a>
     <a href="#dev"><i class="fa-solid fa-code"></i>开发者文档</a>
   </aside>
@@ -333,7 +335,7 @@
       <h2><i class="fa-solid fa-cloud-arrow-down"></i>资源中心</h2>
 
       <h3>创意工坊</h3>
-      <p>「资源中心 › 创意工坊」直接浏览 Steam 创意工坊:支持排序、按时间/标签筛选、搜索与分页,结果有缓存加速。在列表里右键打开模组详情,介绍文本(BBCode)会按段自动翻译。</p>
+      <p>「资源中心 › 创意工坊」直接浏览 Steam 创意工坊:支持排序、按时间/标签筛选、搜索与分页,结果有缓存加速。在列表里右键打开模组详情,介绍文本(BBCode)会按段自动翻译。大陆网络下,工坊请求会按「Steam 网络加速」的设置在直连与中转之间自动切换(见<a href="#steam-relay">Steam 网络加速</a>),无需手动配置。</p>
 
       <h3>光影下载</h3>
       <p>「资源中心 › 光影下载」检索光影资源:Modrinth 优先、CurseForge 兜底、必要时走镜像回退。下载任务进入全局任务中心后台进行,不阻塞界面。</p>
@@ -343,6 +345,109 @@
 
       <h3>任务中心</h3>
       <p>标题栏右侧的「任务」按钮打开任务中心,所有后台下载的进度集中在这里查看。</p>
+    </section>
+
+    <!-- ============ Steam 网络加速 ============ -->
+    <section class="doc" id="steam-relay">
+      <h2><i class="fa-solid fa-tower-broadcast"></i>Steam 网络加速</h2>
+
+      <h3>解决什么问题</h3>
+      <p>
+        启动器有三类请求需要访问 Steam:<b>创意工坊列表</b>(抓取
+        <code>steamcommunity.com</code> 的服务端渲染页并解析内嵌的
+        <code>valve-ssr-data</code> JSON)、<b>项目详情</b>(调用 Web API
+        <code>ISteamRemoteStorage/GetPublishedFileDetails</code>)与<b>开发者新闻</b>(调用
+        <code>ISteamNews/GetNewsForApp</code>)。其中 <code>steamcommunity.com</code>
+        在大陆网络被墙——直连表现为 TCP 连接被重置或长时间无响应,
+        <code>api.steampowered.com</code> 也时常不稳定。v1.2.261026 起,这三类请求统一接入
+        <b>候选源 + 双向熔断</b>机制,配合自建中转服务,大陆用户无需任何配置即可正常使用。
+      </p>
+
+      <h3>候选源与自动切换</h3>
+      <p>
+        每个请求按「候选源列表」顺序尝试,第一个成功的源返回结果,全部失败才报错(错误信息会
+        聚合每个源的具体原因)。候选源顺序由 <span class="kbd">设置 › 通用 › Steam
+        网络加速</span> 的模式决定:
+      </p>
+      <table>
+        <tr><th>模式</th><th>行为</th><th>适用</th></tr>
+        <tr>
+          <td><b>自动(默认)</b></td>
+          <td>先直连官方,失败后自动改走中转;直连失败后进入 10 分钟熔断期,期间直接走中转不再空等直连超时。</td>
+          <td>大多数用户。海外网络直连秒回,大陆网络多等一次超时后自动切换。</td>
+        </tr>
+        <tr>
+          <td><b>中转优先</b></td>
+          <td>始终先走中转,中转故障时临时回退直连(同样有熔断保护)。</td>
+          <td>明确处于受限网络、不想每次先等直连失败的用户。</td>
+        </tr>
+        <tr>
+          <td><b>仅直连</b></td>
+          <td>完全不使用中转。</td>
+          <td>不希望请求经过任何第三方服务器的用户;大陆网络下工坊将不可用。</td>
+        </tr>
+      </table>
+      <p>
+        熔断是<b>双向</b>的:直连失败熔断直连(期间中转优先),中转失败同样熔断中转(期间直连顶上),
+        任一链路成功即解除熔断。这样单条链路的抖动不会把等待时间叠加到每次请求上。
+      </p>
+
+      <h3>中转服务的工作方式</h3>
+      <p>
+        中转是一个部署在自有服务器上的轻量反代(Node.js 单文件,源码见仓库
+        <code>steam-relay/</code> 目录),采用<b>路径白名单</b>设计——只有下列前缀的请求会被代理,
+        其余一律 404,因此不能被当作任意代理使用:
+      </p>
+      <table>
+        <tr><th>路径</th><th>转发目标</th><th>服务端缓存</th></tr>
+        <tr><td><code>/community/*</code></td><td>steamcommunity.com(工坊浏览 HTML)</td><td>5 分钟</td></tr>
+        <tr><td><code>/api/*</code></td><td>api.steampowered.com(详情 / 新闻 API,POST 表单透传)</td><td>GET 5 分钟,POST 不缓存</td></tr>
+        <tr><td><code>/images/&lt;host&gt;/*</code></td><td>Steam 图片 CDN,主机限白名单</td><td>1 小时</td></tr>
+        <tr><td><code>/healthz</code></td><td>无上游调用,返回 <code>{"ok":true}</code></td><td>无</td></tr>
+      </table>
+      <ul>
+        <li>转发时统一覆盖为浏览器伪装头(UA、Accept-Language、Referer),降低被 Steam 风控的概率;上游 20 秒超时。</li>
+        <li>图片白名单覆盖 Steam 各地区 CDN:steamusercontent、fastly / cloudflare / akamai 系 steamstatic 与 akamaihd(共 10 个主机)。</li>
+        <li>缓存为进程内存缓存(TTL + 近似 LRU,上限 300 条):工坊 HTML 只有<b>真正含 SSR 数据</b>的响应才会入缓存——Steam 偶尔返回 HTTP 200 的风控 / 插页,缓存它们会让所有用户集体「无法解析」,这是专门防御的点。</li>
+        <li>客户端本地也有 5 分钟的工坊 HTML 缓存,与服务端缓存叠加,第二次翻页通常明显更快。</li>
+      </ul>
+      <div class="callout">
+        <b>「无法解析 Steam 页面」的防御:</b>当某个源返回 200 但解析不出工坊数据(风控页 /
+        插页)时,启动器会把该源视为失败并立即换下一个源重试,而不是直接报错;配合服务端的
+        缓存守卫,坏页面最多影响一次请求。
+      </div>
+
+      <h3>预览图的兜底加载</h3>
+      <p>
+        工坊列表的预览图由 <code>&lt;img&gt;</code> 直接从 Steam CDN 加载(不走 Rust 网络层)。
+        图片加载失败时,启动器会按<b>图片主机白名单</b>把地址改写为中转的
+        <code>/images/…</code> 形式自动重试一次——即「原图优先、中转兜底」,原始地址可用时零额外开销。
+      </p>
+
+      <h3>本地代理(可选,进阶)</h3>
+      <p>
+        如果你在本机运行 Clash / V2Ray 等带本地端口的代理工具,可以在
+        <span class="kbd">设置 › 通用 › Steam 网络加速</span> 填写「本地代理」,数据请求将直接经它发出,
+        通常比中转更快:
+      </p>
+      <ul>
+        <li>支持 <code>http://</code>、<code>https://</code>、<code>socks5://</code> 三种前缀;
+          只填 <code>127.0.0.1:7897</code> 这类裸地址会自动按 http 处理。</li>
+        <li>「<b>自动检测</b>」会并行探测本机常见代理端口(7897 / 7890 / 1080 / 10808 / 10809 / 2080 / 7891),
+          对每个端口实际发起一次 Steam 请求,<b>只有真正能访问 Steam 的才会列出</b>,并自动填入延迟最低的一个。</li>
+        <li>未填写本地代理时,启动器保持 reqwest 默认行为:自动读取 Windows 系统代理(WinINET)与
+          <code>HTTP_PROXY</code> 等环境变量——如果系统代理开着且可用,直连请求已经会走它。</li>
+        <li><b>中转请求与「测试连接」始终绕过代理</b>(直连中转服务器):这样即使系统代理残留了失效地址
+          (比如代理工具异常退出没恢复设置),中转兜底路径也不会被拖死。</li>
+      </ul>
+
+      <div class="callout warn">
+        <b>关于 UU 等游戏加速器:</b>这类加速器通过内核级 WFP 驱动<b>按进程白名单</b>加速
+        Steam 客户端(steam.exe / steamwebhelper.exe),不会接管启动器的流量——实测开着 UU
+        加速 Steam 时,启动器与 curl 直连 steamcommunity 仍会被重置。所以开着加速器≠工坊可用,
+        仍需保持本功能的自动 / 中转优先模式。
+      </div>
+      <a class="back-top" href="#"><i class="fa-solid fa-arrow-up"></i> 回到顶部</a>
     </section>
 
     <!-- ============ 截图与光影 ============ -->
@@ -376,7 +481,7 @@
         <tr><th>分类</th><th>主要内容</th></tr>
         <tr>
           <td>通用</td>
-          <td>开发者模式(显示注入方法、模组标签、冲突分析与详细通知)、翻译语言、字体对比度、界面模糊度(亚克力/毛玻璃强度,0 为关闭)。</td>
+          <td>开发者模式(显示注入方法、模组标签、冲突分析与详细通知)、翻译语言、字体对比度、界面模糊度(亚克力/毛玻璃强度,0 为关闭)、<b>Steam 网络加速</b>(模式 / 中转地址 / 测试连接 / 本地代理 / 自动检测,详见<a href="#steam-relay">Steam 网络加速</a>)。</td>
         </tr>
         <tr>
           <td>翻译器</td>
@@ -398,10 +503,61 @@
           <td>启动</td>
           <td>内存清理(静默阈值 + 启动时清理一次)、极速启动(实验性)。</td>
         </tr>
+        <tr>
+          <td>关于</td>
+          <td>版本信息、检查更新、<b>反馈信息</b>(详见<a href="#feedback">问题反馈</a>)。</td>
+        </tr>
       </table>
       <div class="callout warn">
         <b>关于「极速启动」:</b>基于 JVMTI 的实验性功能,链路已打通,但游戏内仍有已知崩溃风险,追求稳定请勿开启。
       </div>
+    </section>
+
+    <!-- ============ 问题反馈 ============ -->
+    <section class="doc" id="feedback">
+      <h2><i class="fa-solid fa-paper-plane"></i>问题反馈</h2>
+
+      <p>
+        遇到启动器或游戏内的问题时,可以使用 <span class="kbd">设置 › 关于 ›
+        反馈信息</span> 一键上报:<b>上传最近一次启动的运行日志 + 你填写的问题描述</b>,
+        提交成功后会显示一个反馈编号,无需手动找日志文件、压附件。
+      </p>
+
+      <h3>上传哪些内容</h3>
+      <table>
+        <tr><th>文件</th><th>来源</th><th>上传范围</th></tr>
+        <tr>
+          <td><code>%TEMP%\overlay.log</code></td>
+          <td>游戏内覆盖层组件的运行日志,由注入 DLL <b>跨启动追加</b>写入</td>
+          <td>只截取<b>最后一个「已加载」标记之后</b>的部分,即最近一次游戏启动;不会把历史启动记录一起发出去</td>
+        </tr>
+        <tr>
+          <td><code>%USERPROFILE%\Zomboid\console.txt</code></td>
+          <td>游戏自身的控制台日志(每次启动由游戏重写,启动器追加 <code>[PZManager]</code> 标记)</td>
+          <td>整份文件,天然就是最近一次启动</td>
+        </tr>
+      </table>
+      <ul>
+        <li>单个日志超过 4 MB 时只上传<b>末尾</b>部分(按字符边界安全截断),并在记录里标记 <code>truncated</code>,避免一次上传几十 MB。</li>
+        <li>某个文件不存在(比如从没开启过覆盖层)时照常提交,记录里会标 <code>missing</code>。</li>
+        <li>非 UTF-8 字节按替换字符解码,不会因编码问题提交失败。</li>
+      </ul>
+
+      <h3>隐私与时效</h3>
+      <div class="callout warn">
+        <b>提交前请阅读弹窗内的提示:</b>日志可能包含游戏安装路径、Steam ID
+        等本机信息,仅用于问题排查。按钮旁会标注当前时间——<b>该按钮仅上传当前时刻前最后一次启动的日志</b>,
+        请确保你描述的问题发生在那一次启动中;如果问题需要特定操作才能复现,先复现一次再回来提交。
+      </div>
+
+      <h3>服务端如何处理</h3>
+      <ul>
+        <li>反馈以 JSON 形式落盘在中转服务器的 <code>FEEDBACK_DIR</code> 目录,文件名即<b>反馈编号</b>(时间戳 + 6 位随机后缀),提交成功后编号会显示给你,便于与开发者对照。</li>
+        <li>单条请求上限 10 MB;描述最长 5000 字;同一 IP 每小时最多 10 条,超出返回「提交太频繁」。</li>
+        <li>上传走中转服务器直连,<b>不跟随系统代理</b>——残留的失效代理不会让反馈发不出去。</li>
+      </ul>
+
+      <a class="back-top" href="#"><i class="fa-solid fa-arrow-up"></i> 回到顶部</a>
     </section>
 
     <!-- ============ FAQ ============ -->
@@ -428,6 +584,35 @@
 
       <h3>极速启动后游戏崩溃?</h3>
       <p>极速启动目前是实验性功能,存在已知崩溃风险,请在 <span class="kbd">设置 › 启动</span> 关闭后重试。</p>
+
+      <h3>创意工坊列表打不开 / 提示「无法解析 Steam 页面」?</h3>
+      <p>
+        先到 <span class="kbd">设置 › 通用 › Steam 网络加速</span> 确认模式不是「仅直连」(大陆网络下仅直连必然失败),
+        用「测试连接」确认中转可达;如果指向了自定义中转地址,检查地址是否写对(不要带末尾斜杠也能用,但域名要正确)。
+        偶发的「无法解析」通常是 Steam 返回了风控页,启动器会自动换源重试,再试一次即可;持续失败请通过
+        <a href="#feedback">反馈</a> 上报日志。
+      </p>
+
+      <h3>开了 UU / 加速器,创意工坊还是打不开?</h3>
+      <p>
+        正常现象:这类加速器通过 WFP 驱动按进程白名单只加速 Steam 客户端,不会接管启动器的网络请求。
+        启动器依赖自身的「Steam 网络加速」机制,保持「自动」或「中转优先」模式即可;如果你有 Clash / V2Ray
+        等本地代理,填入「本地代理」通常更快,详见<a href="#steam-relay">Steam 网络加速</a>。
+      </p>
+
+      <h3>本地代理「自动检测」没有发现可用代理?</h3>
+      <p>
+        检测只扫描常见端口(7897 / 7890 / 1080 / 10808 / 10809 / 2080 / 7891),且要求该端口能实际访问 Steam。
+        如果你的代理用了其它端口,请到代理工具的设置里确认「混合端口 / HTTP 端口」后手动填入;
+        只填 <code>127.0.0.1:端口</code> 即可,无需写协议前缀。
+      </p>
+
+      <h3>反馈提交失败,或反馈编号有什么用?</h3>
+      <p>
+        提交失败时弹窗会显示具体原因:日志缺失(两个日志文件都不存在)、提交太频繁(同一网络每小时 10 条上限)
+        或网络问题。编号是反馈在服务器上的唯一文件名,向开发者反馈问题时附上编号即可精准定位到你的日志;
+        提交成功后弹窗也会列出实际上传与缺失的文件。详见<a href="#feedback">问题反馈</a>。
+      </p>
     </section>
 
     <!-- ============ 开发者文档 ============ -->
