@@ -36,3 +36,9 @@ steam-relay*/feedback/
 # feedback-viewer 本地虚拟环境与缓存
 feedback-viewer*/.venv/
 feedback-viewer*/__pycache__/
+
+# 服务端/工具目录：只保留在本地，不推送到公开仓库（2026-10-26 起改名标注）。
+# update-api 的 latest.json 仍需手动维护并部署到 Cloudflare Pages。
+steam-relay(服务端请勿上传)/
+update-api(服务端请勿上传)/
+feedback-viewer(开发人员工具请勿上传)/
