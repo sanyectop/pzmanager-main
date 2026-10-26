@@ -6953,6 +6953,7 @@ function App() {
             onChange={(event) => setSteamRelayBase(event.currentTarget.value)}
           />
           <Button
+            className="pz-steam-relay-action"
             colorPalette="blue"
             disabled={steamRelayTesting}
             size="sm"
@@ -6982,6 +6983,7 @@ function App() {
             onChange={(event) => setSteamProxy(event.currentTarget.value)}
           />
           <Button
+            className="pz-steam-relay-action"
             disabled={steamProxyDetecting}
             size="sm"
             variant="outline"
@@ -6991,6 +6993,7 @@ function App() {
           </Button>
           {steamProxy && (
             <Button
+              className="pz-steam-relay-action"
               disabled={steamProxySaving}
               size="sm"
               variant="ghost"

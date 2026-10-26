@@ -2092,6 +2092,15 @@ body {
   max-width: 52rem;
 }
 
+/* 「Steam 网络加速」行的两个操作按钮与同行的输入框 / 下拉触发器对齐到
+   26px 设计高度：Chakra size="sm" 按钮默认 36px，不在全站控件高度规则的
+   覆盖范围里（那条只管输入框 / 原生下拉 / 菜单触发器）。 */
+.pz-general-settings-panel .pz-steam-relay-action {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-block: 0 !important;
+}
+
 .pz-translator-settings-panel {
   max-width: 60rem;
 }
