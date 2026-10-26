@@ -27,9 +27,10 @@ export const STEAM_IMAGE_HOSTS = [
 
 export type SteamRelayMode = "auto" | "relay" | "direct";
 
-/** 设置页「通用 › Steam 网络加速」的模式下拉选项。 */
+/** 设置页「通用 › Steam 网络加速」的模式下拉选项。
+ *  标签保持短句（下拉宽度有限，长文案会被省略号截断），详细含义看卡片描述。 */
 export const STEAM_RELAY_MODE_OPTIONS: { value: SteamRelayMode; label: string }[] = [
-  { value: "auto", label: "自动（直连失败走中转）" },
+  { value: "auto", label: "自动（推荐）" },
   { value: "relay", label: "中转优先" },
   { value: "direct", label: "仅直连" },
 ];

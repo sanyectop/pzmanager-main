@@ -6928,6 +6928,7 @@ function App() {
         <Text color="gray.800" fontSize="sm" fontWeight="700">Steam 网络加速</Text>
         <Text color="gray.500" fontSize="xs" mt="1">
           大陆网络直连 Steam 创意工坊会失败：默认经中转服务器访问工坊列表、项目详情和开发者新闻，预览图加载失败时也走中转兜底。
+          「自动」= 先试直连，失败自动切中转；「中转优先」= 一直走中转；「仅直连」= 不用中转（直连被墙时会打不开）。
           UU 这类只加速 Steam 客户端的工具不会接管启动器，开着也仍需中转；如果你装了 Clash / V2Ray
           等带本地端口的代理，填在下面通常比中转更快。
         </Text>
