@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 
 from flask import Flask, redirect, render_template, request, session, url_for
+from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
 # 每次启动随机：重启后旧 session 失效，需要重新输入 token（符合"token 重启即换"）。
@@ -38,7 +39,13 @@ def build_auth(token: str) -> str:
     密钥 = sha256(token)；密文 = iv(12) || AES-256-GCM(明文) 的输出（含 16 字节 tag）；
     整体 base64url（去掉 padding，Node 侧能直接解）。
     """
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except ImportError as error:
+        raise RuntimeError(
+            "缺少 cryptography 依赖：请在 feedback-viewer 目录执行 "
+            "`pip install -r requirements.txt`（或 `pip install cryptography`），然后重启。"
+        ) from error
 
     key = hashlib.sha256(token.strip().encode("utf-8")).digest()
     iv = os.urandom(12)
@@ -201,7 +208,48 @@ def logout():
     return redirect(url_for("index"))
 
 
+@app.errorhandler(Exception)
+def surface_error(error):
+    """本地工具：把真实异常直接显示在页面上（只监听 127.0.0.1，不对外）。
+
+    Flask 默认的 500 页面不显示原因，排障时只能翻终端；这里把 traceback
+    贴出来，并点出最常见的缺依赖问题。
+    """
+    if isinstance(error, HTTPException):
+        return error
+    import html
+    import traceback
+
+    traceback.print_exc()
+    detail = html.escape(
+        "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    )
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        "<body style='margin:0;padding:24px;font:14px/1.6 \"Microsoft YaHei UI\",system-ui,sans-serif;"
+        "background:#f5f7fa;color:#1f2933'>"
+        "<h1 style='font-size:20px;color:#b42318'>查看器出错</h1>"
+        "<pre style='padding:12px;background:#0f1720;color:#d7e2ee;border-radius:6px;"
+        "overflow:auto;font:12px/1.5 Consolas,monospace;white-space:pre-wrap;word-break:break-all'>"
+        f"{detail}</pre>"
+        "<p>常见原因：缺少 <code>cryptography</code>。在该目录执行 "
+        "<code>pip install -r requirements.txt</code> 后重启本程序。</p>"
+        "</body>"
+    ), 500
+
+
 if __name__ == "__main__":
+    missing = []
+    for module_name, package_name in (("flask", "Flask"), ("cryptography", "cryptography")):
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(package_name)
+    if missing:
+        print("缺少依赖：" + "、".join(missing))
+        print("请先执行：pip install -r requirements.txt")
+        raise SystemExit(1)
+
     print(f"反馈查看器: http://127.0.0.1:{PORT}")
     print(f"服务端: {DEFAULT_SERVER}")
     app.run(host="127.0.0.1", port=PORT, debug=False)
