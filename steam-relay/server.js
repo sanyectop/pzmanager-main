@@ -19,9 +19,9 @@
  */
 
 import { createServer } from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 const PORT = Number(process.env.PORT) || 8787;
 const UPSTREAM_TIMEOUT_MS = 20_000;
@@ -43,6 +43,22 @@ const FEEDBACK_RATE_LIMIT = 10; // 每 IP 每小时
 const FEEDBACK_RATE_WINDOW_MS = 60 * 60 * 1000;
 /** ip -> 提交时间戳数组（只在内存里，重启清零）。 */
 const feedbackHits = new Map();
+
+// ---- 管理员查看反馈 ----
+// 服务端每次启动随机生成 1024 位 token（128 字节），只在启动日志打印一次；
+// 重启即换新。管理端（feedback-viewer）把它输入本地页面，用它派生 AES-256-GCM
+// 密钥加密「时间戳 + nonce」作为 auth 参数；服务端解密并校验时间窗后才返回数据，
+// token 本身永远不会出现在 URL / 服务器访问日志里。
+const ADMIN_TOKEN_BITS = 1024;
+const ADMIN_TOKEN = randomBytes(ADMIN_TOKEN_BITS / 8).toString("base64");
+const ADMIN_KEY = createHash("sha256").update(ADMIN_TOKEN).digest();
+/** 请求时间戳允许的偏差（防重放）。 */
+const ADMIN_AUTH_WINDOW_MS = 5 * 60 * 1000;
+const FEEDBACK_PAGE_SIZE = 12;
+const ADMIN_RATE_LIMIT = 60; // 每 IP 每小时的查看请求上限
+const ADMIN_RATE_WINDOW_MS = 60 * 60 * 1000;
+const adminHits = new Map();
+const FEEDBACK_ID_PATTERN = /^\d{14}-[0-9a-f]{6}$/;
 
 // 与 src/steamRelay.ts 的 STEAM_IMAGE_HOSTS、src-tauri/src/steam_relay.rs 的
 // STEAM_IMAGE_HOSTS 保持一致；改这里必须同步另外两处。
@@ -117,24 +133,160 @@ function clientIp(req) {
 
 /** 每 IP 每小时最多 FEEDBACK_RATE_LIMIT 次，超了返回 true。 */
 function feedbackRateLimited(ip) {
+  return rateLimited(feedbackHits, ip, FEEDBACK_RATE_LIMIT, FEEDBACK_RATE_WINDOW_MS);
+}
+
+function adminRateLimited(ip) {
+  return rateLimited(adminHits, ip, ADMIN_RATE_LIMIT, ADMIN_RATE_WINDOW_MS);
+}
+
+/** 滑动窗口限流（只在内存里，重启清零）。 */
+function rateLimited(hitsByIp, ip, limit, windowMs) {
   const now = Date.now();
-  const hits = (feedbackHits.get(ip) || []).filter(
-    (time) => now - time < FEEDBACK_RATE_WINDOW_MS,
-  );
-  const limited = hits.length >= FEEDBACK_RATE_LIMIT;
+  const hits = (hitsByIp.get(ip) || []).filter((time) => now - time < windowMs);
+  const limited = hits.length >= limit;
   if (!limited) {
     hits.push(now);
   }
-  feedbackHits.set(ip, hits);
+  hitsByIp.set(ip, hits);
   // 顺手清掉已经过窗口的 IP，避免 map 无限增长。
-  if (feedbackHits.size > 5000) {
-    for (const [key, value] of feedbackHits) {
-      if (value.every((time) => now - time >= FEEDBACK_RATE_WINDOW_MS)) {
-        feedbackHits.delete(key);
+  if (hitsByIp.size > 5000) {
+    for (const [key, value] of hitsByIp) {
+      if (value.every((time) => now - time >= windowMs)) {
+        hitsByIp.delete(key);
       }
     }
   }
   return limited;
+}
+
+/**
+ * 校验管理端 auth 参数：base64url(iv(12) || ciphertext || tag(16))，
+ * 明文为 `<unix 秒>:<随机串>`。解密失败 / 超时窗一律视为未授权。
+ * 与服务端启动 token 派生的 AES-256-GCM 密钥对应，见 feedback-viewer/app.py。
+ */
+function adminAuthValid(auth) {
+  if (typeof auth !== "string" || auth.length === 0 || auth.length > 1024) {
+    return false;
+  }
+  try {
+    const raw = Buffer.from(auth, "base64url");
+    if (raw.length < 12 + 16 + 2) {
+      return false;
+    }
+    const iv = raw.subarray(0, 12);
+    const tag = raw.subarray(raw.length - 16);
+    const ciphertext = raw.subarray(12, raw.length - 16);
+    const decipher = createDecipheriv("aes-256-gcm", ADMIN_KEY, iv);
+    decipher.setAuthTag(tag);
+    const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+    const timeSeconds = Number(plain.split(":")[0]);
+    if (!Number.isFinite(timeSeconds)) {
+      return false;
+    }
+    return Math.abs(Date.now() - timeSeconds * 1000) <= ADMIN_AUTH_WINDOW_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** FEEDBACK_DIR 下的记录文件，文件名含时间戳，字典序倒排即最新在前。 */
+async function feedbackFileNames() {
+  try {
+    const names = await readdir(FEEDBACK_DIR);
+    return names
+      .filter((name) => name.endsWith(".json") && FEEDBACK_ID_PATTERN.test(name.slice(0, -5)))
+      .sort()
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
+/** 列表只返回摘要；完整日志走 /feedback/detail，避免一页塞进十几 MB。 */
+function feedbackSummary(record) {
+  return {
+    id: record.id,
+    receivedAt: record.receivedAt,
+    ip: record.ip,
+    description: record.description,
+    client: record.client ?? null,
+    files: (Array.isArray(record.files) ? record.files : []).map((file) => ({
+      name: file.name,
+      bytes: Buffer.byteLength(file.content ?? ""),
+      truncated: Boolean(file.truncated),
+      missing: Boolean(file.missing),
+    })),
+  };
+}
+
+/** GET /feedback?auth=…&page=N：按 12 条/页返回最新反馈（新的在前）。 */
+async function handleFeedbackList(req, res, url, startedAt) {
+  const ip = clientIp(req);
+  if (adminRateLimited(ip)) {
+    logRequest(req, "feedback", 429, startedAt);
+    jsonResponse(res, 429, '{"error":"rate_limited"}');
+    return;
+  }
+  if (!adminAuthValid(url.searchParams.get("auth"))) {
+    logRequest(req, "feedback", 401, startedAt);
+    jsonResponse(res, 401, '{"error":"unauthorized"}');
+    return;
+  }
+
+  const names = await feedbackFileNames();
+  const total = names.length;
+  const pages = Math.max(1, Math.ceil(total / FEEDBACK_PAGE_SIZE));
+  const requested = Number.parseInt(url.searchParams.get("page") || "1", 10);
+  const page = Math.min(Math.max(1, Number.isFinite(requested) ? requested : 1), pages);
+  const slice = names.slice((page - 1) * FEEDBACK_PAGE_SIZE, page * FEEDBACK_PAGE_SIZE);
+
+  const items = [];
+  for (const name of slice) {
+    try {
+      items.push(feedbackSummary(JSON.parse(await readFile(join(FEEDBACK_DIR, name), "utf8"))));
+    } catch {
+      // 半截文件 / 手工改坏的文件跳过，不让一条坏数据拖垮整页。
+    }
+  }
+
+  logRequest(req, "feedback", 200, startedAt);
+  jsonResponse(
+    res,
+    200,
+    JSON.stringify({ ok: true, page, pages, total, pageSize: FEEDBACK_PAGE_SIZE, items }),
+  );
+}
+
+/** GET /feedback/detail?auth=…&id=…：单条反馈的完整日志。 */
+async function handleFeedbackDetail(req, res, url, startedAt) {
+  const ip = clientIp(req);
+  if (adminRateLimited(ip)) {
+    logRequest(req, "feedback/detail", 429, startedAt);
+    jsonResponse(res, 429, '{"error":"rate_limited"}');
+    return;
+  }
+  if (!adminAuthValid(url.searchParams.get("auth"))) {
+    logRequest(req, "feedback/detail", 401, startedAt);
+    jsonResponse(res, 401, '{"error":"unauthorized"}');
+    return;
+  }
+  const id = String(url.searchParams.get("id") || "");
+  if (!FEEDBACK_ID_PATTERN.test(id)) {
+    logRequest(req, "feedback/detail", 400, startedAt);
+    jsonResponse(res, 400, '{"error":"invalid_id"}');
+    return;
+  }
+  let raw;
+  try {
+    raw = await readFile(join(FEEDBACK_DIR, `${id}.json`), "utf8");
+  } catch {
+    logRequest(req, "feedback/detail", 404, startedAt);
+    jsonResponse(res, 404, '{"error":"not_found"}');
+    return;
+  }
+  logRequest(req, "feedback/detail", 200, startedAt);
+  jsonResponse(res, 200, raw);
 }
 
 async function readBodyLimited(req, limit) {
@@ -261,7 +413,26 @@ async function handle(req, res) {
   }
 
   if (path === "feedback") {
-    await handleFeedback(req, res, startedAt);
+    if (req.method === "POST") {
+      await handleFeedback(req, res, startedAt);
+      return;
+    }
+    if (req.method === "GET") {
+      await handleFeedbackList(req, res, url, startedAt);
+      return;
+    }
+    logRequest(req, "feedback", 405, startedAt);
+    jsonResponse(res, 405, '{"error":"method_not_allowed"}');
+    return;
+  }
+
+  if (path === "feedback/detail") {
+    if (req.method === "GET") {
+      await handleFeedbackDetail(req, res, url, startedAt);
+      return;
+    }
+    logRequest(req, "feedback/detail", 405, startedAt);
+    jsonResponse(res, 405, '{"error":"method_not_allowed"}');
     return;
   }
 
@@ -386,4 +557,9 @@ createServer((req, res) => {
   console.log(
     `pzm-steam-relay listening on http://0.0.0.0:${PORT} (paths with or without /steam prefix both accepted)`,
   );
+  console.log("=".repeat(72));
+  console.log(`反馈查看 token（${ADMIN_TOKEN_BITS} 位随机，仅本次启动有效，重启后更换）：`);
+  console.log(ADMIN_TOKEN);
+  console.log("把它输入 feedback-viewer 本地页面即可查看反馈；不要外泄。");
+  console.log("=".repeat(72));
 });

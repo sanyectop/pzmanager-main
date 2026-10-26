@@ -32,3 +32,7 @@ pzmodsample/
 
 # 中转服务器本地运行时生成的反馈文件（服务器上由 FEEDBACK_DIR 管理）
 steam-relay/feedback/
+
+# feedback-viewer 本地虚拟环境与缓存
+feedback-viewer/.venv/
+feedback-viewer/__pycache__/
