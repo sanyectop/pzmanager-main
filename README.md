@@ -37,6 +37,18 @@ cd src-tauri; cargo test      # Rust：解析、配置改写、事务回滚、�
 node --test tests/            # 前端：源码/配置契约断言（Node ≥ 22）
 ```
 
+## 不随仓库推送的目录
+
+以下目录只保留在本地，`.gitignore` 已按目录名拦截，`git push` 不会包含它们；目录名后缀即标注：
+
+| 目录 | 用途 | 部署去向 |
+| --- | --- | --- |
+| `steam-relay(服务端请勿上传)/` | Steam 网络加速的中转服务器（Node 单文件） | 自有服务器（systemd / Docker，见其 README） |
+| `update-api(服务端请勿上传)/` | 启动器更新源（`api/latest.json` 等） | Cloudflare Pages（Direct Upload，发版时手动更新部署） |
+| `feedback-viewer(开发人员工具请勿上传)/` | 反馈查看器（本地 Flask 页面） | 仅管理员本机运行，不部署 |
+
+这些目录的改动不会进入提交历史；若重命名或移动，需同步更新 `.gitignore`。
+
 ## 环境要求
 
 * Windows x64（游戏、启动器、覆盖层 DLL 必须同为 64 位）
