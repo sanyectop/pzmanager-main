@@ -7,6 +7,8 @@
  *   ANY  /api/*            → https://api.steampowered.com/*      工坊详情 + 新闻 API
  *   GET  /images/<host>/*  → 白名单 Steam 图片 CDN（预览图兜底）
  *   GET  /healthz          → {"ok":true}，客户端「测试连接」用
+ *   POST /feedback         → 接收启动器「设置 › 关于 › 反馈信息」上传的日志+描述，
+ *                            存到 FEEDBACK_DIR（默认 ./feedback）下的 JSON 文件
  *
  * 路由同时容忍带 /steam 前缀（反代挂在共享域名子路径时）和不带（独占子域时），
  * 例如 /steam/community/... 与 /community/... 等价。
@@ -17,6 +19,9 @@
  */
 
 import { createServer } from "node:http";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 
 const PORT = Number(process.env.PORT) || 8787;
 const UPSTREAM_TIMEOUT_MS = 20_000;
@@ -26,6 +31,18 @@ const CACHE_TTL_MS = 300_000;
 // 图片 URL 带内容哈希，缓存久一点也没关系。
 const IMAGE_CACHE_TTL_MS = 3_600_000;
 const CACHE_MAX_ENTRIES = 300;
+
+// ---- 反馈上传 ----
+// 日志存这里（相对 server.js 的工作目录）；可用环境变量改到数据盘。
+const FEEDBACK_DIR = process.env.FEEDBACK_DIR || join(process.cwd(), "feedback");
+// 单个请求体上限：两个日志各封顶 4MB（客户端截断），留出 JSON 转义余量。
+const FEEDBACK_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const FEEDBACK_MAX_DESCRIPTION = 5000;
+const FEEDBACK_MAX_FILES = 4;
+const FEEDBACK_RATE_LIMIT = 10; // 每 IP 每小时
+const FEEDBACK_RATE_WINDOW_MS = 60 * 60 * 1000;
+/** ip -> 提交时间戳数组（只在内存里，重启清零）。 */
+const feedbackHits = new Map();
 
 // 与 src/steamRelay.ts 的 STEAM_IMAGE_HOSTS、src-tauri/src/steam_relay.rs 的
 // STEAM_IMAGE_HOSTS 保持一致；改这里必须同步另外两处。
@@ -89,6 +106,141 @@ function logRequest(req, path, status, startedAt) {
   );
 }
 
+function clientIp(req) {
+  // Cloudflare 代理开着时源站看到的是 CF 的 IP，真实来源在 CF-Connecting-IP。
+  const forwarded = req.headers["cf-connecting-ip"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.trim();
+  }
+  return req.socket.remoteAddress || "unknown";
+}
+
+/** 每 IP 每小时最多 FEEDBACK_RATE_LIMIT 次，超了返回 true。 */
+function feedbackRateLimited(ip) {
+  const now = Date.now();
+  const hits = (feedbackHits.get(ip) || []).filter(
+    (time) => now - time < FEEDBACK_RATE_WINDOW_MS,
+  );
+  const limited = hits.length >= FEEDBACK_RATE_LIMIT;
+  if (!limited) {
+    hits.push(now);
+  }
+  feedbackHits.set(ip, hits);
+  // 顺手清掉已经过窗口的 IP，避免 map 无限增长。
+  if (feedbackHits.size > 5000) {
+    for (const [key, value] of feedbackHits) {
+      if (value.every((time) => now - time >= FEEDBACK_RATE_WINDOW_MS)) {
+        feedbackHits.delete(key);
+      }
+    }
+  }
+  return limited;
+}
+
+async function readBodyLimited(req, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) {
+      const error = new Error("body_too_large");
+      error.tooLarge = true;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * POST /feedback：启动器「设置 › 关于 › 反馈信息」上传的日志 + 错误描述。
+ * 每条请求落一个 JSON 文件到 FEEDBACK_DIR，文件名即反馈编号。
+ */
+async function handleFeedback(req, res, startedAt) {
+  if (req.method !== "POST") {
+    logRequest(req, "feedback", 405, startedAt);
+    jsonResponse(res, 405, '{"error":"method_not_allowed"}');
+    return;
+  }
+  const ip = clientIp(req);
+  if (feedbackRateLimited(ip)) {
+    logRequest(req, "feedback", 429, startedAt);
+    jsonResponse(res, 429, '{"error":"rate_limited"}');
+    return;
+  }
+
+  let raw;
+  try {
+    raw = await readBodyLimited(req, FEEDBACK_MAX_BODY_BYTES);
+  } catch (error) {
+    const status = error.tooLarge ? 413 : 400;
+    logRequest(req, "feedback", status, startedAt);
+    jsonResponse(
+      res,
+      status,
+      JSON.stringify({ error: error.tooLarge ? "body_too_large" : "body_unreadable" }),
+    );
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(raw.toString("utf8"));
+  } catch {
+    logRequest(req, "feedback", 400, startedAt);
+    jsonResponse(res, 400, '{"error":"invalid_json"}');
+    return;
+  }
+
+  const description = String(payload?.description ?? "")
+    .trim()
+    .slice(0, FEEDBACK_MAX_DESCRIPTION);
+  if (!description) {
+    logRequest(req, "feedback", 400, startedAt);
+    jsonResponse(res, 400, '{"error":"description_required"}');
+    return;
+  }
+
+  const rawFiles = Array.isArray(payload?.files) ? payload.files.slice(0, FEEDBACK_MAX_FILES) : [];
+  const files = rawFiles.map((file) => ({
+    name: String(file?.name ?? "log").slice(0, 64),
+    content: String(file?.content ?? ""),
+    truncated: Boolean(file?.truncated),
+    missing: Boolean(file?.missing),
+  }));
+  if (files.length === 0 || files.every((file) => file.missing || !file.content)) {
+    logRequest(req, "feedback", 400, startedAt);
+    jsonResponse(res, 400, '{"error":"no_logs"}');
+    return;
+  }
+
+  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const id = `${stamp}-${randomBytes(3).toString("hex")}`;
+  const record = {
+    id,
+    receivedAt: new Date().toISOString(),
+    ip,
+    description,
+    client: payload?.client ?? null,
+    files,
+  };
+  try {
+    await mkdir(FEEDBACK_DIR, { recursive: true });
+    await writeFile(join(FEEDBACK_DIR, `${id}.json`), JSON.stringify(record, null, 2), "utf8");
+  } catch (error) {
+    console.error(`${new Date().toISOString()} feedback write failed:`, error);
+    logRequest(req, "feedback", 500, startedAt);
+    jsonResponse(res, 500, '{"error":"storage_failed"}');
+    return;
+  }
+
+  console.log(
+    `${new Date().toISOString()} feedback ${id} from ${ip}: ${description.slice(0, 80).replace(/\s+/g, " ")}`,
+  );
+  logRequest(req, "feedback", 200, startedAt);
+  jsonResponse(res, 200, JSON.stringify({ ok: true, id }));
+}
+
 async function handle(req, res) {
   const startedAt = Date.now();
   if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "POST") {
@@ -105,6 +257,11 @@ async function handle(req, res) {
   if (path === "healthz") {
     logRequest(req, path, 200, startedAt);
     jsonResponse(res, 200, JSON.stringify({ ok: true, now: Date.now() }));
+    return;
+  }
+
+  if (path === "feedback") {
+    await handleFeedback(req, res, startedAt);
     return;
   }
 

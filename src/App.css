@@ -2105,6 +2105,13 @@ body {
   max-width: 60rem;
 }
 
+/* 「设置 › 关于 › 反馈信息」弹窗：错误描述框撑满弹窗宽度，允许纵向拖大。 */
+.pz-feedback-dialog textarea {
+  width: 100%;
+  min-height: 8rem;
+  resize: vertical;
+}
+
 .pz-translator-textarea {
   min-height: 9rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

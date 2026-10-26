@@ -12,6 +12,7 @@ Steam API 中转站(独立项目,零依赖 Node 服务器),解决大陆用户直
 | `ANY /api/*` | `https://api.steampowered.com/*`(详情 / 新闻 API,POST 表单透传) | GET 300s,POST 不缓存 |
 | `GET /images/<host>/*` | 白名单 Steam 图片 CDN(见 `IMAGE_HOSTS`) | 3600s |
 | `GET /healthz` | 无上游调用,返回 `{"ok":true}` | 无 |
+| `POST /feedback` | 启动器「设置 › 关于 › 反馈信息」上传的日志 + 错误描述 | 不缓存 |
 
 路径带不带 `/steam` 前缀等价(`/community/...` 与 `/steam/community/...`
 均可),方便挂在独占子域或共享域名子路径下。缓存为进程内存(上限 300 条,
@@ -78,6 +79,35 @@ curl -s -o /dev/null -w "%{http_code}\n" \
   "http://127.0.0.1:8787/images/shared.cloudflare.steamstatic.com/"
 # 再请求一次上面任一 GET,响应头出现 x-relay-cache: hit 即缓存生效
 ```
+
+## 反馈上传(/feedback)
+
+启动器「设置 › 关于 › 反馈信息」把**最近一次启动**的日志和用户描述 POST 到这里,
+每条请求落一个 JSON 文件:
+
+```
+feedback/20261026144545-c8bbab.json
+{
+  "id": "20261026144545-c8bbab",
+  "receivedAt": "...", "ip": "...",
+  "description": "用户填的错误详情",
+  "client": { "appVersion": "1.1.261026", "os": "windows", "arch": "x86_64", "sentAt": 1793025945 },
+  "files": [
+    { "name": "overlay.log", "content": "...", "truncated": false, "missing": false },
+    { "name": "console.txt", "content": "...", "truncated": false, "missing": false }
+  ]
+}
+```
+
+- 存储目录:`FEEDBACK_DIR` 环境变量,默认 `./feedback`(相对启动时的工作目录)。
+  systemd 单元里可加 `Environment=FEEDBACK_DIR=/var/lib/pzm-steam-relay/feedback`。
+- 查看:服务器上 `ls -lt feedback/ | head`,`cat feedback/<编号>.json`(文件名即编号,
+  启动器提交成功后会显示给用户)。
+- 限制:单个请求体 10MB(客户端每个日志封顶 4MB,超出只传尾部并标 `truncated`);
+  描述 5000 字;每 IP 每小时 10 次(内存计数,重启清零);日志里不会存请求头。
+- 客户端行为:`%TEMP%\overlay.log` **只取最后一次「已加载」之后的部分**,
+  `%USERPROFILE%\Zomboid\console.txt` 本身是游戏每次启动重写,直接上传。
+- 上传直达本服务(不跟随系统代理),避免残留死代理让反馈本身发不出去。
 
 ## 客户端对应关系
 

@@ -14,6 +14,7 @@ use tauri::Emitter;
 use zip::ZipArchive;
 
 mod downloader;
+mod feedback;
 mod memclean;
 mod news;
 mod news_translation;
@@ -4538,6 +4539,12 @@ async fn detect_steam_proxy() -> Vec<steam_relay::ProxyProbe> {
     steam_relay::detect_local_proxies().await
 }
 
+/// 设置 › 关于 › 反馈信息：上传最近一次启动的日志 + 用户描述。
+#[tauri::command]
+async fn submit_feedback(description: String) -> Result<feedback::FeedbackUploadResult, String> {
+    feedback::submit_feedback(description).await
+}
+
 /// 设置页「Steam 网络加速 › 测试连接」：探一下中转的 /healthz，报耗时。
 /// 探测失败也返回 Ok（结果里的 ok=false），让前端展示原因而不是当命令错误。
 #[derive(Debug, Clone, Serialize)]
@@ -5821,6 +5828,7 @@ pub fn run() {
             save_steam_relay_settings,
             save_steam_proxy,
             detect_steam_proxy,
+            submit_feedback,
             ping_steam_relay,
             get_memory_status,
             clean_memory_now,
