@@ -30,6 +30,8 @@ reqwest = { version = "0.13.5", default-features = false, features = [
     "charset",
     "http2",
     "system-proxy",
+    # 本地代理设置支持 socks5:// 地址（Clash/V2Ray 等常暴露 socks 端口）。
+    "socks",
     # TLS 后端使用 Windows 原生 schannel（native-tls），而不是 reqwest 默认的
     # rustls + aws-lc-rs。aws-lc-sys 需要在构建期调用 MSVC 的 cl.exe 编译 C 代码，
     # 本机历史上出现过 "error D8050: 无法执行 c1.dll" 导致的构建失败。

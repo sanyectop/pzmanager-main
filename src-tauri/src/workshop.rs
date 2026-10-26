@@ -404,8 +404,9 @@ fn cache_html(url: &str, html: String) {
     }
 }
 
-async fn fetch_html_from(url: &str) -> Result<String, String> {
-    let response = reqwest::Client::new()
+/// `relay = true` 时用绕过系统代理的客户端（中转直连可达，见 steam_relay 模块）。
+async fn fetch_html_from(url: &str, relay: bool) -> Result<String, String> {
+    let response = crate::steam_relay::steam_client(relay)
         .get(url)
         .header("User-Agent", STEAM_USER_AGENT)
         .header("Accept-Language", STEAM_ACCEPT_LANGUAGE)
@@ -448,7 +449,7 @@ pub(crate) async fn fetch_workshop(filters: WorkshopFilters) -> Result<WorkshopR
     let mut errors = Vec::new();
     for source in crate::steam_relay::sources_for(&steam_url) {
         let label = if source.relay { "中转" } else { "直连" };
-        let failure = match fetch_html_from(&source.url).await {
+        let failure = match fetch_html_from(&source.url, source.relay).await {
             Ok(html) => match workshop_response_from(&html, &steam_url) {
                 Some(response) => {
                     crate::steam_relay::note_source_result(&source, true);
