@@ -488,6 +488,8 @@ type AppSettings = {
   steamRelayMode: string | null;
   /** 「Steam 网络加速」的中转地址；null/空 = 内置默认。 */
   steamRelayBase: string | null;
+  /** 「Steam 网络加速 › 本地代理」；null/空 = 不用显式代理。 */
+  steamProxy: string | null;
 };
 
 /** 后端 save_fast_launch 的返回值：是否创建/恢复了备份。 */
@@ -2776,6 +2778,11 @@ function App() {
   const [steamRelayTesting, setSteamRelayTesting] = useState(false);
   /** 「测试连接」的结果文案；null = 还没测过。 */
   const [steamRelayPing, setSteamRelayPing] = useState<string | null>(null);
+  const [steamProxy, setSteamProxy] = useState("");
+  const [steamProxySaving, setSteamProxySaving] = useState(false);
+  const [steamProxyDetecting, setSteamProxyDetecting] = useState(false);
+  /** 「自动检测」的结果文案；null = 还没测过。 */
+  const [steamProxyHint, setSteamProxyHint] = useState<string | null>(null);
   /** 实际生效的中转地址：输入框留空 = 内置默认。 */
   const effectiveSteamRelayBase = steamRelayBase.trim() || DEFAULT_STEAM_RELAY_BASE;
   const [backgroundUrl, setBackgroundUrl] = useState<string | null>(null);
@@ -3074,6 +3081,45 @@ function App() {
       setSteamRelayPing(`连接失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setSteamRelayTesting(false);
+    }
+  }
+
+  /** 本地代理：空串 = 清空（退回系统代理）。后端会校验格式并明确报错。 */
+  async function saveSteamProxy(proxy: string) {
+    setSteamProxySaving(true);
+    try {
+      await invoke("save_steam_proxy", { proxy });
+      setSteamProxyHint(null);
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setSteamProxySaving(false);
+    }
+  }
+
+  /** 自动检测本地代理：扫常见 HTTP/SOCKS 端口，只保留真能访问 Steam 的。 */
+  async function detectSteamProxy() {
+    if (steamProxyDetecting) {
+      return;
+    }
+    setSteamProxyDetecting(true);
+    setSteamProxyHint(null);
+    try {
+      const found = await invoke<Array<{ proxy: string; latencyMs: number }>>("detect_steam_proxy");
+      if (found.length === 0) {
+        setSteamProxyHint("没有检测到可用的本地代理。装了 Clash / V2Ray 等工具的话，请在其界面确认「混合端口 / HTTP 端口」后手动填入。");
+        return;
+      }
+      const best = found[0];
+      setSteamProxy(best.proxy);
+      await invoke("save_steam_proxy", { proxy: best.proxy });
+      setSteamProxyHint(
+        `已选用 ${best.proxy}（往返 ${best.latencyMs} ms）${found.length > 1 ? `，共发现 ${found.length} 个可用代理` : ""}`,
+      );
+    } catch (error: unknown) {
+      setSteamProxyHint(`检测失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSteamProxyDetecting(false);
     }
   }
 
@@ -4341,6 +4387,7 @@ function App() {
               ? ""
               : (settingsResult.value.steamRelayBase ?? ""),
           );
+          setSteamProxy(settingsResult.value.steamProxy ?? "");
         }
         if (memoryResult.status === "rejected") {
           setMemoryError(
@@ -6880,7 +6927,9 @@ function App() {
       <Box mt="5">
         <Text color="gray.800" fontSize="sm" fontWeight="700">Steam 网络加速</Text>
         <Text color="gray.500" fontSize="xs" mt="1">
-          大陆网络直连 Steam 创意工坊会失败：开启后经中转服务器访问工坊列表、项目详情和开发者新闻，预览图加载失败时也走中转兜底。
+          大陆网络直连 Steam 创意工坊会失败：默认经中转服务器访问工坊列表、项目详情和开发者新闻，预览图加载失败时也走中转兜底。
+          UU 这类只加速 Steam 客户端的工具不会接管启动器，开着也仍需中转；如果你装了 Clash / V2Ray
+          等带本地端口的代理，填在下面通常比中转更快。
         </Text>
         <HStack align="center" gap="2" mt="3" wrap="wrap">
           <WorkshopDropdown
@@ -6919,6 +6968,47 @@ function App() {
             mt="2"
           >
             {steamRelayPing}
+          </Text>
+        )}
+        <HStack align="center" gap="2" mt="3" wrap="wrap">
+          <Input
+            aria-label="本地代理"
+            disabled={steamProxySaving}
+            placeholder="本地代理（可选）：http://127.0.0.1:7897"
+            value={steamProxy}
+            width="18rem"
+            onBlur={() => void saveSteamProxy(steamProxy)}
+            onChange={(event) => setSteamProxy(event.currentTarget.value)}
+          />
+          <Button
+            disabled={steamProxyDetecting}
+            size="sm"
+            variant="outline"
+            onClick={() => void detectSteamProxy()}
+          >
+            {steamProxyDetecting ? "检测中…" : "自动检测"}
+          </Button>
+          {steamProxy && (
+            <Button
+              disabled={steamProxySaving}
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setSteamProxy("");
+                void saveSteamProxy("");
+              }}
+            >
+              清除
+            </Button>
+          )}
+        </HStack>
+        {steamProxyHint && (
+          <Text
+            color={steamProxyHint.startsWith("已选用") ? "green.700" : "gray.600"}
+            fontSize="xs"
+            mt="2"
+          >
+            {steamProxyHint}
           </Text>
         )}
       </Box>

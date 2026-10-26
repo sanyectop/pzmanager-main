@@ -97,6 +97,110 @@ pub(crate) fn normalize_relay_base(base: &str) -> String {
     }
 }
 
+/// 本地代理归一化：接受 `127.0.0.1:7897`（无 scheme 时补 http://）、
+/// http/https/socks5 三种 scheme；其它值视为无效返回 None。
+pub(crate) fn normalize_steam_proxy(proxy: &str) -> Option<String> {
+    let trimmed = proxy.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let (scheme, rest) = with_scheme.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https" | "socks5" | "socks5h") {
+        return None;
+    }
+    let rest = rest.trim_end_matches('/');
+    // 必须带端口：本地代理几乎都是 127.0.0.1:port 形态，缺端口基本是填错了。
+    let (host, port) = rest.rsplit_once(':')?;
+    if host.is_empty() || port.parse::<u16>().ok().filter(|port| *port > 0).is_none() {
+        return None;
+    }
+    Some(format!("{scheme}://{rest}"))
+}
+
+/// 读取设置页「Steam 网络加速 › 本地代理」；空 / 无效 = 不用显式代理
+/// （退回 reqwest 默认的 Windows 系统代理 / 环境变量）。
+pub(crate) fn configured_proxy() -> Option<String> {
+    crate::app_settings_path()
+        .ok()
+        .and_then(|path| crate::load_app_settings_at(&path).ok())
+        .and_then(|settings| settings.steam_proxy)
+        .and_then(|proxy| normalize_steam_proxy(&proxy))
+}
+
+/// Steam 请求统一从这里取客户端：
+/// - 官方直连（`relay = false`）：配了本地代理就用它，否则保持默认行为
+///   （reqwest 自动读系统代理 / 环境变量，开着系统代理型加速器时直接受益）；
+/// - 中转 / 健康检查（`relay = true`）：始终 `.no_proxy()`。中转服务器在大陆
+///   直连可达，不能被失效的残留系统代理（如加速器异常退出留下的死端口）拖死。
+pub(crate) fn steam_client(relay: bool) -> reqwest::Client {
+    let builder = reqwest::Client::builder();
+    if relay {
+        return builder.no_proxy().build().unwrap_or_else(|_| reqwest::Client::new());
+    }
+    match configured_proxy().and_then(|proxy| reqwest::Proxy::all(&proxy).ok()) {
+        Some(proxy) => builder
+            .proxy(proxy)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
+        None => builder.build().unwrap_or_else(|_| reqwest::Client::new()),
+    }
+}
+
+/// 本地代理是否可用（设置页「自动检测」）：并行探常见 HTTP/SOCKS 端口，
+/// 只有真能访问 Steam 的才算通过。返回可用代理地址 + 耗时，按耗时升序。
+const COMMON_PROXY_PORTS: [u16; 7] = [7897, 7890, 1080, 10808, 10809, 2080, 7891];
+
+pub(crate) async fn detect_local_proxies() -> Vec<ProxyProbe> {
+    // 探测目标用新闻 API（体积小、国内直连通常通但被墙时必失败）。
+    const PROBE_URL: &str =
+        "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=108600&count=1&maxlength=1&format=json";
+    let mut tasks = Vec::new();
+    for port in COMMON_PROXY_PORTS {
+        tasks.push(tokio::spawn(async move {
+            let proxy_url = format!("http://127.0.0.1:{port}");
+            let Ok(proxy) = reqwest::Proxy::all(&proxy_url) else {
+                return None;
+            };
+            let client = reqwest::Client::builder().proxy(proxy).build().ok()?;
+            let started = Instant::now();
+            let response = client
+                .get(PROBE_URL)
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            match response {
+                Ok(response) if response.status().is_success() => Some(ProxyProbe {
+                    proxy: proxy_url,
+                    latency_ms,
+                }),
+                _ => None,
+            }
+        }));
+    }
+    let mut found = Vec::new();
+    for task in tasks {
+        if let Ok(Some(probe)) = task.await {
+            found.push(probe);
+        }
+    }
+    found.sort_by_key(|probe| probe.latency_ms);
+    found
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyProbe {
+    pub(crate) proxy: String,
+    pub(crate) latency_ms: u64,
+}
+
 /// 当前生效的中转配置（模式 + 地址）：读 settings.json，读不到 / 没写过
 /// 都用默认值。请求不频繁（工坊列表带防抖、新闻页手动刷新），每次现读即可。
 pub(crate) fn relay_config() -> (String, String) {
@@ -232,7 +336,7 @@ pub(crate) async fn send_with_relay(
     let (mode, base) = relay_config();
     let mut errors = Vec::new();
     for source in steam_sources(official_url, &mode, &base) {
-        let request = build(reqwest::Client::new(), &source.url).timeout(timeout);
+        let request = build(steam_client(source.relay), &source.url).timeout(timeout);
         let response = request
             .send()
             .await
@@ -259,9 +363,31 @@ pub(crate) async fn send_with_relay(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_relay_base, normalize_relay_mode, relay_url_for, steam_sources_with,
-        DEFAULT_RELAY_BASE, DEFAULT_RELAY_MODE,
+        normalize_relay_base, normalize_relay_mode, normalize_steam_proxy, relay_url_for,
+        steam_sources_with, DEFAULT_RELAY_BASE, DEFAULT_RELAY_MODE,
     };
+
+    #[test]
+    fn normalizes_local_proxy_input() {
+        // 只有地址没写 scheme 时补 http://（最常见的填法）。
+        assert_eq!(
+            normalize_steam_proxy("127.0.0.1:7897").as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        assert_eq!(
+            normalize_steam_proxy("  HTTP://127.0.0.1:7897/ ").as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        assert_eq!(
+            normalize_steam_proxy("socks5://127.0.0.1:1080").as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+        // 无效值：空、缺端口、不支持的 scheme、端口不是数字。
+        assert_eq!(normalize_steam_proxy(""), None);
+        assert_eq!(normalize_steam_proxy("127.0.0.1"), None);
+        assert_eq!(normalize_steam_proxy("ftp://127.0.0.1:21"), None);
+        assert_eq!(normalize_steam_proxy("http://127.0.0.1:abc"), None);
+    }
 
     #[test]
     fn normalizes_relay_mode_case_insensitively() {

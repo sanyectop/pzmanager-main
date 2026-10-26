@@ -1960,6 +1960,9 @@ struct AppSettings {
     steam_relay_mode: Option<String>,
     /// 「Steam 网络加速」的中转地址；空 = 内置默认（steam_relay::DEFAULT_RELAY_BASE）。
     steam_relay_base: Option<String>,
+    /// 「Steam 网络加速 › 本地代理」：如 `http://127.0.0.1:7897` 或
+    /// `socks5://127.0.0.1:1080`；空 / 无效 = 不用显式代理（走系统代理）。
+    steam_proxy: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4467,6 +4470,11 @@ fn get_app_settings() -> Result<AppSettings, String> {
     settings.steam_relay_base = Some(steam_relay::normalize_relay_base(
         settings.steam_relay_base.as_deref().unwrap_or(""),
     ));
+    // 本地代理：写坏了按「没配」处理（空串），退回系统代理行为。
+    settings.steam_proxy = settings
+        .steam_proxy
+        .as_deref()
+        .and_then(steam_relay::normalize_steam_proxy);
     Ok(settings)
 }
 
@@ -4507,6 +4515,29 @@ fn save_steam_relay_settings(mode: String, base: String) -> Result<(), String> {
     save_app_settings_at(&path, &settings)
 }
 
+/// 设置页「本地代理」：空串 = 清空（退回系统代理）。填了但不合法时明确报错，
+/// 免得用户以为设上了其实没生效。
+#[tauri::command]
+fn save_steam_proxy(proxy: String) -> Result<(), String> {
+    let normalized = if proxy.trim().is_empty() {
+        None
+    } else {
+        Some(steam_relay::normalize_steam_proxy(&proxy).ok_or_else(|| {
+            format!("代理地址无效: {proxy}（示例：http://127.0.0.1:7897 或 socks5://127.0.0.1:1080）")
+        })?)
+    };
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.steam_proxy = normalized;
+    save_app_settings_at(&path, &settings)
+}
+
+/// 设置页「自动检测本地代理」：探常见 HTTP/SOCKS 端口，返回真能访问 Steam 的。
+#[tauri::command]
+async fn detect_steam_proxy() -> Vec<steam_relay::ProxyProbe> {
+    steam_relay::detect_local_proxies().await
+}
+
 /// 设置页「Steam 网络加速 › 测试连接」：探一下中转的 /healthz，报耗时。
 /// 探测失败也返回 Ok（结果里的 ok=false），让前端展示原因而不是当命令错误。
 #[derive(Debug, Clone, Serialize)]
@@ -4521,7 +4552,8 @@ struct SteamRelayPingResult {
 async fn ping_steam_relay(base: String) -> Result<SteamRelayPingResult, String> {
     let base = steam_relay::normalize_relay_base(&base);
     let started = std::time::Instant::now();
-    let result = reqwest::Client::new()
+    // 与真实中转请求一致：绕过系统代理（残留死代理不该影响中转探测）。
+    let result = steam_relay::steam_client(true)
         .get(format!("{base}/healthz"))
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -5787,6 +5819,8 @@ pub fn run() {
             save_silent_memory_cleanup,
             save_clean_memory_on_launch,
             save_steam_relay_settings,
+            save_steam_proxy,
+            detect_steam_proxy,
             ping_steam_relay,
             get_memory_status,
             clean_memory_now,
@@ -5972,6 +6006,7 @@ mod tests {
             wallpaper_effect: None,
             steam_relay_mode: Some("relay".to_string()),
             steam_relay_base: Some("https://mirror.example/steam".to_string()),
+            steam_proxy: Some("socks5://127.0.0.1:1080".to_string()),
         };
 
         save_app_settings_at(&path, &settings).unwrap();
