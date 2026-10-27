@@ -78,8 +78,6 @@ mod overlay {
     const GL_BLEND: u32 = 0x0000_0BE2;
     /// 默认纹理单元（GL 1.3 的 `glActiveTexture` 参数）。
     const GL_TEXTURE0: u32 = 0x0000_84C0;
-    /// 强制换帧的最小间隔。
-    const FORCED_FRAME_INTERVAL: Duration = Duration::from_millis(200);
 
     // 地址缓存哨兵值。
     const PTR_UNRESOLVED: u64 = 0;
@@ -128,23 +126,12 @@ mod overlay {
     static UI_UPLOAD_LOGGED: AtomicBool = AtomicBool::new(false);
     /// 「GL 视口异常」只记一次日志的打点。
     static VIEWPORT_PROBLEM_LOGGED: AtomicBool = AtomicBool::new(false);
-    /// 界面图始终产不出来时"放弃绘制"只记一次日志的打点。
-    static IMAGE_GAVE_UP_LOGGED: AtomicBool = AtomicBool::new(false);
-    /// 第一次绘制的时间（宽限期从这里起算）。
-    static FIRST_PAINT_AT: OnceLock<Instant> = OnceLock::new();
-    /// 界面图宽限期：超过这个时长还没有界面内容，就不再用纯色挡住游戏。
-    const IMAGE_GRACE_PERIOD: Duration = Duration::from_secs(12);
     /// 「glGenTextures 失败」只记一次日志的打点。
     static TEXTURE_GEN_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     /// `glActiveTexture`（GL 1.3）地址缓存，opengl32.dll 不导出，只能运行时解析。
     static ACTIVE_TEXTURE: AtomicU64 = AtomicU64::new(PTR_UNRESOLVED);
-    /// 上一次强制换帧的时间戳（毫秒，来自 Instant 的单调时钟）。
-    static LAST_FORCED_FRAME: AtomicU64 = AtomicU64::new(0);
-    /// `wglMakeCurrent` 原始函数指针。
-    static ORIGINAL_MAKE_CURRENT: AtomicU64 = AtomicU64::new(0);
     /// 两个被 Hook 的目标地址（结束时要按地址摘掉 Hook）。
     static SWAP_TARGET: AtomicU64 = AtomicU64::new(0);
-    static MAKE_CURRENT_TARGET: AtomicU64 = AtomicU64::new(0);
     /// 日志时间的相对基准。
     static LOG_START: OnceLock<Instant> = OnceLock::new();
     /// 日志文件写锁：hook 线程 / 界面线程 / 初始化线程都会写，不加锁会出现行交错。
@@ -157,9 +144,6 @@ mod overlay {
     type GlBindFramebufferFn = unsafe extern "system" fn(target: u32, framebuffer: u32);
     /// `void glActiveTexture(GLenum texture)`（GL 1.3，opengl32.dll 不导出）。
     type GlActiveTextureFn = unsafe extern "system" fn(texture: u32);
-    /// `BOOL wglMakeCurrent(HDC, HGLRC)`。
-    type WglMakeCurrentFn =
-        unsafe extern "system" fn(hdc: *mut c_void, hglrc: *mut c_void) -> i32;
 
     // opengl32.dll 只导出 OpenGL 1.1 函数，因此这里声明的都是 GL 1.1 里确实存在的入口点，
     // 直接静态链接即可，不需要额外的 OpenGL 绑定 crate。
@@ -199,7 +183,6 @@ mod overlay {
         fn glVertex2f(x: f32, y: f32);
         fn glPixelStorei(pname: u32, param: i32);
         fn wglGetProcAddress(lpszproc: PCSTR) -> *const c_void;
-        fn wglGetCurrentDC() -> *mut c_void;
         fn wglGetCurrentContext() -> *mut c_void;
     }
 
@@ -298,7 +281,8 @@ mod overlay {
                                 "wglSwapBuffers Hook 已启用: target=0x{:X} original=0x{:X}",
                                 target as usize, original as usize
                             ));
-                            install_make_current_hook(opengl32);
+                            // 强制呈现机制已下线（见 install_make_current_hook 的注释）：
+                            // 加载期可见性由界面线程的 GDI BitBlt 负责。
                             install_gdi_swap_hook();
                             start_stop_watcher();
                         }
@@ -331,8 +315,6 @@ mod overlay {
 
         if !FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
             log("首次进入 wglSwapBuffers Hook（opengl32 路径），注入链路已打通。");
-            // 通知界面线程：游戏开始换帧了，GDI 直接贴窗口 DC 的路径可以退场。
-            crate::ui::mark_swap_seen();
             // 通知启动器：覆盖层已经真正画上第一帧（红色已可见）。
             let started = STARTED_EVENT.load(Ordering::Acquire);
             if started != 0 {
@@ -367,7 +349,6 @@ mod overlay {
 
         if !GDI_FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
             log("首次进入 SwapBuffers Hook（gdi32 路径），注入链路已打通。");
-            crate::ui::mark_swap_seen();
             let started = STARTED_EVENT.load(Ordering::Acquire);
             if started != 0 {
                 let _ = unsafe {
@@ -394,6 +375,11 @@ mod overlay {
     /// 部分 LWJGL 胶水直接调它（这类机器上 opengl32!wglSwapBuffers 的换帧数为 0，
     /// 覆盖层永远出不来——见 docs/overlay-injection.md §7 的兜底方案）。
     /// 两条路径同帧都触发时由 should_paint_this_frame 去重，不会画两遍。
+    ///
+    /// （`wglMakeCurrent` 强制呈现机制已整体下线：它会在主菜单等场景周期性闪出
+    /// 覆盖层帧，且在游戏加载期几乎不呈现的机器上画出的经常是视口未就绪的纯红——
+    /// "红屏无字"与"主菜单闪红"都源于此。加载期可见性由界面线程的 GDI BitBlt 负责，
+    /// 它不依赖 GL 上下文、每 40ms 主动绘制、只在游戏最近没有换帧时启用。）
     fn install_gdi_swap_hook() {
         // SAFETY: 只是查询已加载模块；gdi32 在任何 GUI 进程里都已加载。
         let Some(gdi32) = (unsafe { GetModuleHandleA(PCSTR::from_raw(GDI32_DLL.as_ptr())) })
@@ -448,71 +434,6 @@ mod overlay {
         }
     }
 
-    /// 额外 Hook `wglMakeCurrent`：上下文刚绑定（还没开始换帧）时，直接替游戏画一帧并呈现，
-    /// 这样窗口内的加载界面不用等游戏自己的渲染循环跑起来。
-    fn install_make_current_hook(opengl32: HMODULE) {
-        // SAFETY: opengl32 是已加载模块；导出名合法。
-        let Some(proc) = (unsafe {
-            GetProcAddress(
-                opengl32,
-                PCSTR::from_raw(WGL_MAKE_CURRENT.as_ptr()),
-            )
-        }) else {
-            log("未找到 wglMakeCurrent 导出，跳过提前换帧。");
-            return;
-        };
-        let target = proc as usize as *mut c_void;
-        if (target as usize) < MIN_VALID_PROC_ADDRESS {
-            return;
-        }
-
-        // SAFETY: target 来自 opengl32 导出表；回调签名一致且不 panic。
-        unsafe {
-            match MinHook::create_hook(target, hooked_wgl_make_current as *mut c_void) {
-                Ok(original) => {
-                    ORIGINAL_MAKE_CURRENT.store(original as usize as u64, Ordering::Release);
-                    MAKE_CURRENT_TARGET.store(target as usize as u64, Ordering::Release);
-                    if let Err(status) = MinHook::enable_hook(target) {
-                        ORIGINAL_MAKE_CURRENT.store(0, Ordering::Release);
-                        let _ = MinHook::remove_hook(target);
-                        log(&format!("wglMakeCurrent Hook 启用失败（{status}），仅依赖正常换帧。"));
-                    } else {
-                        log("wglMakeCurrent Hook 已启用（用于提前换帧）。");
-                    }
-                }
-                Err(status) => {
-                    log(&format!("wglMakeCurrent Hook 创建失败（{status}）。"));
-                }
-            }
-        }
-    }
-
-    unsafe extern "system" fn hooked_wgl_make_current(
-        hdc: *mut c_void,
-        hglrc: *mut c_void,
-    ) -> i32 {
-        let original = ORIGINAL_MAKE_CURRENT.load(Ordering::Acquire);
-        if original == 0 {
-            return 0;
-        }
-        let original_fn: WglMakeCurrentFn =
-            unsafe { std::mem::transmute(original as usize as *const c_void) };
-        let result = unsafe { original_fn(hdc, hglrc) };
-
-        // 只在"上下文已经变成 current"且**游戏还没开始换帧**时，限流地替游戏画一帧。
-        // 这个 hook 的用途是补"上下文已绑定、但渲染循环还没跑起来"的空档；
-        // 游戏开始换帧之后再强制呈现，只会在主菜单等场景里周期性闪出覆盖层帧。
-        if result != 0
-            && OVERLAY_ACTIVE.load(Ordering::Acquire)
-            && !crate::ui::swap_seen()
-            && can_force_frame()
-        {
-            // SAFETY: 刚刚 MakeCurrent 成功，当前线程持有 GL 上下文。
-            unsafe { force_present_frame() };
-        }
-        result
-    }
-
     /// 覆盖层结束后**彻底退出 DLL 代码**：停界面线程 → 摘掉全部 Hook → 卸载本 DLL。
     ///
     /// 摘掉 Hook 后游戏就完全回到原始 `wglSwapBuffers` / `wglMakeCurrent`，不再有任何我们的代码被调用；
@@ -538,14 +459,6 @@ mod overlay {
             }
             ORIGINAL_SWAP_BUFFERS.store(0, Ordering::Release);
 
-            let make_current_target =
-                MAKE_CURRENT_TARGET.swap(0, Ordering::AcqRel) as usize as *mut c_void;
-            if !make_current_target.is_null() {
-                let _ = MinHook::disable_hook(make_current_target);
-                let _ = MinHook::remove_hook(make_current_target);
-            }
-            ORIGINAL_MAKE_CURRENT.store(0, Ordering::Release);
-
             let gdi_swap_target =
                 GDI_SWAP_TARGET.swap(0, Ordering::AcqRel) as usize as *mut c_void;
             if !gdi_swap_target.is_null() {
@@ -562,41 +475,6 @@ mod overlay {
         // 因此改为：摘掉全部 Hook + 停掉自绘线程 → 游戏侧不再有任何我们的代码被调用，
         // 模块保持驻留（不占 CPU、不再绘制），等游戏进程退出时由系统回收。
         log("已摘除全部 Hook，覆盖层代码停止（DLL 保持驻留以避免卸载风险）。");
-    }
-
-    /// 限流：两次强制换帧之间至少间隔 `FORCED_FRAME_INTERVAL`。
-    fn can_force_frame() -> bool {
-        // 见下方 shutdown_overlay()：这里只做限流。
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|value| value.as_millis() as u64)
-            .unwrap_or(0);
-        let last = LAST_FORCED_FRAME.load(Ordering::Acquire);
-        if now.saturating_sub(last) < FORCED_FRAME_INTERVAL.as_millis() as u64 {
-            return false;
-        }
-        LAST_FORCED_FRAME.store(now, Ordering::Release);
-        true
-    }
-
-    /// 用当前上下文画一帧加载界面并呈现。
-    unsafe fn force_present_frame() {
-        let original_swap = ORIGINAL_SWAP_BUFFERS.load(Ordering::Acquire);
-        if original_swap == 0 {
-            return;
-        }
-        let dc = unsafe { wglGetCurrentDC() };
-        if dc.is_null() {
-            return;
-        }
-        // SAFETY: 当前线程上下文有效；绘制逻辑内部自行保存/恢复状态。
-        unsafe {
-            paint_red_frame();
-            let swap: WglSwapBuffersFn =
-                std::mem::transmute(original_swap as usize as *const c_void);
-            swap(dc);
-        }
     }
 
     /// 覆盖绘制闸门：只做一次原子读，停止后完全不再碰 GL；同一帧的重复触发直接跳过。
@@ -698,22 +576,19 @@ mod overlay {
 
     /// 用 OpenGL 原生调用把整块默认帧缓冲刷成覆盖层背景色，随后恢复被改动的状态。
     unsafe fn paint_red_frame() {
-        // 兜底：界面图迟迟产不出来时，纯色覆盖只会把游戏自己的加载画面挡住，
-        // 表现为"红屏无字"且看不出任何进展。超过宽限期就停止绘制（让游戏自己的
-        // 画面出来），并留下一条明确日志；界面一旦就绪会立刻恢复绘制。
+        // 铁律：界面图没就绪就一帧都不画。裸背景帧一旦呈现，而游戏此后长时间
+        // 不再呈现（实测有机器整个加载期只有 1 次换帧），屏幕上就是一块
+        // 持续到主菜单的纯色——宁可放行游戏自己的首帧。
         if !crate::ui::image_available() {
-            let waited = FIRST_PAINT_AT
-                .get_or_init(Instant::now)
-                .elapsed();
-            if waited >= IMAGE_GRACE_PERIOD {
-                if !IMAGE_GAVE_UP_LOGGED.swap(true, Ordering::Relaxed) {
-                    log(&format!(
-                        "界面图 {:.0}s 内始终未生成，暂停覆盖绘制（改为显示游戏自身画面）；界面就绪后会自动恢复。",
-                        waited.as_secs_f32()
-                    ));
-                }
-                return;
+            let count = UI_IMAGE_NONE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if count <= 3 || count % 500 == 0 {
+                let (dib_width, dib_height, rgba_len, has_dc, has_bits) =
+                    crate::ui::image_debug_state();
+                log(&format!(
+                    "界面数据尚未就绪，本帧不绘制（第 {count} 次）：DIB={dib_width}x{dib_height} rgba={rgba_len}B dc={has_dc} bits={has_bits}"
+                ));
             }
+            return;
         }
         unsafe {
             // 保存全部服务端属性（含 clear color、scissor 等），最后一次性还原。
@@ -1067,8 +942,8 @@ mod overlay {
 
     const OPENGL32_DLL: &[u8] = b"opengl32.dll\0";
     const GDI32_DLL: &[u8] = b"gdi32.dll\0";
-    const GDI_SWAP_BUFFERS: &[u8] = b"SwapBuffers\0";    const WGL_SWAP_BUFFERS: &[u8] = b"wglSwapBuffers\0";
-    const WGL_MAKE_CURRENT: &[u8] = b"wglMakeCurrent\0";
+    const GDI_SWAP_BUFFERS: &[u8] = b"SwapBuffers\0";
+    const WGL_SWAP_BUFFERS: &[u8] = b"wglSwapBuffers\0";
 }
 
 /// 供 `ui` / `fastlaunch` 等模块写 `%TEMP%\overlay.log` 的统一入口。
