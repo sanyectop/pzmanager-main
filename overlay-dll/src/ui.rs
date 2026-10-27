@@ -1,4 +1,4 @@
-//! 游戏窗口**内部**的加载界面：红底 + 左下角最新 6 行控制台输出 + 底部居中进度条。
+//! 游戏窗口**内部**的加载界面：可自定义的背景色 + 左下角最新 6 行控制台输出 + 底部居中进度条。
 //!
 //! 两个阶段都用同一个 GDI 渲染出来的画面（DIB）：
 //! * 游戏还没开始换帧：直接 `BitBlt` 到游戏窗口 DC（窗口内容归 GDI 管）；
@@ -34,6 +34,8 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 
 /// 启动器写入的状态文件名（位于 `%TEMP%`）。
 pub const STATUS_FILE: &str = "pz_overlay_status.txt";
+/// 覆盖层默认背景色（纯红）——启动器没配置自定义颜色时使用。
+pub const DEFAULT_BACKGROUND: (u8, u8, u8) = (255, 0, 0);
 /// 界面显示的控制台行数。
 const MAX_LINES: usize = 6;
 /// 加载界面刷新间隔：40ms ≈ 25fps（换帧前的 GDI 重绘 / 换帧后的纹理更新都以它为准）。
@@ -97,6 +99,8 @@ struct UiState {
     body_font: isize,
     logo_big: isize,
     logo_small: isize,
+    /// 背景色（RGB）。默认纯红；启动器可通过状态文件的 `bgcolor=#RRGGBB` 覆盖。
+    background: (u8, u8, u8),
 }
 
 // SAFETY: 上面保存的都是 GDI 句柄/内存地址，只在 UI 线程与渲染线程里受锁保护地使用。
@@ -128,6 +132,7 @@ fn state() -> &'static Mutex<UiState> {
             body_font: 0,
             logo_big: 0,
             logo_small: 0,
+            background: DEFAULT_BACKGROUND,
         })
     })
 }
@@ -140,7 +145,7 @@ pub fn start(game_pid: u32) {
     let spawned = std::thread::Builder::new()
         .name("pz-overlay-ui".to_string())
         .spawn(move || {
-            // 界面线程一旦死亡，GL 阶段就只剩红底、没有任何界面内容，
+            // 界面线程一旦死亡，GL 阶段就只剩背景色、没有任何界面内容，
             // 因此 panic 必须落日志，否则"红屏无字"无从排查。
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(game_pid)));
             if let Err(panic) = result {
@@ -149,7 +154,7 @@ pub fn start(game_pid: u32) {
         });
     if spawned.is_err() {
         STARTED.store(false, Ordering::SeqCst);
-        crate::log_ui("创建界面线程失败，覆盖层将只有红底、没有任何界面内容。");
+        crate::log_ui("创建界面线程失败，覆盖层将只有背景色、没有任何界面内容。");
     }
 }
 
@@ -236,7 +241,7 @@ fn run(game_pid: u32) {
             Ok(ui) => ui.running,
             Err(_) => {
                 if !MUTEX_POISON_LOGGED.swap(true, Ordering::Relaxed) {
-                    crate::log_ui("界面状态互斥锁已中毒，界面线程退出（GL 侧此后只剩红底）。");
+                    crate::log_ui("界面状态互斥锁已中毒，界面线程退出（GL 侧此后只剩背景色）。");
                 }
                 break;
             }
@@ -274,7 +279,7 @@ fn run(game_pid: u32) {
                 && !WINDOW_MISSING_LOGGED.swap(true, Ordering::Relaxed)
             {
                 crate::log_ui(&format!(
-                    "启动 {elapsed:.0}s 后仍未找到游戏进程的可见窗口，GL 覆盖层将没有界面内容（只有红底）。"
+                    "启动 {elapsed:.0}s 后仍未找到游戏进程的可见窗口，GL 覆盖层将没有界面内容（只有背景色）。"
                 ));
             }
         }
@@ -307,6 +312,8 @@ fn poll_status_file() {
     let mut progress = 0.0f32;
     let mut has_progress = false;
     let mut lines: VecDeque<String> = VecDeque::new();
+    // 启动器下发的自定义背景色；格式不对就保持当前颜色。
+    let mut background: Option<(u8, u8, u8)> = None;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("progress=") {
             progress = value.trim().parse().unwrap_or(progress);
@@ -318,6 +325,8 @@ fn poll_status_file() {
                     MEMORY_LIMIT_MB.set(limit).ok();
                 }
             }
+        } else if let Some(value) = line.strip_prefix("bgcolor=") {
+            background = parse_hex_color(value);
         } else if let Some(value) = line.strip_prefix("phase=") {
             phase = value.trim().to_string();
         } else if let Some(value) = line.strip_prefix("line=") {
@@ -326,12 +335,16 @@ fn poll_status_file() {
             }
         }
     }
-    if phase.is_empty() && lines.is_empty() {
+    if phase.is_empty() && lines.is_empty() && background.is_none() {
         return;
     }
 
     if let Ok(mut ui) = state().lock() {
-        if ui.progress != progress || ui.phase != phase || ui.lines != lines {
+        let background_changed = background.is_some_and(|rgb| rgb != ui.background);
+        if ui.progress != progress || ui.phase != phase || ui.lines != lines || background_changed {
+            if let Some(rgb) = background {
+                ui.background = rgb;
+            }
             ui.progress = progress;
             ui.has_progress = has_progress;
             ui.phase = phase;
@@ -340,6 +353,65 @@ fn poll_status_file() {
             IMAGE_VERSION.store(ui.version, Ordering::Release);
         }
     }
+}
+
+/// 当前背景色（RGB）——GL 侧 `glClear` 要和 DIB 里的底色一致。
+pub fn background_rgb() -> (u8, u8, u8) {
+    state()
+        .lock()
+        .map(|ui| ui.background)
+        .unwrap_or(DEFAULT_BACKGROUND)
+}
+
+/// 解析 `#RGB` / `#RRGGBB`（`#` 可省）。格式不对返回 None，调用方保留旧颜色。
+fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
+    let hex = value.trim().trim_start_matches('#');
+    let digits: Vec<u8> = hex
+        .chars()
+        .map(|ch| ch.to_digit(16).map(|digit| digit as u8))
+        .collect::<Option<Vec<u8>>>()?;
+    match digits.len() {
+        3 => Some((
+            digits[0] * 17,
+            digits[1] * 17,
+            digits[2] * 17,
+        )),
+        6 => Some((
+            digits[0] * 16 + digits[1],
+            digits[2] * 16 + digits[3],
+            digits[4] * 16 + digits[5],
+        )),
+        _ => None,
+    }
+}
+
+/// GDI 的 COLORREF 是 0x00BBGGRR（注意与常见 RGB 顺序相反）。
+fn colorref(rgb: (u8, u8, u8)) -> COLORREF {
+    let (red, green, blue) = rgb;
+    COLORREF((red as u32) | ((green as u32) << 8) | ((blue as u32) << 16))
+}
+
+/// 按背景亮度选前景色：深底用白字、浅底用近黑字，避免用户选浅色后文字看不见。
+/// 阈值用 Rec. 601 加权亮度（0–255）。
+fn ink_for(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    let (red, green, blue) = rgb;
+    let luminance =
+        0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32;
+    if luminance > 150.0 {
+        (24, 24, 28)
+    } else {
+        (255, 255, 255)
+    }
+}
+
+/// 进度条底槽：在背景色上压暗，保持与背景同一色相。
+fn track_for(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    let (red, green, blue) = rgb;
+    (
+        (red as f32 * 0.55) as u8,
+        (green as f32 * 0.55) as u8,
+        (blue as f32 * 0.55) as u8,
+    )
 }
 
 /// 把界面画到游戏窗口 DC 上（游戏还没换帧时使用）。
@@ -372,7 +444,7 @@ fn paint_to_window(
     if !ensure_dib(ui, width, height) {
         if !DIB_FAILURE_LOGGED.swap(true, Ordering::Relaxed) {
             crate::log_ui(&format!(
-                "创建界面 DIB 失败（{width}x{height}），GL 覆盖层将没有界面内容（只有红底）。"
+                "创建界面 DIB 失败（{width}x{height}），GL 覆盖层将没有界面内容（只有背景色）。"
             ));
         }
         return;
@@ -517,7 +589,7 @@ fn release_dib(ui: &mut UiState) {
     ui.height = 0;
 }
 
-/// 把红底 + 控制台行 + 进度条画进 DIB，并同步 RGBA 缓冲（供 GL 上传）。
+/// 把背景色 + 控制台行 + 进度条画进 DIB，并同步 RGBA 缓冲（供 GL 上传）。
 fn render_image(
     ui: &mut UiState,
     font: windows::Win32::Graphics::Gdi::HFONT,
@@ -559,9 +631,14 @@ fn render_image(
             right: width,
             bottom: height,
         };
-        let red = CreateSolidBrush(COLORREF(0x0000_00FF));
-        FillRect(memory_dc, &background, red);
-        let _ = DeleteObject(HGDIOBJ(red.0));
+        // 背景由启动器设置（默认纯红）；文字与进度条颜色按背景亮度推导，
+        // 用户选浅色背景时自动改用深色字，避免"白字看不见"。
+        let background_rgb = ui.background;
+        let ink = colorref(ink_for(background_rgb));
+        let track_color = colorref(track_for(background_rgb));
+        let background_brush = CreateSolidBrush(colorref(background_rgb));
+        FillRect(memory_dc, &background, background_brush);
+        let _ = DeleteObject(HGDIOBJ(background_brush.0));
 
         let _ = SetBkMode(memory_dc, TRANSPARENT);
         // 字体/字号由 rebuild_fonts 按 DPI 生成（正文 18 DIP），这里只用状态里缓存的句柄。
@@ -581,7 +658,7 @@ fn render_image(
             right: mem_bar_left + mem_bar_width,
             bottom: mem_top + mem_height,
         };
-        let mem_track_brush = CreateSolidBrush(COLORREF(0x0040_0000));
+        let mem_track_brush = CreateSolidBrush(track_color);
         FillRect(memory_dc, &mem_track, mem_track_brush);
         let _ = DeleteObject(HGDIOBJ(mem_track_brush.0));
         let mem_filled = (mem_bar_width as f32 * mem_ratio) as i32;
@@ -592,11 +669,11 @@ fn render_image(
                 right: (mem_bar_left + mem_filled).max(mem_bar_left + 3),
                 bottom: mem_top + mem_height - 2,
             };
-            let mem_fill_brush = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+            let mem_fill_brush = CreateSolidBrush(ink);
             FillRect(memory_dc, &mem_fill, mem_fill_brush);
             let _ = DeleteObject(HGDIOBJ(mem_fill_brush.0));
         }
-        let mem_border = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+        let mem_border = CreateSolidBrush(ink);
         FrameRect(memory_dc, &mem_track, mem_border);
         let _ = DeleteObject(HGDIOBJ(mem_border.0));
         let mem_label = format!("JVM Memory  {used_mb} / {max_mb} MB  {:.0}%", mem_ratio * 100.0);
@@ -607,7 +684,7 @@ fn render_image(
             right: mem_bar_left + mem_bar_width,
             bottom: mem_label_top + mem_label_height,
         };
-        let _ = SetTextColor(memory_dc, COLORREF(0x00FF_FFFF));
+        let _ = SetTextColor(memory_dc, ink);
         DrawTextW(
             memory_dc,
             &mut mem_label_buffer,
@@ -625,7 +702,7 @@ fn render_image(
             right: width,
             bottom: center_top + logo_title_height,
         };
-        let _ = SetTextColor(memory_dc, COLORREF(0x00FF_FFFF));
+        let _ = SetTextColor(memory_dc, ink);
         DrawTextW(
             memory_dc,
             &mut title_buffer,
@@ -640,7 +717,7 @@ fn render_image(
             right: separator_left + separator_width,
             bottom: separator_top + separator_height,
         };
-        let separator_brush = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+        let separator_brush = CreateSolidBrush(ink);
         FillRect(memory_dc, &separator, separator_brush);
         let _ = DeleteObject(HGDIOBJ(separator_brush.0));
         SelectObject(memory_dc, HGDIOBJ(ui.logo_small as *mut c_void));
@@ -683,7 +760,7 @@ fn render_image(
         let animation_corners =
             rotated_square(animation_cx, animation_cy, animation_size, angle_degrees);
         let thickness = ((2.0 * ui.scale).round() as i32).max(1);
-        let pen = CreatePen(PS_SOLID, thickness, COLORREF(0x00FF_FFFF));
+        let pen = CreatePen(PS_SOLID, thickness, ink);
         if !pen.0.is_null() {
             let previous_pen = SelectObject(memory_dc, HGDIOBJ(pen.0));
             let outline = [
@@ -701,7 +778,7 @@ fn render_image(
         }
         // 顶点小方块，强化"被画出来"的观感
         let dot_radius = ((animation_size * 0.12).round() as i32).max(1);
-        let dot_brush = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+        let dot_brush = CreateSolidBrush(ink);
         for corner in animation_corners {
             let (x, y) = (corner.0.round() as i32, corner.1.round() as i32);
             let dot = RECT {
@@ -730,7 +807,7 @@ fn render_image(
                 right: (width - left_margin).max(48),
                 bottom: y + line_height,
             };
-            let _ = SetTextColor(memory_dc, COLORREF(0x00FF_FFFF));
+            let _ = SetTextColor(memory_dc, ink);
             DrawTextW(
                 memory_dc,
                 &mut buffer,
@@ -758,7 +835,7 @@ fn render_image(
             right: bar_left + bar_width,
             bottom: label_top + label_height,
         };
-        let _ = SetTextColor(memory_dc, COLORREF(0x00FF_FFFF));
+        let _ = SetTextColor(memory_dc, ink);
         DrawTextW(
             memory_dc,
             &mut label_buffer,
@@ -772,7 +849,7 @@ fn render_image(
             right: bar_left + bar_width,
             bottom: bar_top + bar_height,
         };
-        let track_brush = CreateSolidBrush(COLORREF(0x0040_0000));
+        let track_brush = CreateSolidBrush(track_color);
         FillRect(memory_dc, &track, track_brush);
         let _ = DeleteObject(HGDIOBJ(track_brush.0));
 
@@ -788,11 +865,11 @@ fn render_image(
                 right: (bar_left + filled).max(bar_left + 3),
                 bottom: bar_top + bar_height - 2,
             };
-            let fill_brush = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+            let fill_brush = CreateSolidBrush(ink);
             FillRect(memory_dc, &fill, fill_brush);
             let _ = DeleteObject(HGDIOBJ(fill_brush.0));
         }
-        let border_brush = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+        let border_brush = CreateSolidBrush(ink);
         FrameRect(memory_dc, &track, border_brush);
         let _ = DeleteObject(HGDIOBJ(border_brush.0));
 
@@ -892,13 +969,36 @@ fn progress_percent(progress: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::progress_percent;
+    use super::{ink_for, parse_hex_color, progress_percent, track_for};
 
     #[test]
     fn loading_progress_does_not_round_up_to_one_hundred() {
         assert_eq!(progress_percent(0.995), 99);
         assert_eq!(progress_percent(0.999), 99);
         assert_eq!(progress_percent(1.0), 100);
+    }
+
+    /// 启动器下发的是 CSS 颜色：接受 #RGB / #RRGGBB，宽容大小写与省略 #。
+    #[test]
+    fn parses_hex_background_colors() {
+        assert_eq!(parse_hex_color("#FF0000"), Some((255, 0, 0)));
+        assert_eq!(parse_hex_color("ff8800"), Some((255, 136, 0)));
+        assert_eq!(parse_hex_color("  #0f0 "), Some((0, 255, 0)));
+        assert_eq!(parse_hex_color("#123456"), Some((18, 52, 86)));
+        // 格式不对时返回 None，覆盖层保留当前颜色（不会变成黑色）。
+        assert_eq!(parse_hex_color("#GGGGGG"), None);
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color(""), None);
+    }
+
+    /// 深色背景用白字、浅色背景用深色字；进度条底槽是同色相的压暗版本。
+    #[test]
+    fn picks_readable_ink_and_track_for_background() {
+        assert_eq!(ink_for((255, 0, 0)), (255, 255, 255));
+        assert_eq!(ink_for((0, 0, 0)), (255, 255, 255));
+        assert_eq!(ink_for((255, 255, 255)), (24, 24, 28));
+        assert_eq!(ink_for((255, 235, 59)), (24, 24, 28));
+        assert_eq!(track_for((200, 100, 50)), (110, 55, 27));
     }
 }
 

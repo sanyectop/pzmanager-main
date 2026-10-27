@@ -197,6 +197,8 @@ mod imp {
         /// 是否已经有"真实进度"（拿到 advice 分母之后才为 true）。
         has_progress: bool,
         memory_limit_mb: Option<u64>,
+        /// 覆盖层背景色（`#RRGGBB`）。None = 让 DLL 用它自己的默认纯红。
+        background_color: Option<String>,
     }
 
     impl StatusFile {
@@ -204,11 +206,16 @@ mod imp {
             let path = std::env::temp_dir().join("pz_overlay_status.txt");
             // 清掉上一局残留，避免界面一开始就显示上次的终值（例如 89%/100%）。
             let _ = std::fs::remove_file(&path);
-            // 内存上限取启动器设置里的值（游戏侧命令行看不到 JSON 里的 -Xmx）。
-            let memory_limit_mb = crate::app_settings_path()
+            // 内存上限 / 覆盖层背景色都取启动器设置里的值
+            // （游戏侧命令行看不到 JSON 里的 -Xmx，DLL 也读不到 settings.json）。
+            let loaded_settings = crate::app_settings_path()
                 .ok()
-                .and_then(|settings| crate::load_app_settings_at(&settings).ok())
-                .and_then(|settings| settings.memory_limit_mb);
+                .and_then(|settings| crate::load_app_settings_at(&settings).ok());
+            let memory_limit_mb = loaded_settings.as_ref().and_then(|settings| settings.memory_limit_mb);
+            let background_color = loaded_settings
+                .and_then(|settings| settings.overlay_background_color)
+                .as_deref()
+                .and_then(crate::normalize_overlay_background_color);
             Self {
                 path,
                 last_write: Instant::now() - Duration::from_secs(1),
@@ -217,6 +224,7 @@ mod imp {
                 progress: 0.0,
                 has_progress: false,
                 memory_limit_mb,
+                background_color,
             }
         }
 
@@ -282,6 +290,9 @@ mod imp {
             text.push_str(&format!("phase={}\n", self.phase));
             if let Some(limit) = self.memory_limit_mb {
                 text.push_str(&format!("memmax={limit}\n"));
+            }
+            if let Some(color) = &self.background_color {
+                text.push_str(&format!("bgcolor={color}\n"));
             }
             for line in &self.lines {
                 text.push_str("line=");
