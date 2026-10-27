@@ -58,10 +58,25 @@ static WINDOW_FOUND: AtomicBool = AtomicBool::new(false);
 static WINDOW_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 /// 「DIB 创建失败」只记一次日志的打点。
 static DIB_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 「界面绘制前置条件不满足」只记一次日志的打点。
+static RENDER_PRECHECK_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 「界面状态锁取不到」只记一次日志的打点（红色无字时的重要线索）。
+static UI_LOCK_UNAVAILABLE_LOGGED: AtomicBool = AtomicBool::new(false);
 /// 「界面状态互斥锁中毒」只记一次日志的打点。
 static MUTEX_POISON_LOGGED: AtomicBool = AtomicBool::new(false);
 /// 「客户区拿不到 / 为 0×0」只记一次日志的打点（两个失败点共用，都是画不出界面的同因）。
 static CLIENT_RECT_PROBLEM_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 「加载界面已生成」只记一次日志的打点。
+static IMAGE_READY_LOGGED: AtomicBool = AtomicBool::new(false);
+/// UI 线程心跳计数（排查"界面线程是否还活着 / DIB 是否还在"）。
+static HEARTBEAT_TICKS: AtomicU32 = AtomicU32::new(0);
+/// 累计换帧次数（诊断用：界面没画出来时区分"图没生成"还是"游戏不再换帧"）。
+static SWAP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// hook 每帧调用：只加一个原子计数。
+pub fn note_swap() {
+    SWAP_COUNT.fetch_add(1, Ordering::Relaxed);
+}
 /// 游戏是否已经调用过一次 `wglSwapBuffers`：换帧开始后 GL 覆盖会随每一帧出现，
 /// GDI 直接贴窗口 DC 的路径就该退场——否则它只会在低帧率/呈现间隙里"闪"出界面。
 pub static SWAP_SEEN: AtomicBool = AtomicBool::new(false);
@@ -271,6 +286,29 @@ fn run(game_pid: u32) {
                 if !swap_seen() {
                     blit_to_window(&ui, window);
                 }
+                // 埋点：界面图是否真的生成（红屏无字时这一行决定排查方向）。
+                if ui.width > 0 && ui.height > 0 && !ui.rgba.is_empty() {
+                    IMAGE_AVAILABLE.store(true, Ordering::Release);
+                    if !IMAGE_READY_LOGGED.swap(true, Ordering::Relaxed) {
+                        crate::log_ui(&format!(
+                            "加载界面已生成：DIB={}x{} rgba={}B",
+                            ui.width,
+                            ui.height,
+                            ui.rgba.len()
+                        ));
+                    }
+                }
+            } else if !UI_LOCK_UNAVAILABLE_LOGGED.swap(true, Ordering::Relaxed) {
+                crate::log_ui("界面状态锁取不到（已中毒），界面无法绘制（只记一次）。");
+            }
+            // 心跳：约每 10 秒一次，最多 20 条，用来判断 UI 线程有没有卡死。
+            let tick = HEARTBEAT_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            if tick % 250 == 0 && tick / 250 <= 20 {
+                let (width, height, rgba_len, has_dc, has_bits) = image_debug_state();
+                crate::log_ui(&format!(
+                    "UI 线程心跳 #{tick}：DIB={width}x{height} rgba={rgba_len}B dc={has_dc} bits={has_bits} 换帧={}",
+                    SWAP_COUNT.load(Ordering::Relaxed)
+                ));
             }
             ensure_window_active_or_redraw(window);
         } else if !WINDOW_FOUND.load(Ordering::Acquire) {
@@ -597,6 +635,12 @@ fn render_image(
     logo_small: windows::Win32::Graphics::Gdi::HFONT,
 ) -> bool {
     if ui.memory_dc == 0 || ui.bits == 0 {
+        if !RENDER_PRECHECK_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::log_ui(&format!(
+                "界面绘制前置条件不满足：memory_dc={} bits={}（DIB 像素指针为空时界面永远画不出来）。",
+                ui.memory_dc, ui.bits
+            ));
+        }
         return false;
     }
     let width = ui.width;
@@ -902,6 +946,29 @@ pub fn image() -> Option<(u64, i32, i32, Vec<u8>)> {
         return None;
     }
     Some((ui.version, ui.width, ui.height, ui.rgba.clone()))
+}
+
+/// 是否已经成功生成过界面图（GL 侧不拿锁就能判断，用于"界面产不出来就别挡游戏"的兜底）。
+static IMAGE_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// GL 侧每帧查询：界面图是否已经就绪。
+pub fn image_available() -> bool {
+    IMAGE_AVAILABLE.load(Ordering::Acquire)
+}
+
+/// 诊断用：`image()` 为空时把内部状态快照写进日志（界面缺失时唯一的线索）。
+pub fn image_debug_state() -> (i32, i32, usize, bool, bool) {
+    match state().lock() {
+        Ok(ui) => (
+            ui.width,
+            ui.height,
+            ui.rgba.len(),
+            ui.memory_dc != 0,
+            ui.bits != 0,
+        ),
+        // 锁中毒本身就是关键线索。
+        Err(_) => (-1, -1, 0, false, false),
+    }
 }
 
 /// 找到目标进程的可见主窗口（**客户区最大**的那个）。

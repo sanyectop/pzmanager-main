@@ -196,10 +196,13 @@ pub(crate) mod imp {
 
     /// 校验并规范化 DLL 路径。
     ///
-    /// 绝对路径按原样校验；相对路径先尝试发布布局（exe 目录 + 文件名），
-    /// 再依次尝试 [`relative_bases`] 里的基目录，
-    /// 因此无论是开发期从项目根启动（`npm run tauri:dev`）、从资源管理器双击 exe，
-    /// 还是安装版（DLL 作为 resource 与 exe 同目录），都能定位到同一个 DLL。
+    /// 绝对路径按原样校验；相对路径在**发布构建**里先尝试发布布局（exe 目录 + 文件名），
+    /// 再依次尝试 [`relative_bases`] 里的基目录；**开发构建**反过来：先找工作区里的构建产物。
+    ///
+    /// 为什么开发构建要反过来：`tauri dev` 会把 DLL 作为 resource 复制到 exe 旁边
+    /// （`target/debug/pz_overlay.dll`），而这份副本只在 dev 启动时刷新一次。
+    /// 之后重新 `cargo build` 的 DLL 不会自动覆盖它，于是"刚编译的改动没生效"——
+    /// 排查时看到的还是旧副本的行为（踩过：诊断埋点一行都打不出来）。
     ///
     /// 刻意不使用 `canonicalize`：它会返回 `\\?\` 前缀的扩展长度路径，
     /// 而 `LoadLibraryW` 与「模块按路径比对」对这种前缀的处理并不一致。
@@ -210,6 +213,7 @@ pub(crate) mod imp {
         }
 
         let candidate = PathBuf::from(trimmed);
+        let workspace_first = cfg!(debug_assertions);
         let absolute = if candidate.is_absolute() {
             if !candidate.is_file() {
                 return Err(format!(
@@ -218,6 +222,19 @@ pub(crate) mod imp {
                 ));
             }
             candidate
+        } else if workspace_first {
+            match first_existing_file(&relative_bases(), &candidate) {
+                Ok(found) => found,
+                Err(_) => match exe_dir_candidate(&candidate).filter(|path| path.is_file()) {
+                    Some(bundled) => bundled,
+                    None => {
+                        return Err(format!(
+                            "覆盖层 DLL 不存在或不是文件：{}",
+                            candidate.display()
+                        ))
+                    }
+                },
+            }
         } else if let Some(bundled) = exe_dir_candidate(&candidate).filter(|path| path.is_file()) {
             bundled
         } else {
