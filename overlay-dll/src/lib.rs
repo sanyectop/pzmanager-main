@@ -103,8 +103,18 @@ mod overlay {
     static FIRST_CALL_LOGGED: AtomicBool = AtomicBool::new(false);
     /// 「界面数据尚未就绪」日志的打点计数（前几次 + 间隔采样，避免刷屏）。
     static UI_IMAGE_NONE_COUNT: AtomicU32 = AtomicU32::new(0);
+    /// 「首次进入 gdi32 SwapBuffers Hook」打点。
+    static GDI_FIRST_CALL_LOGGED: AtomicBool = AtomicBool::new(false);
     /// `wglSwapBuffers` 的原始函数指针（trampoline），由 MinHook 创建时返回。
     static ORIGINAL_SWAP_BUFFERS: AtomicU64 = AtomicU64::new(0);
+    /// `gdi32!SwapBuffers` 的 hook 目标与原始指针：SwapBuffers 是 GDI 导出，
+    /// 部分 LWJGL 胶水直接调它而不经过 `opengl32!wglSwapBuffers`
+    /// （实测有机器 40 秒加载里 opengl32 换帧数为 0、游戏却正常渲染）。
+    static GDI_SWAP_TARGET: AtomicU64 = AtomicU64::new(0);
+    static ORIGINAL_GDI_SWAP: AtomicU64 = AtomicU64::new(0);
+    /// 最近一次覆盖绘制的时间（UNIX 毫秒）：两条 swap 路径可能同一帧都到，
+    /// 5ms 内的第二次绘制直接跳过，避免同一帧画两遍。
+    static LAST_PAINT_MS: AtomicU64 = AtomicU64::new(0);
     /// `glBindFramebuffer` 地址缓存（GL 3.0 函数，opengl32.dll 不导出，只能运行时解析）。
     static BIND_FRAMEBUFFER: AtomicU64 = AtomicU64::new(PTR_UNRESOLVED);
     /// 界面纹理与版本（内容变化才重新上传）。
@@ -182,6 +192,7 @@ mod overlay {
         fn glLoadIdentity();
         fn glOrtho(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64);
         fn glColor4f(red: f32, green: f32, blue: f32, alpha: f32);
+        fn glViewport(x: i32, y: i32, width: i32, height: i32);
         fn glBegin(mode: u32);
         fn glEnd();
         fn glTexCoord2f(u: f32, v: f32);
@@ -288,6 +299,7 @@ mod overlay {
                                 target as usize, original as usize
                             ));
                             install_make_current_hook(opengl32);
+                            install_gdi_swap_hook();
                             start_stop_watcher();
                         }
                         Err(status) => {
@@ -318,7 +330,7 @@ mod overlay {
         crate::ui::note_swap();
 
         if !FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
-            log("首次进入 wglSwapBuffers Hook，注入链路已打通。");
+            log("首次进入 wglSwapBuffers Hook（opengl32 路径），注入链路已打通。");
             // 通知界面线程：游戏开始换帧了，GDI 直接贴窗口 DC 的路径可以退场。
             crate::ui::mark_swap_seen();
             // 通知启动器：覆盖层已经真正画上第一帧（红色已可见）。
@@ -344,6 +356,96 @@ mod overlay {
         let original_fn: WglSwapBuffersFn =
             unsafe { std::mem::transmute(original as usize as *const c_void) };
         unsafe { original_fn(hdc) }
+    }
+
+    /// `gdi32!SwapBuffers` 的 hook 回调：与 wglSwapBuffers 完全同构。
+    /// 部分游戏/LWJGL 胶水直接调用 GDI 的 SwapBuffers 导出，
+    /// 只挂 opengl32 一侧时这些机器上换帧数为 0，覆盖层永远出不来。
+    unsafe extern "system" fn hooked_gdi_swap_buffers(hdc: *mut c_void) -> i32 {
+        let original = ORIGINAL_GDI_SWAP.load(Ordering::Acquire);
+        crate::ui::note_swap();
+
+        if !GDI_FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
+            log("首次进入 SwapBuffers Hook（gdi32 路径），注入链路已打通。");
+            crate::ui::mark_swap_seen();
+            let started = STARTED_EVENT.load(Ordering::Acquire);
+            if started != 0 {
+                let _ = unsafe {
+                    windows::Win32::System::Threading::SetEvent(
+                        windows::Win32::Foundation::HANDLE(started as usize as *mut c_void),
+                    )
+                };
+            }
+        }
+
+        paint_red_while_active();
+
+        if original == 0 {
+            return 1;
+        }
+
+        // SAFETY: original 由 MinHook 提供，指向未打补丁的原始 SwapBuffers。
+        let original_fn: WglSwapBuffersFn =
+            unsafe { std::mem::transmute(original as usize as *const c_void) };
+        unsafe { original_fn(hdc) }
+    }
+
+    /// 额外 Hook `gdi32!SwapBuffers`：SwapBuffers 本来就是 GDI 导出，
+    /// 部分 LWJGL 胶水直接调它（这类机器上 opengl32!wglSwapBuffers 的换帧数为 0，
+    /// 覆盖层永远出不来——见 docs/overlay-injection.md §7 的兜底方案）。
+    /// 两条路径同帧都触发时由 should_paint_this_frame 去重，不会画两遍。
+    fn install_gdi_swap_hook() {
+        // SAFETY: 只是查询已加载模块；gdi32 在任何 GUI 进程里都已加载。
+        let Some(gdi32) = (unsafe { GetModuleHandleA(PCSTR::from_raw(GDI32_DLL.as_ptr())) })
+            .ok()
+            .filter(|module| !module.is_invalid())
+        else {
+            log("未找到 gdi32.dll，跳过 SwapBuffers 备用 Hook。");
+            return;
+        };
+        // SAFETY: gdi32 是已加载模块；导出名合法。
+        let Some(proc) =
+            (unsafe { GetProcAddress(gdi32, PCSTR::from_raw(GDI_SWAP_BUFFERS.as_ptr())) })
+        else {
+            log("未找到 gdi32!SwapBuffers 导出，跳过备用 Hook。");
+            return;
+        };
+        let target = proc as usize as *mut c_void;
+        if (target as usize) < MIN_VALID_PROC_ADDRESS {
+            log("gdi32!SwapBuffers 导出地址异常，跳过备用 Hook。");
+            return;
+        }
+
+        // SAFETY: target 来自 gdi32 导出表；回调签名一致且不 panic。
+        unsafe {
+            match MinHook::create_hook(target, hooked_gdi_swap_buffers as *mut c_void) {
+                Ok(original) => {
+                    if original.is_null() {
+                        log("MinHook 返回了空的 gdi32 原始指针，跳过备用 Hook。");
+                        let _ = MinHook::remove_hook(target);
+                        return;
+                    }
+                    ORIGINAL_GDI_SWAP.store(original as usize as u64, Ordering::Release);
+                    match MinHook::enable_hook(target) {
+                        Ok(()) => {
+                            GDI_SWAP_TARGET.store(target as usize as u64, Ordering::Release);
+                            log(&format!(
+                                "gdi32!SwapBuffers 备用 Hook 已启用: target=0x{:X}",
+                                target as usize
+                            ));
+                        }
+                        Err(status) => {
+                            ORIGINAL_GDI_SWAP.store(0, Ordering::Release);
+                            let _ = MinHook::remove_hook(target);
+                            log(&format!("gdi32!SwapBuffers 备用 Hook 启用失败（{status}）。"));
+                        }
+                    }
+                }
+                Err(status) => {
+                    log(&format!("gdi32!SwapBuffers 备用 Hook 创建失败（{status}）。"));
+                }
+            }
+        }
     }
 
     /// 额外 Hook `wglMakeCurrent`：上下文刚绑定（还没开始换帧）时，直接替游戏画一帧并呈现，
@@ -443,6 +545,14 @@ mod overlay {
                 let _ = MinHook::remove_hook(make_current_target);
             }
             ORIGINAL_MAKE_CURRENT.store(0, Ordering::Release);
+
+            let gdi_swap_target =
+                GDI_SWAP_TARGET.swap(0, Ordering::AcqRel) as usize as *mut c_void;
+            if !gdi_swap_target.is_null() {
+                let _ = MinHook::disable_hook(gdi_swap_target);
+                let _ = MinHook::remove_hook(gdi_swap_target);
+            }
+            ORIGINAL_GDI_SWAP.store(0, Ordering::Release);
         }
         // 注意：这里**不**调用 FreeLibraryAndExitThread。
         //
@@ -489,13 +599,31 @@ mod overlay {
         }
     }
 
-    /// 覆盖绘制闸门：只做一次原子读，停止后完全不再碰 GL。
+    /// 覆盖绘制闸门：只做一次原子读，停止后完全不再碰 GL；同一帧的重复触发直接跳过。
     fn paint_red_while_active() {
         if !OVERLAY_ACTIVE.load(Ordering::Acquire) {
             return;
         }
+        if !should_paint_this_frame() {
+            return;
+        }
         // SAFETY: 该回调由 wglSwapBuffers 触发，调用线程上一定有当前 GL 上下文。
         unsafe { paint_red_frame() };
+    }
+
+    /// 两条 swap 路径（opengl32 / gdi32）同一帧可能先后都到，5ms 内视为同一帧。
+    fn should_paint_this_frame() -> bool {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis() as u64)
+            .unwrap_or(0);
+        let last = LAST_PAINT_MS.load(Ordering::Acquire);
+        if now.saturating_sub(last) < 5 {
+            return false;
+        }
+        LAST_PAINT_MS.store(now, Ordering::Release);
+        true
     }
 
     /// 创建「已开始绘制」事件，并等待启动器的停止信号（命名事件）；同时启动安全上限计时。
@@ -648,16 +776,22 @@ mod overlay {
         unsafe {
             let mut viewport = [0_i32; 4];
             glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
-            let viewport_width = viewport[2] as f32;
-            let viewport_height = viewport[3] as f32;
+            let mut viewport_width = viewport[2] as f32;
+            let mut viewport_height = viewport[3] as f32;
+            // 视口为 0 的场景：游戏刚 MakeCurrent 还没设视口，或渲染走的是我们
+            // 看不到的路径。此时四边形永远画不出来（强制呈现帧里表现为纯红无字）。
+            // 用界面自身尺寸兜底：临时设视口绘制，画完恢复原值（视口不在 attrib 栈里）。
+            let mut viewport_overridden = false;
             if viewport_width <= 0.0 || viewport_height <= 0.0 {
-                // 视口为 0 时四边形画不出来，界面"看起来"就只有红底 —— 留下线索。
+                viewport_width = width as f32;
+                viewport_height = height as f32;
+                glViewport(0, 0, width, height);
+                viewport_overridden = true;
                 if !VIEWPORT_PROBLEM_LOGGED.swap(true, Ordering::Relaxed) {
                     log(&format!(
-                        "GL 视口异常（{viewport_width}x{viewport_height}），本帧跳过界面绘制（只记一次）。"
+                        "GL 视口为 0，改用界面尺寸 {width}x{height} 兜底绘制（只记一次）。"
                     ));
                 }
-                return;
             }
 
             // 游戏可能重建 WGL 上下文（LWJGL 常见）。纹理名属于创建它的上下文，
@@ -754,6 +888,9 @@ mod overlay {
             glPopMatrix();
             glMatrixMode(GL_MODELVIEW);
             glDisable(GL_TEXTURE_2D);
+            if viewport_overridden {
+                glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+            }
         }
     }
 
@@ -928,7 +1065,9 @@ mod overlay {
         }
     }
 
-    const OPENGL32_DLL: &[u8] = b"opengl32.dll\0";    const WGL_SWAP_BUFFERS: &[u8] = b"wglSwapBuffers\0";
+    const OPENGL32_DLL: &[u8] = b"opengl32.dll\0";
+    const GDI32_DLL: &[u8] = b"gdi32.dll\0";
+    const GDI_SWAP_BUFFERS: &[u8] = b"SwapBuffers\0";    const WGL_SWAP_BUFFERS: &[u8] = b"wglSwapBuffers\0";
     const WGL_MAKE_CURRENT: &[u8] = b"wglMakeCurrent\0";
 }
 
