@@ -73,21 +73,32 @@ static HEARTBEAT_TICKS: AtomicU32 = AtomicU32::new(0);
 /// 累计换帧次数（诊断用：界面没画出来时区分"图没生成"还是"游戏不再换帧"）。
 static SWAP_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// hook 每帧调用：只加一个原子计数。
+/// hook 每帧调用：记录换帧时间并累加计数。
 pub fn note_swap() {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or(0);
+    LAST_SWAP_MS.store(now, Ordering::Release);
     SWAP_COUNT.fetch_add(1, Ordering::Relaxed);
 }
-/// 游戏是否已经调用过一次 `wglSwapBuffers`：换帧开始后 GL 覆盖会随每一帧出现，
-/// GDI 直接贴窗口 DC 的路径就该退场——否则它只会在低帧率/呈现间隙里"闪"出界面。
-pub static SWAP_SEEN: AtomicBool = AtomicBool::new(false);
 
-/// 由 hook 线程在第一次换帧时置位。
-pub fn mark_swap_seen() {
-    SWAP_SEEN.store(true, Ordering::Release);
-}
+/// 最近一次换帧的时间（UNIX 毫秒，0 = 还没换过）。
+static LAST_SWAP_MS: AtomicU64 = AtomicU64::new(0);
 
-pub fn swap_seen() -> bool {
-    SWAP_SEEN.load(Ordering::Acquire)
+/// 游戏最近 `window_ms` 内有没有换帧。
+///
+/// 有 = 它在持续呈现，GL 覆盖随每帧出现，GDI 贴图通道退场
+/// （否则只会在呈现间隙里"闪"出界面）；
+/// 没有 = 呈现停了，或游戏根本不走被挂钩的换帧路径
+/// （实测有机器整个加载期只有 1 次换帧）——此时靠 BitBlt 维持界面可见。
+pub fn swap_recently(window_ms: u64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_SWAP_MS.load(Ordering::Acquire);
+    last != 0 && now.saturating_sub(last) < window_ms
 }
 
 struct UiState {
@@ -281,9 +292,9 @@ fn run(game_pid: u32) {
             }
             if let Ok(mut ui) = state().lock() {
                 paint_to_window(&mut ui, window, font, logo_big, logo_small);
-                // 游戏开始换帧后，GL 纹理会随每一帧覆盖全屏；
-                // BitBlt 只会卡在呈现间隙里闪现，此时停用它。
-                if !swap_seen() {
+                // 游戏最近在持续换帧时，GL 覆盖随每一帧出现，BitBlt 退场；
+                // 换帧停了（呈现间隙，或游戏不走被挂钩的换帧路径）就靠 BitBlt 维持界面。
+                if !swap_recently(500) {
                     blit_to_window(&ui, window);
                 }
                 // 埋点：界面图是否真的生成（红屏无字时这一行决定排查方向）。
