@@ -1898,6 +1898,28 @@ fn normalize_font_family(value: &str) -> Option<String> {
     Some(trimmed.chars().take(FONT_FAMILY_MAX_LEN).collect())
 }
 
+/// 覆盖层背景色：存 `#RRGGBB`；空 / 缺失 = 覆盖层默认纯红。
+/// 只接受 3 位或 6 位十六进制（`#` 可省），统一规范成大写 `#RRGGBB`，
+/// 这样状态文件里永远是一个确定格式，DLL 解析失败时会保留原色而不是变黑。
+fn normalize_overlay_background_color(value: &str) -> Option<String> {
+    let hex = value.trim().trim_start_matches('#');
+    if !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    let expanded = match hex.len() {
+        3 => hex
+            .chars()
+            .map(|ch| format!("{ch}{ch}"))
+            .collect::<String>(),
+        6 => hex.to_string(),
+        _ => return None,
+    };
+    Some(format!("#{}", expanded.to_ascii_uppercase()))
+}
+
+/// 覆盖层默认背景色（与 overlay-dll/src/ui.rs 的 DEFAULT_BACKGROUND 一致）。
+const DEFAULT_OVERLAY_BACKGROUND_COLOR: &str = "#FF0000";
+
 /// 启动器窗口尺寸（逻辑像素）：下限与两份 tauri conf 的 minWidth/minHeight 一致；
 /// 上限只是防御性的，防止手改 settings.json 写进离谱数值。
 const WINDOW_WIDTH_MIN: u32 = 840;
@@ -1935,6 +1957,8 @@ struct AppSettings {
     /// 记住的窗口尺寸（逻辑像素）。缺失 = 用 tauri.conf.json 的默认 840×560。
     window_width: Option<u32>,
     window_height: Option<u32>,
+    /// 覆盖层背景色（`#RRGGBB`）。缺失 = 默认纯红；启动器写状态文件时下发给 DLL。
+    overlay_background_color: Option<String>,
     /// 「模组加载器方案」（`zombieBuddy` / `none`），决定启动前要不要挂加载器 agent。
     mod_loader_scheme: Option<String>,
     /// 「极速启动（实验性）」：把启动器预扫描出的模组/补丁清单喂给 ZombieBuddy，
@@ -4460,6 +4484,14 @@ fn get_app_settings() -> Result<AppSettings, String> {
         .font_family
         .as_deref()
         .and_then(normalize_font_family);
+    // 覆盖层背景色：没写过或格式坏掉都按默认纯红处理，前端颜色选择器才有值可显示。
+    settings.overlay_background_color = Some(
+        settings
+            .overlay_background_color
+            .as_deref()
+            .and_then(normalize_overlay_background_color)
+            .unwrap_or_else(|| DEFAULT_OVERLAY_BACKGROUND_COLOR.to_string()),
+    );
     // Steam 网络加速：坏值回落默认（auto + 内置中转地址）。
     settings.steam_relay_mode = Some(
         settings
@@ -4614,6 +4646,15 @@ fn save_font_family(value: String) -> Result<(), String> {
     let path = app_settings_path()?;
     let mut settings = load_app_settings_at(&path)?;
     settings.font_family = normalize_font_family(&value);
+    save_app_settings_at(&path, &settings)
+}
+
+/// 覆盖层背景色（设置 › 通用）：存 `#RRGGBB`，写空串 = 恢复默认纯红。
+#[tauri::command]
+fn save_overlay_background_color(value: String) -> Result<(), String> {
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.overlay_background_color = normalize_overlay_background_color(&value);
     save_app_settings_at(&path, &settings)
 }
 
@@ -5819,6 +5860,7 @@ pub fn run() {
             save_blur_strength,
             save_font_scale,
             save_font_family,
+            save_overlay_background_color,
             save_window_size,
             restore_default_window_size,
             save_mod_loader_scheme,
@@ -5901,6 +5943,7 @@ mod tests {
         mod_poster_path, normalize_blur_strength, normalize_font_contrast, normalize_font_family,
         normalize_font_scale, normalize_mod_loader_scheme, normalize_translation_language,
         normalize_window_height, normalize_window_width, order_mod_ids_by_requires,
+        normalize_overlay_background_color,
         parse_default_mod_ids, parse_java_mod_info, parse_lua_mod_info, parse_lua_sorting_rules,
         patch_batch_content, patch_batch_content_with_memory, patch_batch_with_agent,
         patch_json_launcher_content, patch_json_launcher_content_with_memory,
@@ -6004,6 +6047,7 @@ mod tests {
             font_scale: Some(110),
             window_width: Some(970),
             window_height: Some(600),
+            overlay_background_color: Some("#1E90FF".to_string()),
             mod_loader_scheme: Some("none".to_string()),
             fast_launch: false,
             developer_mode: true,
@@ -6041,6 +6085,33 @@ mod tests {
         assert_eq!(settings.font_scale, None);
         assert_eq!(settings.window_width, None);
         assert_eq!(settings.window_height, None);
+        assert_eq!(settings.overlay_background_color, None);
+    }
+
+    /// 覆盖层背景色：接受 #RGB / #RRGGBB，统一成大写 #RRGGBB；坏值按"没设置过"处理。
+    #[test]
+    fn normalizes_overlay_background_colors() {
+        assert_eq!(
+            normalize_overlay_background_color("#1e90ff"),
+            Some("#1E90FF".to_string())
+        );
+        assert_eq!(
+            normalize_overlay_background_color("ff0"),
+            Some("#FFFF00".to_string())
+        );
+        assert_eq!(
+            normalize_overlay_background_color("  #AABBCC  "),
+            Some("#AABBCC".to_string())
+        );
+        // 坏值不能变成黑色：返回 None，覆盖层继续用默认纯红。
+        assert_eq!(normalize_overlay_background_color("#GGGGGG"), None);
+        assert_eq!(normalize_overlay_background_color("#12345"), None);
+        assert_eq!(normalize_overlay_background_color(""), None);
+        assert_eq!(
+            normalize_overlay_background_color("red"),
+            None,
+            "颜色名不支持，只接受十六进制"
+        );
     }
 
     /// 界面字号/字体与窗口尺寸的归一化：坏值要么夹到范围内，要么按"没设置过"处理。

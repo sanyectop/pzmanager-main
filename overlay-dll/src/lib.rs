@@ -561,27 +561,35 @@ mod overlay {
         }
     }
 
-    /// 用 OpenGL 原生调用把整块默认帧缓冲刷成纯红，随后恢复被改动的状态。
+    /// 用 OpenGL 原生调用把整块默认帧缓冲刷成覆盖层背景色，随后恢复被改动的状态。
     unsafe fn paint_red_frame() {
         unsafe {
             // 保存全部服务端属性（含 clear color、scissor 等），最后一次性还原。
             glPushAttrib(GL_ALL_ATTRIB_BITS);
-            // glClear 会被 scissor 裁剪，先关闭以保证整窗变红；该状态由 glPopAttrib 还原。
+            // glClear 会被 scissor 裁剪，先关闭以保证整窗刷满；该状态由 glPopAttrib 还原。
             glDisable(GL_SCISSOR_TEST);
 
             let bind_framebuffer = resolve_bind_framebuffer();
             let mut previous_binding: i32 = 0;
             if let Some(bind_framebuffer) = bind_framebuffer {
-                // 若游戏此刻正渲染到 FBO，先切回默认帧缓冲，让红色真正出现在窗口上。
+                // 若游戏此刻正渲染到 FBO，先切回默认帧缓冲，让背景色真正出现在窗口上。
                 glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut previous_binding);
                 if previous_binding != 0 {
                     bind_framebuffer(GL_FRAMEBUFFER, 0);
                 }
             }
 
-            glClearColor(1.0, 0.0, 0.0, 1.0);
+            // 与 DIB 里的底色用同一个颜色（默认纯红，可在启动器里自定义）。
+            // 界面纹理还没准备好时，这一层就是用户看到的全部画面。
+            let (red, green, blue) = crate::ui::background_rgb();
+            glClearColor(
+                red as f32 / 255.0,
+                green as f32 / 255.0,
+                blue as f32 / 255.0,
+                1.0,
+            );
             glClear(GL_COLOR_BUFFER_BIT);
-            // 在红底之上绘制加载界面。
+            // 在背景色之上绘制加载界面。
             draw_ui_texture();
 
             if let Some(bind_framebuffer) = bind_framebuffer {

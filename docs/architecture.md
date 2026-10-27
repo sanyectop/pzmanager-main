@@ -97,7 +97,7 @@ pzm/
 
 三条**跨进程契约**（改任何一边都要同步另一边，详见第 8 节）：
 
-1. 启动器 → DLL：状态文件 `%TEMP%\pz_overlay_status.txt`（阶段文字 / 进度 / 控制台尾部）；
+1. 启动器 → DLL：状态文件 `%TEMP%\pz_overlay_status.txt`（阶段文字 / 进度 / 控制台尾部 / 覆盖层背景色 `bgcolor=#RRGGBB`）；
 2. 启动器 → DLL：命名事件 `Local\PZManagerOverlayStop_<游戏PID>`（`SetEvent` 即停止覆盖）；
 3. DLL → 启动器：命名事件 `Local\PZManagerOverlayStarted_<PID>`（首帧已画，会话在此之前不做"加载完成"判定）+ `%TEMP%\overlay.log`（人读日志）。
 
@@ -346,7 +346,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | `%USERPROFILE%\Zomboid\.pzmanager\jar-mod-state.json` | 启动器 | 启动器 | JAR 模组审批决策，工坊重下后可重新套用 |
 | `%USERPROFILE%\Zomboid\.pzmanager\backgrounds\<kind>\` | 启动器 | 启动器 | 导入/合成的背景图 |
 | `<游戏目录>\.pzmanager-backups\<时间戳>\` | 启动器 | 人 | 改写 `ProjectZomboid64.json`/`.bat` 前的备份 |
-| `%TEMP%\pz_overlay_status.txt` | 启动器 | **DLL** | 阶段文字 + 进度 + 控制台尾部（覆盖层界面数据源） |
+| `%TEMP%\pz_overlay_status.txt` | 启动器 | **DLL** | 阶段文字 + 进度 + 控制台尾部 + 背景色 `bgcolor=`（覆盖层界面数据源） |
 | `%TEMP%\overlay.log` | **DLL** | 人 | Hook 安装、首次换帧、收到停止信号等 |
 | 命名事件 `Local\PZManagerOverlayStop_<pid>` | 启动器 | DLL | 停止覆盖 |
 | 命名事件 `Local\PZManagerOverlayStarted_<pid>` | DLL | 启动器 | 首帧已画，允许做完成判定 |

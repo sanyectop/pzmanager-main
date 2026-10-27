@@ -479,6 +479,8 @@ type AppSettings = {
   /** 记住的窗口尺寸（逻辑像素）；null = 使用默认 840×560。 */
   windowWidth: number | null;
   windowHeight: number | null;
+  /** 覆盖层背景色（#RRGGBB）；null = 覆盖层默认纯红。 */
+  overlayBackgroundColor: string | null;
   modLoaderScheme: string | null;
   fastLaunch: boolean;
   silentMemoryCleanup: boolean;
@@ -613,6 +615,17 @@ const FONT_FAMILY_PRESET_CSS: Record<string, string> = {
   simsun: 'SimSun, "Microsoft YaHei", serif',
   consolas: 'Consolas, "Courier New", monospace',
 };
+// 覆盖层背景色（设置 › 通用）：与 overlay-dll/src/ui.rs 的 DEFAULT_BACKGROUND 一致。
+// 文字颜色由 DLL 按背景亮度自动选（深底白字 / 浅底深字），这里只选背景。
+const DEFAULT_OVERLAY_BACKGROUND_COLOR = "#FF0000";
+const OVERLAY_BACKGROUND_PRESETS: Array<{ value: string; label: string }> = [
+  { value: "#FF0000", label: "经典红" },
+  { value: "#1E3A5F", label: "深夜蓝" },
+  { value: "#14532D", label: "森林绿" },
+  { value: "#2E1065", label: "暗紫" },
+  { value: "#1C1C1E", label: "纯黑" },
+  { value: "#F5F5F7", label: "浅灰" },
+];
 
 /** 由存储的字体值推导下拉选中项：空 = 默认；等于某预设 = 该预设；其余（自定义串）= custom。 */
 function fontFamilyChoiceFromValue(value: string): string {
@@ -2744,6 +2757,11 @@ function App() {
   const fontFamilySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 下拉框当前选中的预设项（与 fontFamily 分开记：选「自定义」时保留原值给输入框编辑）。
   const [fontFamilyChoice, setFontFamilyChoice] = useState("default");
+  // 覆盖层背景色（设置 › 通用）：下发给注入到游戏里的 DLL，下次启动游戏时生效。
+  const [overlayBackgroundColor, setOverlayBackgroundColor] = useState(
+    DEFAULT_OVERLAY_BACKGROUND_COLOR,
+  );
+  const overlayBackgroundSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 记住的窗口尺寸（仅用于设置页展示；启动时的实际恢复由后端 setup 完成）。
   const [savedWindowSize, setSavedWindowSize] = useState<[number, number] | null>(null);
   const windowSizeSaveTimerRef = useRef<number | null>(null);
@@ -4235,6 +4253,23 @@ function App() {
     }, 250);
   }
 
+  /**
+   * 覆盖层背景色：只落盘（真正生效在下次启动游戏、启动器写状态文件时），
+   * 拖动系统颜色选择器会连续触发，因此同样做 250ms 防抖。
+   */
+  function updateOverlayBackgroundColor(nextValue: string) {
+    setOverlayBackgroundColor(nextValue);
+    if (overlayBackgroundSaveTimerRef.current !== null) {
+      window.clearTimeout(overlayBackgroundSaveTimerRef.current);
+    }
+    overlayBackgroundSaveTimerRef.current = window.setTimeout(() => {
+      overlayBackgroundSaveTimerRef.current = null;
+      void invoke("save_overlay_background_color", { value: nextValue }).catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : String(error), "error");
+      });
+    }, 250);
+  }
+
   /** 静默内存清理：轮询系统占用（设置页要显示），并接收后端"已清理"事件。 */
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -4408,6 +4443,9 @@ function App() {
           const loadedFontFamily = settingsResult.value.fontFamily ?? "";
           setFontFamily(loadedFontFamily);
           setFontFamilyChoice(fontFamilyChoiceFromValue(loadedFontFamily));
+          setOverlayBackgroundColor(
+            settingsResult.value.overlayBackgroundColor ?? DEFAULT_OVERLAY_BACKGROUND_COLOR,
+          );
           if (
             settingsResult.value.windowWidth != null &&
             settingsResult.value.windowHeight != null
@@ -6989,8 +7027,64 @@ function App() {
           </Button>
         </HStack>
       </HStack>
+      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
+        <Box flex="1" minW="240px">
+          <Text color="gray.800" fontSize="sm" fontWeight="700">覆盖层背景色</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            游戏加载时覆盖层的底色（默认纯红）。文字会自动按背景深浅换成白字或深色字，
+            浅色背景也能看清。改动在下次启动游戏时生效。
+          </Text>
+        </Box>
+        <HStack gap="2" align="center" wrap="wrap">
+          {OVERLAY_BACKGROUND_PRESETS.map((preset) => {
+            const selected =
+              overlayBackgroundColor.toUpperCase() === preset.value.toUpperCase();
+            return (
+              <Button
+                aria-label={`覆盖层背景色：${preset.label}`}
+                aria-pressed={selected}
+                key={preset.value}
+                onClick={() => updateOverlayBackgroundColor(preset.value)}
+                size="sm"
+                title={preset.label}
+                variant={selected ? "solid" : "outline"}
+              >
+                <Box
+                  bg={preset.value}
+                  borderColor="gray.300"
+                  borderRadius="sm"
+                  borderWidth="1px"
+                  h="0.7rem"
+                  w="0.7rem"
+                />
+              </Button>
+            );
+          })}
+          {/* 系统取色器：Chakra Input 的 color 类型，样式规则里已排除在统一控件高度之外。 */}
+          <Input
+            aria-label="自定义覆盖层背景色"
+            onChange={(event) => updateOverlayBackgroundColor(event.target.value)}
+            title="自定义颜色"
+            type="color"
+            value={overlayBackgroundColor}
+            w="2.4rem"
+          />
+          <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+            {overlayBackgroundColor.toUpperCase()}
+          </Text>
+          {overlayBackgroundColor.toUpperCase() !== DEFAULT_OVERLAY_BACKGROUND_COLOR && (
+            <Button
+              aria-label="恢复默认覆盖层背景色"
+              onClick={() => updateOverlayBackgroundColor(DEFAULT_OVERLAY_BACKGROUND_COLOR)}
+              size="sm"
+              variant="ghost"
+            >
+              恢复默认
+            </Button>
+          )}
+        </HStack>
+      </HStack>
       <Box mt="5">
-        <Text color="gray.800" fontSize="sm" fontWeight="700">Steam 网络加速</Text>
         <Text color="gray.500" fontSize="xs" mt="1">
           大陆网络直连 Steam 创意工坊会失败：默认经中转服务器访问工坊列表、项目详情和开发者新闻，预览图加载失败时也走中转兜底。
           「自动」= 先试直连，失败自动切中转；「中转优先」= 一直走中转；「仅直连」= 不用中转（直连被墙时会打不开）。
