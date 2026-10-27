@@ -101,8 +101,8 @@ mod overlay {
     static STARTED_EVENT: AtomicU64 = AtomicU64::new(0);
     /// 第一次进入 Hook 回调时打点，避免刷日志。
     static FIRST_CALL_LOGGED: AtomicBool = AtomicBool::new(false);
-    /// 「界面数据尚未就绪」只记一次日志的打点。
-    static UI_IMAGE_NONE_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// 「界面数据尚未就绪」日志的打点计数（前几次 + 间隔采样，避免刷屏）。
+    static UI_IMAGE_NONE_COUNT: AtomicU32 = AtomicU32::new(0);
     /// `wglSwapBuffers` 的原始函数指针（trampoline），由 MinHook 创建时返回。
     static ORIGINAL_SWAP_BUFFERS: AtomicU64 = AtomicU64::new(0);
     /// `glBindFramebuffer` 地址缓存（GL 3.0 函数，opengl32.dll 不导出，只能运行时解析）。
@@ -118,6 +118,12 @@ mod overlay {
     static UI_UPLOAD_LOGGED: AtomicBool = AtomicBool::new(false);
     /// 「GL 视口异常」只记一次日志的打点。
     static VIEWPORT_PROBLEM_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// 界面图始终产不出来时"放弃绘制"只记一次日志的打点。
+    static IMAGE_GAVE_UP_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// 第一次绘制的时间（宽限期从这里起算）。
+    static FIRST_PAINT_AT: OnceLock<Instant> = OnceLock::new();
+    /// 界面图宽限期：超过这个时长还没有界面内容，就不再用纯色挡住游戏。
+    const IMAGE_GRACE_PERIOD: Duration = Duration::from_secs(12);
     /// 「glGenTextures 失败」只记一次日志的打点。
     static TEXTURE_GEN_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     /// `glActiveTexture`（GL 1.3）地址缓存，opengl32.dll 不导出，只能运行时解析。
@@ -309,6 +315,7 @@ mod overlay {
     /// Hook 回调。运行在游戏的渲染线程上，必须零 panic、零阻塞、零分配。
     unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: *mut c_void) -> i32 {
         let original = ORIGINAL_SWAP_BUFFERS.load(Ordering::Acquire);
+        crate::ui::note_swap();
 
         if !FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
             log("首次进入 wglSwapBuffers Hook，注入链路已打通。");
@@ -563,6 +570,23 @@ mod overlay {
 
     /// 用 OpenGL 原生调用把整块默认帧缓冲刷成覆盖层背景色，随后恢复被改动的状态。
     unsafe fn paint_red_frame() {
+        // 兜底：界面图迟迟产不出来时，纯色覆盖只会把游戏自己的加载画面挡住，
+        // 表现为"红屏无字"且看不出任何进展。超过宽限期就停止绘制（让游戏自己的
+        // 画面出来），并留下一条明确日志；界面一旦就绪会立刻恢复绘制。
+        if !crate::ui::image_available() {
+            let waited = FIRST_PAINT_AT
+                .get_or_init(Instant::now)
+                .elapsed();
+            if waited >= IMAGE_GRACE_PERIOD {
+                if !IMAGE_GAVE_UP_LOGGED.swap(true, Ordering::Relaxed) {
+                    log(&format!(
+                        "界面图 {:.0}s 内始终未生成，暂停覆盖绘制（改为显示游戏自身画面）；界面就绪后会自动恢复。",
+                        waited.as_secs_f32()
+                    ));
+                }
+                return;
+            }
+        }
         unsafe {
             // 保存全部服务端属性（含 clear color、scissor 等），最后一次性还原。
             glPushAttrib(GL_ALL_ATTRIB_BITS);
@@ -605,10 +629,16 @@ mod overlay {
     /// 把 GDI 渲染好的界面（RGBA）上传成 GL 纹理并画满屏四边形。
     fn draw_ui_texture() {
         let Some((version, width, height, rgba)) = crate::ui::image() else {
-            // 界面数据没就绪时本帧只剩 glClear 的红底 —— 这正是"红屏无字"的形态之一，
-            // 必须留下日志线索（具体原因由 ui 模块负责记录）。
-            if !UI_IMAGE_NONE_LOGGED.swap(true, Ordering::Relaxed) {
-                log("界面数据尚未就绪（ui::image() 为空），本帧只画红底。");
+            // 界面数据没就绪时本帧只剩背景色 —— 这正是"红屏无字"的形态。
+            // 前几帧 + 每隔一段采样把内部状态写进日志，一次就能看出断点在哪：
+            // DIB 是否建出来、rgba 是否有数据、锁是否中毒。
+            let count = UI_IMAGE_NONE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if count <= 3 || count % 500 == 0 {
+                let (dib_width, dib_height, rgba_len, has_dc, has_bits) =
+                    crate::ui::image_debug_state();
+                log(&format!(
+                    "界面数据尚未就绪（第 {count} 帧）：DIB={dib_width}x{dib_height} rgba={rgba_len}B dc={has_dc} bits={has_bits}"
+                ));
             }
             return;
         };
@@ -898,8 +928,7 @@ mod overlay {
         }
     }
 
-    const OPENGL32_DLL: &[u8] = b"opengl32.dll\0";
-    const WGL_SWAP_BUFFERS: &[u8] = b"wglSwapBuffers\0";
+    const OPENGL32_DLL: &[u8] = b"opengl32.dll\0";    const WGL_SWAP_BUFFERS: &[u8] = b"wglSwapBuffers\0";
     const WGL_MAKE_CURRENT: &[u8] = b"wglMakeCurrent\0";
 }
 
