@@ -2092,6 +2092,94 @@ body {
   max-width: 52rem;
 }
 
+/* 「设置 › 版本」：版本列表比较宽，留出比通用页更大的阅读宽度。
+   和其它设置子页一样平铺在页面上——不再给整页套浮层卡面（底色 / 圆角 /
+   阴影 / 背景模糊 / 噪点都去掉），内容由分区标题和细分割线组织。 */
+.pz-version-settings-panel {
+  max-width: 64rem;
+}
+
+/* 「设置 › 版本」正文不套卡片：分区之间只用一条细分割线，信息按行排列，
+   和「设置 › 通用」那种纯设置页排版保持一致。 */
+.pz-version-section {
+  margin-top: 1.15rem;
+  padding-top: 0.95rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-version-facts {
+  display: flex;
+  flex-direction: column;
+}
+
+.pz-version-fact {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-block: 0.3rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-version-fact:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* 左列标签不换行也不被压扁；右列值吃掉剩余宽度并右对齐。 */
+.pz-version-fact > :first-child {
+  flex: 0 0 auto;
+}
+
+.pz-version-fact > :last-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+}
+
+/* Steam 更新提示只留左侧一条状态线，不再是带底色和圆角的告警卡。 */
+.pz-version-notice {
+  margin-top: 1.15rem;
+  padding-left: 0.7rem;
+  border-left: 2px solid var(--pz-warning);
+}
+
+.pz-version-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.pz-version-entry {
+  padding-block: 0.7rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-version-entry:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.pz-version-entry-diff {
+  max-height: 220px;
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--pz-line);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 「设置 › 日志」：日志正文需要横向和纵向都留出空间。 */
+.pz-launcher-log-panel {
+  max-width: 72rem;
+}
+
+/* <pre> 默认不会自动换行；长路径必须强制在容器内折行。 */
+.pz-launcher-log-view {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word;
+}
+
 /* 「Steam 网络加速」行的两个操作按钮与同行的输入框 / 下拉触发器对齐到
    26px 设计高度：Chakra size="sm" 按钮默认 36px，不在全站控件高度规则的
    覆盖范围里（那条只管输入框 / 原生下拉 / 菜单触发器）。 */
@@ -2532,10 +2620,11 @@ body {
 }
 
 /* 所有菜单 / 多级子菜单共用这一套外观：标签选择器、筛选下拉、背景菜单、
-   创意工坊右键菜单都是 .pz-workshop-tag-menu-content（子菜单叠的 .pz-background-menu-layer
+   创意工坊与模组行的右键菜单都是 .pz-workshop-tag-menu-content（子菜单叠的 .pz-background-menu-layer
    只管层级）。亚克力 = 背景模糊 + 半透明底色 + 颗粒 + 顶边内高光；模糊参数见 --pz-menu-*。 */
 .pz-workshop-tag-menu-content,
-.pz-workshop-context-menu {
+.pz-workshop-context-menu,
+.pz-mod-context-menu {
   border: 1px solid var(--pz-line);
   border-radius: var(--pz-radius-sm);
   background-color: var(--pz-menu-tint);
@@ -2562,8 +2651,9 @@ body {
   min-width: var(--reference-width, 0px);
 }
 
-/* 创意工坊项目右键菜单：只有两项，沿用同一套亚克力外观但不需要滚动。 */
-.pz-workshop-context-menu {
+/* 右键菜单：只有两三项，沿用同一套亚克力外观但不需要滚动。 */
+.pz-workshop-context-menu,
+.pz-mod-context-menu {
   min-width: 170px;
 }
 
@@ -2789,10 +2879,16 @@ body {
   overflow: hidden;
   border: 1px solid var(--pz-line-strong);
   border-radius: var(--pz-radius-md);
-  background: var(--pz-surface-float);
-  box-shadow: var(--pz-shadow-menu);
+  /* 与菜单 / 启动页上弹面板同一套亚克力：半透明底 + 颗粒 + 背景模糊。
+     Toast 悬在任意页面之上，拿不到启动页的克隆壁纸层，所以用真的 backdrop-filter。 */
+  background-color: var(--pz-menu-tint);
+  background-image: var(--pz-menu-noise-image);
+  box-shadow:
+    var(--pz-shadow-menu),
+    inset 0 1px 0 var(--pz-menu-highlight);
   pointer-events: auto;
-  backdrop-filter: blur(calc(18px * var(--pz-blur-scale, 1)));
+  backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
+  -webkit-backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
 }
 
 .pz-toast-closing {

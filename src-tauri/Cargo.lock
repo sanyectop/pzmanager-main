@@ -2870,6 +2870,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "overlay-core"
+version = "0.1.0"
+
+[[package]]
 name = "pango"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3196,6 +3200,7 @@ dependencies = [
  "futures-util",
  "image",
  "java-class-rs",
+ "overlay-core",
  "regex",
  "reqwest",
  "serde",

@@ -8,6 +8,8 @@
 //!   只用 OpenGL 1.1 固定管线调用（`opengl32.dll` 直接导出），不引入任何 GL 绑定 crate；
 //! * Hook 由 `minhook` 完成，原始函数指针保存在 `AtomicU64`；
 //! * 阶段 / 进度 / 控制台行由启动器写入 `%TEMP%\pz_overlay_status.txt`；
+//!   状态文件带 1 秒心跳，启动器关闭/心跳超时后 `console_reader` 自己读
+//!   `%USERPROFILE%\Zomboid\console.txt`，继续更新并自行摘 Hook；
 //! * 覆盖由启动器通过命名事件（`Local\PZManagerOverlayStop_<pid>`）控制停止，
 //!   另有安全上限（默认 10 分钟）兜底，避免启动器异常时覆盖层一直不消失；
 //! * 首次真正换帧时会触发 `Local\PZManagerOverlayStarted_<pid>`，让启动器知道第一帧已经画出，
@@ -18,6 +20,7 @@
 compile_error!("pz_overlay 仅支持 Windows 目标，请使用 --target x86_64-pc-windows-msvc 构建。");
 
 mod classfile;
+mod console_reader;
 mod fastlaunch;
 mod ui;
 
@@ -89,6 +92,8 @@ mod overlay {
     static INIT_STARTED: AtomicBool = AtomicBool::new(false);
     /// 防止停止事件和安全上限线程同时执行两遍卸载流程。
     static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+    /// 自读完成已经请求过停止，避免 UI 线程每个 tick 重复 spawn。
+    static SELF_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
     /// Hook 是否已成功启用（仅用于日志与自检）。
     static HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
     /// 是否正在绘制红色覆盖。由启动器的停止信号或安全上限置为 false。
@@ -110,9 +115,16 @@ mod overlay {
     /// （实测有机器 40 秒加载里 opengl32 换帧数为 0、游戏却正常渲染）。
     static GDI_SWAP_TARGET: AtomicU64 = AtomicU64::new(0);
     static ORIGINAL_GDI_SWAP: AtomicU64 = AtomicU64::new(0);
-    /// 最近一次覆盖绘制的时间（UNIX 毫秒）：两条 swap 路径可能同一帧都到，
-    /// 5ms 内的第二次绘制直接跳过，避免同一帧画两遍。
+    /// 最近一次覆盖绘制的时间 / HDC / GL 上下文。
+    ///
+    /// 只有「同一 HDC + 同一 GL 上下文」在 5ms 内的重复触发才算同一帧；
+    /// 不同 swap 路径/上下文必须各自绘制，否则被跳过的那一路会把没有覆盖层的
+    /// 游戏画面呈现出来（42.22 加载期闪屏/黑块的直接嫌疑）。
     static LAST_PAINT_MS: AtomicU64 = AtomicU64::new(0);
+    static LAST_PAINT_HDC: AtomicU64 = AtomicU64::new(0);
+    static LAST_PAINT_CONTEXT: AtomicU64 = AtomicU64::new(0);
+    /// 覆盖绘制次数（和换帧数对比，判断是否漏掉某个呈现路径）。
+    static PAINT_COUNT: AtomicU64 = AtomicU64::new(0);
     /// `glBindFramebuffer` 地址缓存（GL 3.0 函数，opengl32.dll 不导出，只能运行时解析）。
     static BIND_FRAMEBUFFER: AtomicU64 = AtomicU64::new(PTR_UNRESOLVED);
     /// 界面纹理与版本（内容变化才重新上传）。
@@ -241,6 +253,9 @@ mod overlay {
 
         // 从这里开始接管覆盖：加载界面在游戏窗口内部绘制
         // （换帧前 GDI 直接画窗口 DC；换帧后由 GL 纹理绘制）。
+        if SHUTTING_DOWN.load(Ordering::Acquire) {
+            return;
+        }
         OVERLAY_ACTIVE.store(true, Ordering::Release);
         crate::ui::start(std::process::id());
 
@@ -271,6 +286,15 @@ mod overlay {
 
                     // 必须在 enable 之前写好原始指针：Hook 一旦生效，回调里就要用它转发。
                     ORIGINAL_SWAP_BUFFERS.store(original as usize as u64, Ordering::Release);
+
+                    // 自读回退可能在初始化期间就完成并请求停止：不要再启用 Hook。
+                    if SHUTTING_DOWN.load(Ordering::Acquire) {
+                        ORIGINAL_SWAP_BUFFERS.store(0, Ordering::Release);
+                        let _ = MinHook::remove_hook(target);
+                        OVERLAY_ACTIVE.store(false, Ordering::Release);
+                        crate::ui::stop();
+                        return;
+                    }
 
                     match MinHook::enable_hook(target) {
                         Ok(()) => {
@@ -314,7 +338,11 @@ mod overlay {
         crate::ui::note_swap();
 
         if !FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
-            log("首次进入 wglSwapBuffers Hook（opengl32 路径），注入链路已打通。");
+            let context = unsafe { wglGetCurrentContext() } as usize;
+            log(&format!(
+                "首次进入 wglSwapBuffers Hook（opengl32 路径，hdc=0x{:X} ctx=0x{:X}），注入链路已打通。",
+                hdc as usize, context
+            ));
             // 通知启动器：覆盖层已经真正画上第一帧（红色已可见）。
             let started = STARTED_EVENT.load(Ordering::Acquire);
             if started != 0 {
@@ -326,7 +354,8 @@ mod overlay {
             }
         }
 
-        paint_red_while_active();
+        crate::ui::note_started();
+        paint_red_while_active(hdc);
 
         if original == 0 {
             // 理论上不会发生（enable 之前一定先写入原始地址）。
@@ -348,7 +377,11 @@ mod overlay {
         crate::ui::note_swap();
 
         if !GDI_FIRST_CALL_LOGGED.swap(true, Ordering::Relaxed) {
-            log("首次进入 SwapBuffers Hook（gdi32 路径），注入链路已打通。");
+            let context = unsafe { wglGetCurrentContext() } as usize;
+            log(&format!(
+                "首次进入 SwapBuffers Hook（gdi32 路径，hdc=0x{:X} ctx=0x{:X}），注入链路已打通。",
+                hdc as usize, context
+            ));
             let started = STARTED_EVENT.load(Ordering::Acquire);
             if started != 0 {
                 let _ = unsafe {
@@ -359,7 +392,8 @@ mod overlay {
             }
         }
 
-        paint_red_while_active();
+        crate::ui::note_started();
+        paint_red_while_active(hdc);
 
         if original == 0 {
             return 1;
@@ -434,6 +468,23 @@ mod overlay {
         }
     }
 
+    /// 覆盖层自读完成后请求停止：从独立线程走正常的 shutdown 流程，
+    /// 避免在 UI 线程持锁或 Hook 回调里摘 Hook。
+    pub(crate) fn request_shutdown(reason: &str) {
+        if SHUTTING_DOWN.load(Ordering::Acquire)
+            || SELF_STOP_REQUESTED.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        log(&format!("自读完成：{reason}"));
+        let spawned = std::thread::Builder::new()
+            .name("pz-overlay-self-stop".to_string())
+            .spawn(|| unsafe { shutdown_overlay() });
+        if let Err(error) = spawned {
+            log(&format!("创建自读停止线程失败：{error}"));
+        }
+    }
+
     /// 覆盖层结束后**彻底退出 DLL 代码**：停界面线程 → 摘掉全部 Hook → 卸载本 DLL。
     ///
     /// 摘掉 Hook 后游戏就完全回到原始 `wglSwapBuffers` / `wglMakeCurrent`，不再有任何我们的代码被调用；
@@ -478,30 +529,75 @@ mod overlay {
     }
 
     /// 覆盖绘制闸门：只做一次原子读，停止后完全不再碰 GL；同一帧的重复触发直接跳过。
-    fn paint_red_while_active() {
+    fn paint_red_while_active(hdc: *mut c_void) {
         if !OVERLAY_ACTIVE.load(Ordering::Acquire) {
             return;
         }
-        if !should_paint_this_frame() {
+        if !should_paint_this_frame(hdc) {
             return;
         }
         // SAFETY: 该回调由 wglSwapBuffers 触发，调用线程上一定有当前 GL 上下文。
         unsafe { paint_red_frame() };
     }
 
-    /// 两条 swap 路径（opengl32 / gdi32）同一帧可能先后都到，5ms 内视为同一帧。
-    fn should_paint_this_frame() -> bool {
+    /// 同一 HDC + 同一 GL 上下文、5ms 内的重复触发才是同一帧。
+    fn should_paint_for(
+        last_ms: u64,
+        last_hdc: u64,
+        last_context: u64,
+        now_ms: u64,
+        hdc: u64,
+        context: u64,
+    ) -> bool {
+        !(last_ms != 0
+            && now_ms.saturating_sub(last_ms) < 5
+            && last_hdc == hdc
+            && last_context == context)
+    }
+
+    fn should_paint_this_frame(hdc: *mut c_void) -> bool {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_millis() as u64)
             .unwrap_or(0);
-        let last = LAST_PAINT_MS.load(Ordering::Acquire);
-        if now.saturating_sub(last) < 5 {
+        let hdc = hdc as usize as u64;
+        let context = unsafe { wglGetCurrentContext() } as usize as u64;
+        let last_ms = LAST_PAINT_MS.load(Ordering::Acquire);
+        let last_hdc = LAST_PAINT_HDC.load(Ordering::Acquire);
+        let last_context = LAST_PAINT_CONTEXT.load(Ordering::Acquire);
+        if !should_paint_for(last_ms, last_hdc, last_context, now, hdc, context) {
             return false;
         }
         LAST_PAINT_MS.store(now, Ordering::Release);
+        LAST_PAINT_HDC.store(hdc, Ordering::Release);
+        LAST_PAINT_CONTEXT.store(context, Ordering::Release);
+        PAINT_COUNT.fetch_add(1, Ordering::Relaxed);
         true
+    }
+
+    /// 诊断用：覆盖层实际绘制了多少帧（UI 心跳日志里和「换帧」对比）。
+    pub(crate) fn paint_count() -> u64 {
+        PAINT_COUNT.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    mod paint_tests {
+        use super::should_paint_for;
+
+        #[test]
+        fn dedupes_only_the_same_hdc_and_context() {
+            // 同一 HDC + 同一上下文、5ms 内：同一帧，跳过。
+            assert!(!should_paint_for(1_000, 11, 22, 1_004, 11, 22));
+            // 同一 HDC 但不同 GL 上下文：必须各自绘制。
+            assert!(should_paint_for(1_000, 11, 22, 1_004, 11, 33));
+            // 同一上下文但不同 HDC（两条 swap 路径）：必须各自绘制。
+            assert!(should_paint_for(1_000, 11, 22, 1_004, 33, 22));
+            // 超过 5ms：允许重绘。
+            assert!(should_paint_for(1_000, 11, 22, 1_006, 11, 22));
+            // 第一次绘制永远放行。
+            assert!(should_paint_for(0, 0, 0, 1_004, 11, 22));
+        }
     }
 
     /// 创建「已开始绘制」事件，并等待启动器的停止信号（命名事件）；同时启动安全上限计时。

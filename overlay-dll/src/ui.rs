@@ -9,9 +9,12 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::console_reader::{default_console_path, ConsolePoll, ConsoleReader};
 
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
@@ -40,6 +43,12 @@ pub const DEFAULT_BACKGROUND: (u8, u8, u8) = (255, 0, 0);
 const MAX_LINES: usize = 6;
 /// 加载界面刷新间隔：40ms ≈ 25fps（换帧前的 GDI 重绘 / 换帧后的纹理更新都以它为准）。
 const REFRESH_INTERVAL: Duration = Duration::from_millis(40);
+/// 启动器状态文件的 heartbeat 新鲜窗口。
+const STATUS_STALE_AFTER: Duration = Duration::from_secs(3);
+/// 旧版启动器没有 `beat=` 时的 mtime 容忍窗口（旧版只在内容变化时写文件）。
+const STATUS_STALE_AFTER_LEGACY: Duration = Duration::from_secs(5);
+/// 状态文件缺失/陈旧多久后启动 DLL 自读 console.txt。
+const FALLBACK_GRACE: Duration = Duration::from_secs(2);
 /// 无边框且未前台时，最多用这个间隔主动触发一次窗口重绘。
 const BACKGROUND_REDRAW_INTERVAL: Duration = Duration::from_millis(200);
 /// DLL 可能随 JVM 极速启动提前加载，游戏窗口晚几秒出现是正常的；
@@ -134,8 +143,19 @@ unsafe impl Send for UiState {}
 
 static UI: OnceLock<Mutex<UiState>> = OnceLock::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// 游戏第一次真正进入换帧 Hook（覆盖层画出了第一帧）。
+static FIRST_FRAME: AtomicBool = AtomicBool::new(false);
 /// DLL 加载时刻：比它更早的状态文件属于上一局，必须忽略（否则会显示上次的 89%/100%）。
 static STATUS_EPOCH: OnceLock<SystemTime> = OnceLock::new();
+
+/// Hook 首次进入换帧路径时调用；自读回退的 idle 判定要等它。
+pub fn note_started() {
+    FIRST_FRAME.store(true, Ordering::Release);
+}
+
+pub fn has_started() -> bool {
+    FIRST_FRAME.load(Ordering::Acquire)
+}
 
 fn state() -> &'static Mutex<UiState> {
     UI.get_or_init(|| {
@@ -165,6 +185,9 @@ fn state() -> &'static Mutex<UiState> {
 
 /// 启动窗口内加载界面线程（幂等）。
 pub fn start(game_pid: u32) {
+    // 用 DLL UI 线程启动时刻作为“上一局状态文件”的分界；状态文件通常在注入后
+    // 才由启动器创建，比这个时刻新，所以第一帧就能读到，不会被误判成上一局。
+    STATUS_EPOCH.get_or_init(SystemTime::now);
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -260,6 +283,11 @@ fn run(game_pid: u32) {
     };
 
     let run_start = Instant::now();
+    let mut console_reader: Option<ConsoleReader> = None;
+    let mut console_key: Option<(PathBuf, SystemTime)> = None;
+    // 从 UI 线程启动就开始计宽限：DLL 可能先于启动器写状态文件。
+    let mut first_poll: Option<Instant> = Some(Instant::now());
+    let mut fallback_logged = false;
     loop {
         // 锁中毒意味着有线程在持锁时 panic 了：原实现静默退出循环，
         // 界面从此消失且无任何线索 —— 这里至少要把原因落进日志。
@@ -276,7 +304,12 @@ fn run(game_pid: u32) {
             break;
         }
 
-        poll_status_file();
+        let shutdown_reason = poll_overlay_sources(
+            &mut console_reader,
+            &mut console_key,
+            &mut first_poll,
+            &mut fallback_logged,
+        );
 
         // DIB 必须无条件渲染（GL 纹理依赖它）。BitBlt 也只写目标游戏窗口自己的 DC，
         // 不需要等待窗口进入前台；无窗口模式启动时否则会一直到切回焦点后才显示。
@@ -317,8 +350,9 @@ fn run(game_pid: u32) {
             if tick % 250 == 0 && tick / 250 <= 20 {
                 let (width, height, rgba_len, has_dc, has_bits) = image_debug_state();
                 crate::log_ui(&format!(
-                    "UI 线程心跳 #{tick}：DIB={width}x{height} rgba={rgba_len}B dc={has_dc} bits={has_bits} 换帧={}",
-                    SWAP_COUNT.load(Ordering::Relaxed)
+                    "UI 线程心跳 #{tick}：DIB={width}x{height} rgba={rgba_len}B dc={has_dc} bits={has_bits} 换帧={} 绘制={}",
+                    SWAP_COUNT.load(Ordering::Relaxed),
+                    crate::overlay::paint_count()
                 ));
             }
             ensure_window_active_or_redraw(window);
@@ -333,6 +367,10 @@ fn run(game_pid: u32) {
             }
         }
 
+        if let Some(reason) = shutdown_reason {
+            crate::overlay::request_shutdown(&reason);
+        }
+
         std::thread::sleep(REFRESH_INTERVAL);
     }
 
@@ -344,29 +382,61 @@ fn run(game_pid: u32) {
     let _ = unsafe { DeleteObject(HGDIOBJ(logo_small.0)) };
 }
 
-/// 读取启动器写的状态文件并更新界面状态。
-fn poll_status_file() {
+/// 启动器状态文件快照：除了阶段/进度，还带心跳、console 路径和会话起点。
+#[derive(Default)]
+struct StatusSnapshot {
+    current: bool,
+    fresh: bool,
+    phase: String,
+    progress: f32,
+    has_progress: bool,
+    lines: VecDeque<String>,
+    background: Option<(u8, u8, u8)>,
+    console_path: Option<PathBuf>,
+    session_start: Option<SystemTime>,
+}
+
+/// 启动器状态文件是否还算“活着”：优先看 beat 心跳，老文件退回 mtime。
+fn status_is_fresh(beat: Option<u64>, modified: Option<SystemTime>, now: SystemTime) -> bool {
+    let now_ms = now
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    match beat {
+        Some(beat) => now_ms.saturating_sub(beat) <= STATUS_STALE_AFTER.as_millis() as u64,
+        None => modified
+            .and_then(|time| now.duration_since(time).ok())
+            .map(|age| age <= STATUS_STALE_AFTER_LEGACY)
+            .unwrap_or(false),
+    }
+}
+
+/// 读取启动器写的状态文件；`fresh` 表示启动器最近还在写心跳。
+fn read_status_snapshot() -> StatusSnapshot {
     let path = std::env::temp_dir().join(STATUS_FILE);
     let epoch = *STATUS_EPOCH.get_or_init(SystemTime::now);
-    if let Ok(metadata) = std::fs::metadata(&path) {
-        if metadata.modified().map(|time| time < epoch).unwrap_or(false) {
-            return;
-        }
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return StatusSnapshot::default();
+    };
+    let modified = metadata.modified().ok();
+    if modified.map(|time| time < epoch).unwrap_or(true) {
+        return StatusSnapshot::default();
     }
     let Ok(content) = std::fs::read_to_string(&path) else {
-        return;
+        return StatusSnapshot::default();
     };
 
-    let mut phase = String::new();
-    let mut progress = 0.0f32;
-    let mut has_progress = false;
-    let mut lines: VecDeque<String> = VecDeque::new();
-    // 启动器下发的自定义背景色；格式不对就保持当前颜色。
-    let mut background: Option<(u8, u8, u8)> = None;
+    let mut snapshot = StatusSnapshot {
+        current: true,
+        ..StatusSnapshot::default()
+    };
+    let mut beat: Option<u64> = None;
     for line in content.lines() {
-        if let Some(value) = line.strip_prefix("progress=") {
-            progress = value.trim().parse().unwrap_or(progress);
-            has_progress = true;
+        if let Some(value) = line.strip_prefix("beat=") {
+            beat = value.trim().parse::<u64>().ok();
+        } else if let Some(value) = line.strip_prefix("progress=") {
+            snapshot.progress = value.trim().parse().unwrap_or(snapshot.progress);
+            snapshot.has_progress = true;
         } else if let Some(value) = line.strip_prefix("memmax=") {
             // 启动器给出的 JVM 上限（来自启动器设置里的内存限制），优先于命令行解析。
             if let Ok(limit) = value.trim().parse::<u64>() {
@@ -375,33 +445,154 @@ fn poll_status_file() {
                 }
             }
         } else if let Some(value) = line.strip_prefix("bgcolor=") {
-            background = parse_hex_color(value);
+            snapshot.background = parse_hex_color(value);
         } else if let Some(value) = line.strip_prefix("phase=") {
-            phase = value.trim().to_string();
+            snapshot.phase = value.trim().to_string();
         } else if let Some(value) = line.strip_prefix("line=") {
-            if lines.len() < MAX_LINES {
-                lines.push_back(value.trim().to_string());
+            if snapshot.lines.len() < MAX_LINES {
+                snapshot.lines.push_back(value.trim().to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("console=") {
+            let value = value.trim();
+            if !value.is_empty() {
+                snapshot.console_path = Some(PathBuf::from(value));
+            }
+        } else if let Some(value) = line.strip_prefix("session=") {
+            if let Ok(ms) = value.trim().parse::<u64>() {
+                snapshot.session_start = Some(UNIX_EPOCH + Duration::from_millis(ms));
             }
         }
     }
-    if phase.is_empty() && lines.is_empty() && background.is_none() {
-        return;
-    }
 
+    snapshot.fresh = status_is_fresh(beat, modified, SystemTime::now());
+    snapshot
+}
+
+/// 仅应用背景色（配置即使在启动器关闭后也保留）。
+fn apply_status_config(snapshot: &StatusSnapshot) {
+    let Some(background) = snapshot.background else {
+        return;
+    };
     if let Ok(mut ui) = state().lock() {
-        let background_changed = background.is_some_and(|rgb| rgb != ui.background);
-        if ui.progress != progress || ui.phase != phase || ui.lines != lines || background_changed {
-            if let Some(rgb) = background {
-                ui.background = rgb;
-            }
-            ui.progress = progress;
-            ui.has_progress = has_progress;
-            ui.phase = phase;
-            ui.lines = lines;
+        if ui.background != background {
+            ui.background = background;
             ui.version += 1;
             IMAGE_VERSION.store(ui.version, Ordering::Release);
         }
     }
+}
+
+/// 应用启动器的阶段/进度/控制台行（只在心跳新鲜时调用）。
+fn apply_status_snapshot(snapshot: &StatusSnapshot) {
+    if snapshot.phase.is_empty() && snapshot.lines.is_empty() && !snapshot.has_progress {
+        return;
+    }
+    if let Ok(mut ui) = state().lock() {
+        let changed = ui.progress != snapshot.progress
+            || ui.phase != snapshot.phase
+            || ui.lines != snapshot.lines
+            || ui.has_progress != snapshot.has_progress;
+        if changed {
+            ui.progress = snapshot.progress;
+            ui.has_progress = snapshot.has_progress;
+            ui.phase = snapshot.phase.clone();
+            ui.lines = snapshot.lines.clone();
+            ui.version += 1;
+            IMAGE_VERSION.store(ui.version, Ordering::Release);
+        }
+    }
+}
+
+/// 应用 DLL 自读 console 的结果；进度只增不减，避免启动器关闭瞬间倒退。
+fn apply_console_poll(poll: &ConsolePoll) {
+    if poll.phase.is_empty() && poll.lines.is_empty() && !poll.has_progress {
+        return;
+    }
+    if let Ok(mut ui) = state().lock() {
+        let next_has_progress = ui.has_progress || poll.has_progress;
+        let next_progress = if poll.has_progress {
+            ui.progress.max(poll.progress)
+        } else {
+            ui.progress
+        };
+        let changed = ui.phase != poll.phase
+            || ui.lines != poll.lines
+            || ui.has_progress != next_has_progress
+            || ui.progress != next_progress;
+        if changed {
+            ui.phase = poll.phase.clone();
+            ui.lines = poll.lines.clone();
+            ui.has_progress = next_has_progress;
+            ui.progress = next_progress;
+            ui.version += 1;
+            IMAGE_VERSION.store(ui.version, Ordering::Release);
+        }
+    }
+}
+
+/// 读启动器状态；新鲜就用启动器，陈旧/缺失就切到 DLL 自读 console.txt。
+///
+/// 返回 `Some(reason)` 表示自读已判定加载完成，调用方应请求停止覆盖。
+fn poll_overlay_sources(
+    console_reader: &mut Option<ConsoleReader>,
+    console_key: &mut Option<(PathBuf, SystemTime)>,
+    first_poll: &mut Option<Instant>,
+    fallback_logged: &mut bool,
+) -> Option<String> {
+    let snapshot = read_status_snapshot();
+    if snapshot.current {
+        apply_status_config(&snapshot);
+    }
+
+    if snapshot.fresh {
+        apply_status_snapshot(&snapshot);
+        if console_reader.take().is_some() {
+            *console_key = None;
+            if *fallback_logged {
+                crate::log_ui("启动器心跳恢复，覆盖层切回启动器状态。");
+            }
+            *fallback_logged = false;
+        }
+        return None;
+    }
+
+    let now = Instant::now();
+    let first = *first_poll.get_or_insert(now);
+    if now.duration_since(first) < FALLBACK_GRACE {
+        return None;
+    }
+
+    let path = snapshot
+        .console_path
+        .clone()
+        .unwrap_or_else(default_console_path);
+    let session_start = snapshot
+        .session_start
+        // 没有启动器 session 时用 DLL UI 启动时刻兜底：当前局的 console 通常在这之后，
+        // 上一局的旧文件则更早；减 2 秒容忍游戏先截断 console、后注入 DLL 的顺序。
+        .or_else(|| {
+            STATUS_EPOCH
+                .get()
+                .map(|epoch| *epoch - Duration::from_secs(2))
+        })
+        .unwrap_or_else(|| SystemTime::now() - Duration::from_secs(2));
+    let key = (path.clone(), session_start);
+    if console_key.as_ref() != Some(&key) {
+        *console_reader = Some(ConsoleReader::new(path, Some(session_start)));
+        *console_key = Some(key);
+        if !*fallback_logged {
+            crate::log_ui("启动器状态陈旧/缺失，改为自读 console.txt。");
+            *fallback_logged = true;
+        }
+    }
+
+    let Some(reader) = console_reader.as_mut() else {
+        return None;
+    };
+    reader.set_overlay_started(has_started());
+    let poll = reader.poll(now);
+    apply_console_poll(&poll);
+    poll.complete
 }
 
 /// 当前背景色（RGB）——GL 侧 `glClear` 要和 DIB 里的底色一致。
@@ -1047,7 +1238,8 @@ fn progress_percent(progress: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ink_for, parse_hex_color, progress_percent, track_for};
+    use super::{ink_for, parse_hex_color, progress_percent, status_is_fresh, track_for};
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn loading_progress_does_not_round_up_to_one_hundred() {
@@ -1077,6 +1269,17 @@ mod tests {
         assert_eq!(ink_for((255, 255, 255)), (24, 24, 28));
         assert_eq!(ink_for((255, 235, 59)), (24, 24, 28));
         assert_eq!(track_for((200, 100, 50)), (110, 55, 27));
+    }
+
+    #[test]
+    fn status_freshness_prefers_heartbeat_then_mtime() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let now_ms = 100_000;
+        assert!(status_is_fresh(Some(now_ms), None, now));
+        assert!(!status_is_fresh(Some(now_ms - 3_001), None, now));
+        assert!(status_is_fresh(None, Some(now - Duration::from_secs(1)), now));
+        assert!(!status_is_fresh(None, Some(now - Duration::from_secs(6)), now));
+        assert!(!status_is_fresh(None, None, now));
     }
 }
 

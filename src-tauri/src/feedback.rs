@@ -2,6 +2,8 @@
 //! 中转服务器（`steam-relay/` 的 `POST /feedback`，默认 `pzmlan.sanyec.top`）。
 //!
 //! 两个日志的来源与"最近一次启动"的界定：
+//! - `%USERPROFILE%\Zomboid\.pzmanager\logs\launcher.log`：启动器日志，
+//!   按会话标记只取最近一次启动器的部分。
 //! - `%TEMP%\overlay.log`：注入游戏的 pz_overlay.dll **追加**写、跨启动累积，
 //!   所以只取最后一个「已加载」标记之后的部分（即最近一次游戏启动）。
 //! - `%USERPROFILE%\Zomboid\console.txt`：游戏每次启动重写，本身就是最近一次。
@@ -16,8 +18,10 @@ use serde::Serialize;
 
 use crate::steam_relay;
 
-/// 单个日志上传上限（超出取尾部）。两个文件合计约 8MB，服务端上限 10MB。
+/// 单个日志上传上限（超出取尾部）。三个文件合计约 9MB，服务端上限 10MB。
 const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
+/// 启动器日志本身有 2MB 轮转上限；反馈只取最近一次启动的 1MB 尾部。
+const MAX_LAUNCHER_LOG_BYTES: usize = 1024 * 1024;
 /// 读文件前的硬上限：超过就只读尾部，避免把超大日志整个读进内存。
 const READ_HARD_LIMIT: u64 = 64 * 1024 * 1024;
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -98,6 +102,21 @@ fn since_last_game_launch(text: &str) -> &str {
 fn collect_logs() -> Vec<UploadFile> {
     let mut files = Vec::new();
 
+    match crate::launcher_log::recent_session_log(MAX_LAUNCHER_LOG_BYTES) {
+        Some((content, truncated)) => files.push(UploadFile {
+            name: "launcher.log",
+            content,
+            truncated,
+            missing: false,
+        }),
+        None => files.push(UploadFile {
+            name: "launcher.log",
+            content: String::new(),
+            truncated: false,
+            missing: true,
+        }),
+    }
+
     let overlay_path = std::env::temp_dir().join("overlay.log");
     match read_text(&overlay_path) {
         Some(text) => {
@@ -166,7 +185,7 @@ pub(crate) async fn submit_feedback(description: String) -> Result<FeedbackUploa
         .collect();
     if uploaded.is_empty() {
         return Err(
-            "没有找到可上传的日志（%TEMP%\\overlay.log 与 %USERPROFILE%\\Zomboid\\console.txt 都不存在）。"
+            "没有找到可上传的日志（launcher.log、%TEMP%\\overlay.log 与 %USERPROFILE%\\Zomboid\\console.txt 都不存在）。"
                 .to_string(),
         );
     }
@@ -218,11 +237,17 @@ pub(crate) async fn submit_feedback(description: String) -> Result<FeedbackUploa
         });
     }
 
-    Ok(FeedbackUploadResult {
+    let result = FeedbackUploadResult {
         feedback_id: ack.id.unwrap_or_default(),
         uploaded,
         skipped,
-    })
+    };
+    crate::launcher_log::info(&format!(
+        "反馈已提交：{}，上传 {}",
+        result.feedback_id,
+        result.uploaded.join("、")
+    ));
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -227,6 +227,14 @@ pzmanager
 
 模组管理是「类型 + 筛选 + 排序 + 预设」的左侧栏结构，右侧正文在 Lua / JAR 两个完全不同的面板间切换。
 
+**行右键菜单**（Lua / JAR 通用）：`ModRowContextMenu` 把整行包成 `Menu.ContextTrigger`（左键的选中、
+拖选、开关逻辑不变），右键弹出「启用 / 禁用 / 创意工坊打开」。前两项调用各页原有的写回命令
+（`set_lua_mods_enabled` / `set_zombie_buddy_mods_decisions`），并沿用行内开关的限制：已处于该状态的
+操作项置灰，非 B42 的 Lua 模组不能从菜单启用。「创意工坊打开」用模组自带的 `workshopId`
+（Lua 取自工坊内容目录名 = 字符串，JAR 取自 `Mod.info` 路径 = 数字）拼出
+`steam://openurl/https://steamcommunity.com/sharedfiles/filedetails/?id=<id>`（`src/modWorkshop.ts`），
+Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰并提示。
+
 #### 3.6.1 Lua 模组
 
 数据源是 `%USERPROFILE%\Zomboid\mods` 与创意工坊目录；启用状态来自 `mods\default.txt` 的 `mods { ... }` 块。
@@ -459,10 +467,15 @@ pzmanager
 
 1. **启动器 → DLL**：`%TEMP%\pz_overlay_status.txt`。格式为逐行 `key=value`：
    `progress=0.000–1.000`（有精确分母时才写）、`phase=阶段文字`、`memmax=内存MB`、
-   `line=控制台行`（最多 6 行）。写入用「临时文件 + rename」避免 DLL 读到半截。
+   `line=控制台行`（最多 6 行）、`beat=UNIX毫秒`（1 秒心跳）、`console=console.txt路径`、
+   `session=会话起点毫秒`、`launcherpid=启动器PID`。写入用「临时文件 + rename」避免 DLL 读到半截。
 2. **启动器 → DLL**：命名事件 `Local\PZManagerOverlayStop_<游戏PID>`，`SetEvent` 即停止覆盖。
 3. **DLL → 启动器**：命名事件 `Local\PZManagerOverlayStarted_<PID>`（首帧已画），
    启动器在收到它之前**不做任何加载完成判定**；另有 `%TEMP%\overlay.log` 供人读。
+
+> 启动器关闭/心跳超过 3 秒后，DLL 会自己读 `console.txt`（复用 `overlay-core`
+> 的阶段/完成规则），继续更新界面并在 `onGameInitComplete`/主菜单标记时自行摘 Hook；
+> 启动器恢复心跳后切回启动器数据。自读路径没有 jar advice 分母，使用阶段估算进度。
 
 ---
 
@@ -723,7 +736,7 @@ ProjectZomboid64.json vmArgs[0] = -agentpath:<pz_overlay.dll>
 | `...\.pzmanager\default-backups\<时间戳>` | 启动器 | 人 | 应用预设前备份 `default.txt` |
 | `...\.pzmanager\backgrounds\custom` / `workshop` | 启动器 | 启动器 | 导入图 / 拼接后的工坊背景 |
 | `<游戏目录>\.pzmanager-backups\<时间戳>` | 启动器 | 人 | 改写 `ProjectZomboid64.json`/`.bat` 前备份 |
-| `%TEMP%\pz_overlay_status.txt` | 启动器 | DLL | 阶段 / 进度 / 内存上限 / 控制台尾部 |
+| `%TEMP%\pz_overlay_status.txt` | 启动器 | DLL | 阶段 / 进度 / 内存上限 / 控制台尾部 / 心跳 / console 路径（心跳超时后 DLL 自读 console.txt） |
 | `%TEMP%\overlay.log` | DLL | 人 | Hook 安装、首帧、停止信号 |
 | `%TEMP%\fast-launch.log` | DLL | 人 | JVMTI 门禁、缓存命中、类改写 |
 | Steam `localconfig.vdf` | 启动器 | Steam | 启动参数与内存；写前备份 |
@@ -941,12 +954,19 @@ MSVC 工具链（覆盖层 DLL 的 MinHook C 源码需要 `cl.exe`）。
 **状态文件格式**（`%TEMP%\pz_overlay_status.txt`）
 
 ```text
+beat=1793205846369
+launcherpid=44528
+session=1793205800000
+console=C:\Users\SanyeSAMA\Zomboid\console.txt
 progress=0.873
 phase=注入游戏类 · 注入 612/701
 memmax=8192
 line=[ZB] patching zombie.vehicles.UI3DScene with 2 advice(s)
 line=...
 ```
+
+启动器每秒至少写一次 `beat=`（即使 `[ZB]` 长时间静默）；DLL 超过 3 秒收不到心跳
+或状态文件缺失时，自己读 `console.txt`、用阶段估算进度，并在加载完成时自行摘 Hook。
 
 **环境开关**（仅极速启动相关，均不影响默认启动路径）
 

@@ -89,6 +89,7 @@ pzm/
         │           │  └─ pz_overlay.dll (注入)     │
         │           │      · Hook wglSwapBuffers    │
         │           │      · 读 %TEMP% 状态文件      │
+        │           │      · 心跳失效自读 console.txt │
         │           │      · 等 Local\…Stop_<pid>   │
         │           └──────────────────────────────┘
         │ 3. tail %USERPROFILE%\Zomboid\console.txt（解析 [ZB] 进度）
@@ -97,9 +98,13 @@ pzm/
 
 三条**跨进程契约**（改任何一边都要同步另一边，详见第 8 节）：
 
-1. 启动器 → DLL：状态文件 `%TEMP%\pz_overlay_status.txt`（阶段文字 / 进度 / 控制台尾部 / 覆盖层背景色 `bgcolor=#RRGGBB`）；
+1. 启动器 → DLL：状态文件 `%TEMP%\pz_overlay_status.txt`（阶段文字 / 进度 / 控制台尾部 / 覆盖层背景色 `bgcolor=#RRGGBB` / 心跳 `beat=` / `console=` 路径 / `session=` 起点）；
 2. 启动器 → DLL：命名事件 `Local\PZManagerOverlayStop_<游戏PID>`（`SetEvent` 即停止覆盖）；
 3. DLL → 启动器：命名事件 `Local\PZManagerOverlayStarted_<PID>`（首帧已画，会话在此之前不做"加载完成"判定）+ `%TEMP%\overlay.log`（人读日志）。
+
+> 状态文件带 1 秒心跳。DLL 3 秒收不到心跳（或状态文件缺失）时，会切换为自己的
+> `console.txt` 读取器，用同一套阶段/完成规则继续更新界面并自行摘 Hook；启动器关闭
+> 不再让覆盖层停在最后一帧。启动器恢复心跳后 DLL 切回启动器数据。
 
 ## 5. 前端（`src/`）
 
@@ -291,7 +296,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 * 内置背景：图片随前端打包在 `public/backgrounds/` 下（当前一张 `default.jpg`，来源是用户给的 `IMG_20261013_134024.png`，转 JPEG q92 存原生 1666×944、494KB）。`settings.json` 里存成 `builtin:<id>` 哨兵值——磁盘上没有对应文件，前端直接用打包 URL 渲染，所以 `set_background_path` 对 `builtin:` 前缀跳过 `background_path_allowed` 目录校验；`backgroundPath` 为 `null`（老配置或没选过）时前端回落这张内置图当默认外观，应用不提供"纯色/无背景"选项。
 * 截图/光影：只允许操作托管目录内的文件（`managed_file_path` / `background_path_allowed` 做目录穿越防护），截图上限按支持格式过滤。
 
-### 6.7 命令参考（⚠️ 54 条，快照自 `lib.rs` 的 `generate_handler!`）
+### 6.7 命令参考（⚠️ 快照自 `lib.rs` 的 `generate_handler!`；实际条数以代码为准）
 
 | 域 | 命令 |
 | --- | --- |
@@ -306,7 +311,11 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | 下载器（1） | `download_shader_file` |
 | 新闻（2） | `fetch_developer_news`、`translate_developer_news_batch` |
 | 覆盖层（4） | `overlay::inject_overlay`、`overlay_session::start_overlay_session`、`overlay_session::check_game_process`、`overlay_session::stop_game_process` |
+| 版本隔离（9） | `get_version_status`、`save_version_store_path`、`save_version_parallel`、`start_version_snapshot`、`start_version_capture`、`start_version_restore`、`start_version_verify`、`cancel_version_operation`、`delete_version` |
+| 启动器日志（4） | `read_launcher_log`、`clear_launcher_log`、`open_launcher_log_folder`、`log_frontend_message` |
 | 启动时长（1） | `startup_timing`（最近一次「窗口 → 主菜单」时长 + 上一次，供右下角对比显示） |
+
+版本隔离的存储模型、增量格式与还原流程见 [version-isolation.md](version-isolation.md)。
 
 重新生成：在 `src-tauri/src/lib.rs` 里搜 `invoke_handler`，`generate_handler![]` 的内容就是权威清单（命令参数用 `snake_case`，前端 invoke 用 `camelCase`）。
 
@@ -346,7 +355,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | `%USERPROFILE%\Zomboid\.pzmanager\jar-mod-state.json` | 启动器 | 启动器 | JAR 模组审批决策，工坊重下后可重新套用 |
 | `%USERPROFILE%\Zomboid\.pzmanager\backgrounds\<kind>\` | 启动器 | 启动器 | 导入/合成的背景图 |
 | `<游戏目录>\.pzmanager-backups\<时间戳>\` | 启动器 | 人 | 改写 `ProjectZomboid64.json`/`.bat` 前的备份 |
-| `%TEMP%\pz_overlay_status.txt` | 启动器 | **DLL** | 阶段文字 + 进度 + 控制台尾部 + 背景色 `bgcolor=`（覆盖层界面数据源） |
+| `%TEMP%\pz_overlay_status.txt` | 启动器 | **DLL** | 阶段文字 + 进度 + 控制台尾部 + 背景色 `bgcolor=` + 心跳 `beat=` + `console=`/`session=`（覆盖层界面数据源）；心跳超时后 DLL 自读 `console.txt` |
 | `%TEMP%\overlay.log` | **DLL** | 人 | Hook 安装、首次换帧、收到停止信号等 |
 | 命名事件 `Local\PZManagerOverlayStop_<pid>` | 启动器 | DLL | 停止覆盖 |
 | 命名事件 `Local\PZManagerOverlayStarted_<pid>` | DLL | 启动器 | 首帧已画，允许做完成判定 |

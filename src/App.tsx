@@ -49,6 +49,22 @@ import {
   STEAM_RELAY_MODE_OPTIONS,
   previewImageFallbackUrl,
 } from "./steamRelay";
+import {
+  formatVersionBytes,
+  formatVersionTime,
+  shortVersionHash,
+  versionBaseTypeLabel,
+  versionChangeSummary,
+  versionDeltaChainDepth,
+  versionMatchLabel,
+  versionPhaseLabel,
+  versionProgressPercent,
+  versionLabelById,
+  type VersionOperationUpdate,
+  type VersionRecord,
+  type VersionStatus,
+  type VersionVerifyResult,
+} from "./versioning";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import {
   DEFAULT_SEASON_FEATURES,
@@ -81,6 +97,7 @@ import {
   toggleJarModExpansion,
   type JarModConflictRisk,
 } from "./jarModUi";
+import { modWorkshopLink, type ModWorkshopLink } from "./modWorkshop";
 
 type SteamProfile = {
   steamId: string;
@@ -106,6 +123,8 @@ type ProjectZomboidPaths = {
     installedRevision: string | null;
     availableRevision: string | null;
     missingComponents: string[];
+    /** 没匹配到当前版本的类文件，但找到了官方 install.ps1，可尝试强制安装。 */
+    forceInstallAvailable: boolean;
   };
   viewpoint3d: {
     ready: boolean;
@@ -281,7 +300,7 @@ type LauncherUpdateStatus = {
 type ActivePage = "launch" | "overview" | "shots" | "shaderpacks" | "workshop" | "mods" | "settings";
 type ModManagementPage = "lua" | "jar";
 type ResourceCenterPage = "workshop" | "shaderDownload" | "developerNews";
-type SettingsPage = "about" | "general" | "translator" | "console" | "downloader" | "modLoader" | "startup";
+type SettingsPage = "about" | "general" | "versions" | "translator" | "console" | "logs" | "downloader" | "modLoader" | "startup";
 
 type PreviewState = {
   name: string;
@@ -492,6 +511,19 @@ type AppSettings = {
   steamRelayBase: string | null;
   /** 「Steam 网络加速 › 本地代理」；null/空 = 不用显式代理。 */
   steamProxy: string | null;
+  /** 「设置 › 版本」的版本存储目录；null/空 = 默认 .pzmanager/versions。 */
+  versionStorePath: string | null;
+  /** 「设置 › 版本」：哈希/复制是否使用多线程；缺失 = 默认开启。 */
+  versionParallel: boolean;
+};
+
+/** 后端 launcher_log::LauncherLogTail。 */
+type LauncherLogTail = {
+  path: string;
+  content: string;
+  size: number;
+  exists: boolean;
+  truncated: boolean;
 };
 
 /** 后端 save_fast_launch 的返回值：是否创建/恢复了备份。 */
@@ -1902,6 +1934,64 @@ function LuaModPoster({ name, path }: { name: string; path: string | null }) {
   return <Box className="pz-jar-mod-poster" aria-hidden="true">{url ? <FallbackImage alt="" loading="lazy" src={url} /> : <Box className="pz-jar-mod-poster-placeholder"><Text>{initial}</Text></Box>}</Box>;
 }
 
+function ModRowContextMenu({
+  busy,
+  canEnable,
+  children,
+  enabled,
+  onDisable,
+  onEnable,
+  onOpenWorkshop,
+  workshopId,
+}: {
+  busy: boolean;
+  /** 例如非 B42 的 Lua 模组，启动器不能启用。 */
+  canEnable: boolean;
+  children: ReactNode;
+  enabled: boolean;
+  onDisable: () => void;
+  onEnable: () => void;
+  onOpenWorkshop: (link: ModWorkshopLink) => void;
+  workshopId: string | number | null;
+}) {
+  const workshopLink = modWorkshopLink(workshopId);
+  return (
+    <Menu.Root positioning={{ strategy: "fixed", flip: true, shift: 8, overflowPadding: 8 }}>
+      {/* 整行都是右键触发区；左键的选中、拖动和开关逻辑仍留在行自己身上。 */}
+      <Menu.ContextTrigger asChild>{children}</Menu.ContextTrigger>
+      {/* 挂到 Portal：模组行自身的位移动画与列表的滚动裁剪会把就地渲染的浮层切掉。 */}
+      <Portal>
+        <Menu.Positioner className="pz-menu-positioner">
+          <Menu.Content className="pz-mod-context-menu">
+            <Menu.Item
+              disabled={busy || enabled || !canEnable}
+              onSelect={onEnable}
+              value="enable"
+            >
+              <Text>启用</Text>
+            </Menu.Item>
+            <Menu.Item disabled={busy || !enabled} onSelect={onDisable} value="disable">
+              <Text>禁用</Text>
+            </Menu.Item>
+            <Menu.Item
+              disabled={workshopLink === null}
+              onSelect={() => {
+                if (workshopLink) {
+                  onOpenWorkshop(workshopLink);
+                }
+              }}
+              title={workshopLink ? "在 Steam 创意工坊中打开" : "本地模组没有创意工坊页面"}
+              value="workshop"
+            >
+              <Text>创意工坊打开</Text>
+            </Menu.Item>
+          </Menu.Content>
+        </Menu.Positioner>
+      </Portal>
+    </Menu.Root>
+  );
+}
+
 function SleepingModRow({
   render,
 }: {
@@ -2844,6 +2934,24 @@ function App() {
   const launchCommandRef = useRef<HTMLDivElement | null>(null);
   const [resourceCenterPage, setResourceCenterPage] = useState<ResourceCenterPage>("workshop");
   const [settingsPage, setSettingsPage] = useState<SettingsPage>("general");
+  // 「设置 › 版本」：版本隔离状态、后台操作进度与存储目录草稿。
+  const [versionStatus, setVersionStatus] = useState<VersionStatus | null>(null);
+  const [versionStatusLoading, setVersionStatusLoading] = useState(false);
+  const [versionStatusError, setVersionStatusError] = useState<string | null>(null);
+  const [versionOperation, setVersionOperation] = useState<VersionOperationUpdate | null>(null);
+  const [versionOperationRunning, setVersionOperationRunning] = useState(false);
+  const [versionVerified, setVersionVerified] = useState<VersionVerifyResult | null>(null);
+  const [versionLabelDraft, setVersionLabelDraft] = useState("");
+  const [versionStoreDraft, setVersionStoreDraft] = useState("");
+  const [versionStoreSaving, setVersionStoreSaving] = useState(false);
+  const [versionParallel, setVersionParallel] = useState(true);
+  const [versionParallelSaving, setVersionParallelSaving] = useState(false);
+  const [versionExpandedId, setVersionExpandedId] = useState<string | null>(null);
+  const versionStatusRequestRef = useRef(0);
+  // 「设置 › 日志」：启动器日志尾部。
+  const [launcherLogTail, setLauncherLogTail] = useState<LauncherLogTail | null>(null);
+  const [launcherLogLoading, setLauncherLogLoading] = useState(false);
+  const [launcherLogError, setLauncherLogError] = useState<string | null>(null);
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateStatus | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
@@ -2981,6 +3089,9 @@ function App() {
   }
   function showToast(message: string, kind: ToastKind = "info") {
     const id = ++toastIdRef.current;
+    if (kind === "error" && isTauriRuntime()) {
+      void invoke("log_frontend_message", { level: "error", message }).catch(() => undefined);
+    }
     const visible = shouldShowNotification(kind, developerModeRef.current);
     setNotificationHistory((current) => {
       const next = [...current, { id, message, kind, createdAt: Date.now(), visible }];
@@ -4478,6 +4589,7 @@ function App() {
               : (settingsResult.value.steamRelayBase ?? ""),
           );
           setSteamProxy(settingsResult.value.steamProxy ?? "");
+          setVersionParallel(settingsResult.value.versionParallel ?? true);
         }
         if (memoryResult.status === "rejected") {
           setMemoryError(
@@ -4788,6 +4900,85 @@ function App() {
     }).then((cleanup) => { unlisten = cleanup; }).catch(() => undefined);
     return () => unlisten?.();
   }, []);
+  // 「设置 › 版本」：进入页面时读取一次状态（只扫元数据，不计算全量哈希）。
+  useEffect(() => {
+    if (settingsPage !== "versions") return;
+    // 还原会往游戏目录写临时文件，操作期间不扫；完成事件会触发刷新。
+    if (versionOperationRunning || versionStatus?.operationRunning) return;
+    void refreshVersionStatus();
+  }, [settingsPage]);
+
+  // 「设置 › 日志」：进入页面时读取一次启动器日志尾部。
+  useEffect(() => {
+    if (settingsPage !== "logs") return;
+    void refreshLauncherLog();
+  }, [settingsPage]);
+
+  // 前端未捕获错误写进启动器日志，用户可以直接导日志排查。
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const onError = (event: ErrorEvent) => {
+      void invoke("log_frontend_message", {
+        level: "error",
+        message: `window.onerror: ${event.message} (${event.filename}:${event.lineno}:${event.colno})`,
+      }).catch(() => undefined);
+    };
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason =
+        event.reason instanceof Error
+          ? (event.reason.stack ?? event.reason.message)
+          : String(event.reason);
+      void invoke("log_frontend_message", {
+        level: "error",
+        message: `unhandledrejection: ${reason}`,
+      }).catch(() => undefined);
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, []);
+
+  // 版本操作在后台线程执行，用 version-progress 推送进度；结束后自动刷新状态。
+  useEffect(() => {
+    if (!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return;
+    let unlisten: (() => void) | undefined;
+    let unlistenVerified: (() => void) | undefined;
+    void listen<VersionOperationUpdate>("version-progress", (event) => {
+      const update = event.payload;
+      setVersionOperation(update);
+      if (update.status === "started" || update.status === "progress") {
+        setVersionOperationRunning(true);
+        return;
+      }
+      setVersionOperationRunning(false);
+      // 任何会改变游戏目录的操作完成后，之前那次“已校验”结论就作废了。
+      if (update.status === "completed" && update.operation !== "verify") {
+        setVersionVerified(null);
+      }
+      if (update.status === "completed") {
+        showToast(update.message ?? "版本操作完成", "success");
+        void refreshVersionStatus();
+      } else if (update.status === "error") {
+        const message = update.error ?? "版本操作失败";
+        showToast(message, message.includes("取消") ? "info" : "error");
+        void refreshVersionStatus();
+      }
+      // 还原会卸载/重装 PZ Optimization，刷新检测让「支持库」里的状态同步。
+      if (update.operation === "restore") {
+        void refreshDetection();
+      }
+    }).then((cleanup) => { unlisten = cleanup; }).catch(() => undefined);
+    void listen<VersionVerifyResult>("version-verified", (event) => {
+      setVersionVerified(event.payload);
+    }).then((cleanup) => { unlistenVerified = cleanup; }).catch(() => undefined);
+    return () => {
+      unlisten?.();
+      unlistenVerified?.();
+    };
+  }, []);
   // 窗口已出现但还没收到最终测量结果时，每 0.5s 刷新一次实时计时。
   useEffect(() => {
     if (!gameWindowReady || startupStartedAt === null || startupResult !== null) {
@@ -4897,14 +5088,16 @@ function App() {
     }
   }
 
-  async function installPzOptimization() {
+  async function installPzOptimization(force = false) {
     setInstallingPzOptimization(true);
     try {
-      const result = await invoke<PzOptimizationInstallResult>("install_pz_optimization");
+      const result = await invoke<PzOptimizationInstallResult>("install_pz_optimization", {
+        force,
+      });
       showToast(
         result.alreadyInstalled
           ? "PZ Optimization 已经安装过了。"
-          : `PZ Optimization 安装完成${result.installedRevision ? `（版本 ${result.installedRevision}）` : ""}。`,
+          : `PZ Optimization ${force ? "已通过官方脚本安装" : "安装完成"}${result.installedRevision ? `（版本 ${result.installedRevision}）` : ""}。`,
         "success",
       );
       await refreshDetection();
@@ -5332,6 +5525,214 @@ function App() {
     if (typeof selected === "string") setShaderDownloadDirectory(selected);
   }
 
+  /** 「设置 › 版本」：读取版本状态；只做元数据扫描，不计算全量哈希。 */
+  async function refreshVersionStatus() {
+    const requestId = ++versionStatusRequestRef.current;
+    setVersionStatusLoading(true);
+    setVersionStatusError(null);
+    try {
+      const status = await invoke<VersionStatus>("get_version_status");
+      // 旧请求晚到时不要覆盖新结果（操作完成后的刷新必须赢）。
+      if (requestId !== versionStatusRequestRef.current) return;
+      setVersionStatus(status);
+      // 以磁盘里的设置为准：设置可能在别的窗口/会话里被改过，
+      // 保留旧草稿会让输入框显示一个和实际操作不一致的目录。
+      setVersionStoreDraft(status.storePath);
+      setVersionOperationRunning((current) => current || status.operationRunning);
+      // 版本被删除或换了存储目录后，之前那次“已校验”的结论就不再有效。
+      setVersionVerified((current) => {
+        if (!current?.matchedVersionId) return current;
+        return status.versions.some((version) => version.id === current.matchedVersionId)
+          ? current
+          : null;
+      });
+    } catch (error: unknown) {
+      if (requestId !== versionStatusRequestRef.current) return;
+      setVersionStatusError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (requestId === versionStatusRequestRef.current) {
+        setVersionStatusLoading(false);
+      }
+    }
+  }
+
+  function startVersionOperation(command: string, args: Record<string, unknown>, label: string) {
+    if (versionOperationRunning || versionStatus?.operationRunning) {
+      showToast("已有版本操作正在进行。", "info");
+      return;
+    }
+    if (command !== "start_version_verify") {
+      setVersionVerified(null);
+    }
+    setVersionOperationRunning(true);
+    setVersionOperation({
+      operationId: 0,
+      operation: command,
+      status: "started",
+      phase: "preparing",
+      processedFiles: 0,
+      totalFiles: 0,
+      processedBytes: 0,
+      totalBytes: 0,
+      currentPath: null,
+      message: null,
+      error: null,
+    });
+    void invoke<number>(command, args).catch((error: unknown) => {
+      setVersionOperationRunning(false);
+      setVersionOperation(null);
+      showToast(
+        `${label}失败：${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    });
+  }
+
+  async function createVersionSnapshot() {
+    const label = versionLabelDraft.trim();
+    const existing = versionStatus?.versions.length ?? 0;
+    const confirmed = window.confirm(
+      existing > 0
+        ? "创建检查点会把当前整个游戏目录完整复制一份到版本存储区，占用空间较大。\n\n确定继续吗？"
+        : "创建基准版本会把当前整个游戏目录完整复制一份到版本存储区。\n\n确定继续吗？",
+    );
+    if (!confirmed) return;
+    startVersionOperation("start_version_snapshot", { label: label || null }, "创建完整快照");
+  }
+
+  function captureVersion() {
+    startVersionOperation(
+      "start_version_capture",
+      { label: versionLabelDraft.trim() || null },
+      "捕获新版本",
+    );
+  }
+
+  function verifyVersion() {
+    startVersionOperation("start_version_verify", {}, "校验当前目录");
+  }
+
+  function restoreVersion(record: VersionRecord) {
+    const unknown = versionStatus?.currentMatch.kind === "unknown";
+    const confirmed = window.confirm(
+      `确定还原到「${record.label}」吗？\n\n还原会替换游戏目录中的文件，并把目标版本里不存在的文件移到版本存储区的回收文件夹；当前目录里未捕获的修改会被覆盖。\n\n如果当前安装了 PZ Optimization：还原前会先卸载，还原成功后自动重装；想保留原版状态请先到「支持库」卸载。\n请先关闭游戏。`,
+    );
+    if (!confirmed) return;
+    if (unknown) {
+      const forced = window.confirm(
+        "当前游戏目录不是任何已记录版本（可能包含未捕获的 Steam 更新或手动修改）。\n\n继续还原会覆盖这些内容，确定继续吗？",
+      );
+      if (!forced) return;
+    }
+    // 用户已经在上面明确确认过覆盖风险；后端仍保留 force 门控给其它调用方。
+    startVersionOperation(
+      "start_version_restore",
+      { versionId: record.id, force: true },
+      "还原版本",
+    );
+  }
+
+  async function deleteVersion(record: VersionRecord) {
+    const confirmed = window.confirm(
+      `确定删除版本「${record.label}」吗？\n\n只能删除最新版本；删除后该版本的清单、完整快照或增量包会被移除。`,
+    );
+    if (!confirmed) return;
+    try {
+      const message = await invoke<string>("delete_version", { versionId: record.id });
+      setVersionVerified(null);
+      showToast(message, "success");
+      await refreshVersionStatus();
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }
+
+  async function saveVersionStore() {
+    setVersionStoreSaving(true);
+    try {
+      await invoke("save_version_store_path", { path: versionStoreDraft });
+      setVersionVerified(null);
+      showToast("版本存储目录已保存", "success");
+      await refreshVersionStatus();
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setVersionStoreSaving(false);
+    }
+  }
+
+  async function chooseVersionStoreDirectory() {
+    const selected = await open({ title: "选择版本存储目录", directory: true, multiple: false });
+    if (typeof selected === "string") setVersionStoreDraft(selected);
+  }
+
+  async function updateVersionParallel(enabled: boolean) {
+    const previous = versionParallel;
+    setVersionParallel(enabled);
+    setVersionParallelSaving(true);
+    try {
+      await invoke("save_version_parallel", { enabled });
+      showToast(enabled ? "已启用多线程扫描与复制" : "已切换为单线程模式", "success");
+    } catch (error: unknown) {
+      setVersionParallel(previous);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setVersionParallelSaving(false);
+    }
+  }
+
+  function cancelVersionOperation() {
+    void invoke("cancel_version_operation").catch(() => undefined);
+    showToast("正在取消版本操作…（还原写入阶段会等当前文件写完）", "info");
+  }
+
+  async function refreshLauncherLog() {
+    setLauncherLogLoading(true);
+    setLauncherLogError(null);
+    try {
+      const tail = await invoke<LauncherLogTail>("read_launcher_log", { limit: 256 * 1024 });
+      setLauncherLogTail(tail);
+    } catch (error: unknown) {
+      setLauncherLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLauncherLogLoading(false);
+    }
+  }
+
+  function copyLauncherLog() {
+    const content = launcherLogTail?.content ?? "";
+    if (!content) {
+      showToast("启动器日志为空。", "info");
+      return;
+    }
+    void writeText(content)
+      .then(() => showToast("已复制启动器日志", "success"))
+      .catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : String(error), "error");
+      });
+  }
+
+  async function clearLauncherLog() {
+    if (!window.confirm("确定清空启动器日志吗？历史记录会被删除。")) {
+      return;
+    }
+    try {
+      await invoke("clear_launcher_log");
+      showToast("启动器日志已清空", "success");
+      await refreshLauncherLog();
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }
+
+  async function openLauncherLogFolder() {
+    try {
+      await invoke("open_launcher_log_folder");
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }
+
   async function loadWorkshop(filters: WorkshopFilters) {
     const requestId = ++workshopRequestId.current;
     setWorkshopLoading(true);
@@ -5415,18 +5816,25 @@ function App() {
     scheduleWorkshopLoad(reset, 0);
   }
 
-  async function openWorkshopItem(workshopId: string, fallbackUrl: string) {
+  async function openWorkshopLink(link: ModWorkshopLink) {
     try {
       showToast("正在打开 Steam 创意工坊资源。", "info");
-      await openUrl(steamWorkshopUrl(workshopId));
+      await openUrl(link.url);
       return;
     } catch {
       try {
-        await openUrl(fallbackUrl);
+        await openUrl(link.fallbackUrl);
       } catch (error: unknown) {
         showToast(error instanceof Error ? error.message : String(error), "error");
       }
     }
+  }
+
+  async function openWorkshopItem(workshopId: string, fallbackUrl: string) {
+    await openWorkshopLink({
+      url: steamWorkshopUrl(workshopId),
+      fallbackUrl,
+    });
   }
 
   function openRecommendedWorkshop(workshopId: string) {
@@ -5906,6 +6314,81 @@ function App() {
     </Stack>
   );
 
+  const launcherLogSettingsContent = (
+    <Box className="pz-panel pz-launcher-log-panel">
+      <HStack align="start" gap="3" justify="space-between" wrap="wrap">
+        <Box flex="1" minW="0">
+          <Text color="gray.900" fontSize="lg" fontWeight="700">启动器日志</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            记录启动器启动、游戏检测/启动、版本操作、PZ Optimization 安装卸载以及前端错误。
+          </Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            日志时间使用 UTC（行尾 Z）；日志只保存在本机，提交反馈时会一并上传最近一次启动的日志。
+          </Text>
+        </Box>
+        <Button loading={launcherLogLoading} onClick={() => void refreshLauncherLog()} size="sm" variant="outline">
+          刷新
+        </Button>
+      </HStack>
+
+      {launcherLogError ? (
+        <Text color="red.500" fontSize="xs" mt="3" whiteSpace="pre-wrap">读取失败：{launcherLogError}</Text>
+      ) : null}
+
+      {launcherLogTail ? (
+        <>
+          <Box bg="gray.50" borderColor="gray.200" borderRadius="md" borderWidth="1px" mt="4" p="3">
+            <Stack gap="2">
+              <HStack align="start" gap="3" justify="space-between">
+                <Text color="gray.500" fontSize="xs">文件</Text>
+                <Text color="gray.700" fontSize="xs" overflowWrap="anywhere" textAlign="right">{launcherLogTail.path}</Text>
+              </HStack>
+              <HStack align="start" gap="3" justify="space-between">
+                <Text color="gray.500" fontSize="xs">大小</Text>
+                <Text color="gray.700" fontSize="xs" textAlign="right">
+                  {formatVersionBytes(launcherLogTail.size)}
+                  {launcherLogTail.truncated ? " · 仅显示末尾 256 KB" : ""}
+                </Text>
+              </HStack>
+            </Stack>
+          </Box>
+
+          <HStack gap="2" mt="3" wrap="wrap">
+            <Button disabled={!launcherLogTail.content} onClick={copyLauncherLog} size="sm" variant="outline">复制</Button>
+            <Button onClick={() => void openLauncherLogFolder()} size="sm" variant="outline">打开日志文件夹</Button>
+            <Button colorPalette="red" onClick={() => void clearLauncherLog()} size="sm" variant="ghost">清空日志</Button>
+          </HStack>
+
+          <Box
+            aria-label="启动器日志内容"
+            as="pre"
+            bg="gray.900"
+            borderRadius="md"
+            className="pz-launcher-log-view"
+            color="gray.100"
+            fontFamily="mono"
+            fontSize="xs"
+            lineHeight="1.5"
+            maxH="360px"
+            mt="3"
+            overflowWrap="anywhere"
+            overflowX="hidden"
+            overflowY="auto"
+            p="3"
+            tabIndex={0}
+            whiteSpace="pre-wrap"
+          >
+            {launcherLogTail.content || (launcherLogTail.exists ? "日志文件为空。" : "日志文件还没有创建。启动器启动或执行操作后会自动生成。")}
+          </Box>
+        </>
+      ) : !launcherLogLoading ? (
+        <Text color="gray.500" fontSize="sm" mt="4">还没有读取日志。</Text>
+      ) : (
+        <Text color="gray.500" fontSize="sm" mt="4">正在读取启动器日志...</Text>
+      )}
+    </Box>
+  );
+
   const pzOptimizationStatus =
     detection.status === "found" ? detection.paths.pzOptimization : null;
   const pzOptimizationNeedsUpdate =
@@ -5918,6 +6401,10 @@ function App() {
     pzOptimizationStatus?.installed &&
     pzOptimizationStatus.availableRevision &&
     pzOptimizationStatus.installedRevision === pzOptimizationStatus.availableRevision,
+  );
+  const pzOptimizationForceAvailable = Boolean(pzOptimizationStatus?.forceInstallAvailable);
+  const pzOptimizationCanInstall = Boolean(
+    pzOptimizationStatus?.available || pzOptimizationForceAvailable,
   );
 
   // 支持库页的三项安装内容同属一个面板；三项都不可见时整个面板不渲染。
@@ -6003,7 +6490,9 @@ function App() {
                       ? "可更新"
                       : pzOptimizationStatus.available
                         ? "可安装"
-                        : "未下载"
+                        : pzOptimizationForceAvailable
+                          ? "可强制安装"
+                          : "未下载"
                 }
                 badgePalette={
                   pzOptimizationInstalledCurrent
@@ -6012,7 +6501,9 @@ function App() {
                       ? pzOptimizationNeedsUpdate
                         ? "orange"
                         : "blue"
-                      : "gray"
+                      : pzOptimizationForceAvailable
+                        ? "orange"
+                        : "gray"
                 }
                 description="优化游戏性能的模组，以替换部分游戏文件的方式安装，不会改动游戏主程序；卸载时会自动还原。"
                 expanded={supportPzOptimizationExpanded}
@@ -6024,12 +6515,17 @@ function App() {
                     ? "已安装 PZ Optimization。"
                     : pzOptimizationStatus.available
                       ? "创意工坊文件已下载，点击下方按钮即可自动安装。"
-                      : "请先在 Steam 创意工坊订阅并等待 PZ Optimization 下载完成。"}
+                      : pzOptimizationForceAvailable
+                        ? "没有匹配当前游戏版本的类文件，但检测到官方 install.ps1。可以强制安装：脚本会从 GitHub 下载当前版本的构建。"
+                        : "请先在 Steam 创意工坊订阅并等待 PZ Optimization 下载完成。"}
                 </Text>
                 {developerMode && (
                   <Stack gap="0.5" mt="2">
                     <Text color="gray.500" fontFamily="mono" fontSize="xs" overflowWrap="anywhere">
                       来源：{pzOptimizationStatus.sourcePath ?? "未找到"}
+                    </Text>
+                    <Text color="gray.500" fontFamily="mono" fontSize="xs" overflowWrap="anywhere">
+                      安装脚本：{pzOptimizationStatus.installerPath ?? "未找到"}
                     </Text>
                     <Text color="gray.500" fontFamily="mono" fontSize="xs">
                       已安装版本：{pzOptimizationStatus.installedRevision ?? "未检测到"}
@@ -6050,20 +6546,27 @@ function App() {
                     </Button>
                   )}
                   <Button
-                    colorPalette="blue"
-                    disabled={
-                      !pzOptimizationStatus.available ||
-                      pzOptimizationInstalledCurrent
+                    colorPalette={
+                      pzOptimizationForceAvailable && !pzOptimizationStatus.available
+                        ? "orange"
+                        : "blue"
                     }
+                    disabled={!pzOptimizationCanInstall || pzOptimizationInstalledCurrent}
                     loading={installingPzOptimization}
-                    onClick={() => void installPzOptimization()}
+                    onClick={() =>
+                      void installPzOptimization(
+                        pzOptimizationForceAvailable && !pzOptimizationStatus.available,
+                      )
+                    }
                     size="sm"
                   >
                     {pzOptimizationInstalledCurrent
                       ? "已安装"
                       : pzOptimizationNeedsUpdate
                         ? "一键更新"
-                        : "一键安装"}
+                        : pzOptimizationForceAvailable && !pzOptimizationStatus.available
+                          ? "强制安装（官方脚本）"
+                          : "一键安装"}
                   </Button>
                   {pzOptimizationStatus.installed && (
                     <Button
@@ -6077,6 +6580,12 @@ function App() {
                     </Button>
                   )}
                 </HStack>
+                {pzOptimizationForceAvailable && !pzOptimizationStatus.available && (
+                  <Text color="orange.700" fontSize="xs" mt="3">
+                    强制安装会运行官方脚本并从 GitHub 下载匹配当前游戏版本（revision）的构建；
+                    如果作者尚未发布该版本，脚本会直接报错，不会硬装旧类文件。
+                  </Text>
+                )}
                 <Text color="orange.700" fontSize="xs" mt="3">
                   安装会替换部分游戏文件，卸载时会自动还原。安装前请先完全退出游戏；暂未测试与其他模组、多人游戏的兼容性。
                 </Text>
@@ -7724,6 +8233,403 @@ function App() {
     </Box>
   );
 
+  const versionBusy =
+    versionOperationRunning ||
+    (versionStatus?.operationRunning ?? false) ||
+    versionParallelSaving;
+  const versionChainDepth = versionStatus ? versionDeltaChainDepth(versionStatus.versions) : 0;
+  const versionSettingsContent = (
+    <Box className="pz-panel pz-version-settings-panel">
+      <HStack align="start" gap="3" justify="space-between" wrap="wrap">
+        <Box flex="1" minW="0">
+          <Text color="gray.900" fontSize="lg" fontWeight="700">版本隔离</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            以完整快照为母文件，后续捕获只保存变化部分；历史版本从快照 + 增量链重建。
+          </Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            操作前请关闭游戏；建议在 Steam 里把 Project Zomboid 设为「仅在我启动此游戏时更新」。
+          </Text>
+        </Box>
+        <Button
+          disabled={versionBusy}
+          loading={versionStatusLoading}
+          onClick={() => void refreshVersionStatus()}
+          size="sm"
+          variant="outline"
+        >
+          刷新
+        </Button>
+      </HStack>
+
+      {versionStatusError ? (
+        <Text color="red.500" fontSize="xs" mt="3" whiteSpace="pre-wrap">读取失败：{versionStatusError}</Text>
+      ) : null}
+      {!versionStatus && versionStatusLoading ? (
+        <Text color="gray.500" fontSize="sm" mt="4">正在读取版本信息...</Text>
+      ) : null}
+
+      {versionStatus ? (
+        <>
+          <Box className="pz-version-section">
+            <Text color="gray.800" fontSize="sm" fontWeight="700">游戏环境</Text>
+            <Box className="pz-version-facts" mt="1">
+              <Box className="pz-version-fact">
+                <Text color="gray.500" fontSize="xs">游戏目录</Text>
+                <Text color="gray.700" fontSize="xs" overflowWrap="anywhere">
+                  {versionStatus.gamePath ?? "未检测到"}
+                </Text>
+              </Box>
+              <Box className="pz-version-fact">
+                <Text color="gray.500" fontSize="xs">Steam buildid</Text>
+                <Text color="gray.700" fontSize="xs">
+                  {versionStatus.steamBuildId ?? "未知"}
+                  {versionStatus.steamUpdatePending ? " · 与最后捕获不同" : ""}
+                </Text>
+              </Box>
+              <Box className="pz-version-fact">
+                <Text color="gray.500" fontSize="xs">最后捕获 buildid</Text>
+                <Text color="gray.700" fontSize="xs">{versionStatus.lastCapturedBuildId ?? "—"}</Text>
+              </Box>
+              <Box className="pz-version-fact">
+                <Text color="gray.500" fontSize="xs">游戏分支</Text>
+                <Text color="gray.700" fontSize="xs">{versionStatus.branch}</Text>
+              </Box>
+            </Box>
+          </Box>
+
+          <Box className="pz-version-section">
+            <Text color="gray.800" fontSize="sm" fontWeight="700">版本存储目录</Text>
+            <HStack gap="2" mt="1" wrap="wrap">
+              <Input
+                aria-label="版本存储目录"
+                flex="1"
+                minW="240px"
+                onChange={(event) => setVersionStoreDraft(event.currentTarget.value)}
+                placeholder="留空使用默认目录"
+                size="sm"
+                value={versionStoreDraft}
+              />
+              <Button onClick={() => void chooseVersionStoreDirectory()} size="sm" variant="outline">浏览</Button>
+              <Button disabled={versionBusy} loading={versionStoreSaving} onClick={() => void saveVersionStore()} size="sm" variant="outline">保存</Button>
+            </HStack>
+            <Text color="gray.500" fontSize="xs" mt="1">
+              默认在用户 Zomboid 目录下的 .pzmanager/versions。换目录不会自动迁移已有版本，需要手动复制。
+            </Text>
+          </Box>
+
+          <Box className="pz-version-section">
+            <HStack align="center" gap="4" justify="space-between" wrap="wrap">
+              <Box flex="1" minW="260px">
+                <Text color="gray.800" fontSize="sm" fontWeight="700">多线程扫描与复制</Text>
+                <Text color="gray.500" fontSize="xs" mt="1">
+                  并行计算 SHA-256、复制完整快照和还原文件；默认开启，开关在下次版本操作时生效。
+                  机械硬盘如果明显变慢，可以关掉改用单线程。
+                </Text>
+              </Box>
+              <Switch.Root
+                aria-label="多线程扫描与复制"
+                checked={versionParallel}
+                disabled={versionBusy}
+                onCheckedChange={(details) => void updateVersionParallel(details.checked)}
+              >
+                <Switch.HiddenInput />
+                <Switch.Control>
+                  <Switch.Thumb />
+                </Switch.Control>
+              </Switch.Root>
+            </HStack>
+          </Box>
+
+          <Box className="pz-version-section">
+            <HStack align="center" gap="2" wrap="wrap">
+              <Text color="gray.800" fontSize="sm" fontWeight="700">当前目录</Text>
+              <Badge colorPalette={versionStatus.currentMatch.kind === "unknown" ? "orange" : "blue"} size="sm">
+                {versionMatchLabel(versionStatus.currentMatch, versionStatus.versions)}
+              </Badge>
+            </HStack>
+            <Text color="gray.500" fontSize="xs" mt="1" whiteSpace="pre-wrap">{versionStatus.currentMatch.message}</Text>
+            {versionVerified ? (
+              <Text
+                color={versionVerified.matchedVersionId ? "green.700" : "red.600"}
+                fontSize="xs"
+                mt="2"
+              >
+                最近一次校验：
+                {versionVerified.matchedVersionId
+                  ? `与「${versionLabelById(versionStatus.versions, versionVerified.matchedVersionId)}」完全一致`
+                  : "不属于任何已记录版本"}
+                （{shortVersionHash(versionVerified.rootHash)}）
+              </Text>
+            ) : null}
+            {versionStatus.pendingChanges ? (
+              <Text color="orange.700" fontSize="xs" mt="2">
+                与最新版本相比：新增 {versionStatus.pendingChanges.added} · 删除 {versionStatus.pendingChanges.removed} · 修改 {versionStatus.pendingChanges.modified}（按路径/大小初筛）。
+              </Text>
+            ) : null}
+          </Box>
+
+          {versionStatus.steamUpdatePending ? (
+            <Box className="pz-version-notice">
+              <Text color="orange.800" fontSize="sm" fontWeight="700">Steam 可能已经更新</Text>
+              <Text color="orange.700" fontSize="xs" mt="1">
+                Steam 清单的 buildid 是 {versionStatus.steamBuildId}，最后捕获的版本是 {versionStatus.lastCapturedBuildId ?? "未知"}。
+                建议先「捕获新版本」把更新后的内容存成增量；还原旧版本不会改变 Steam 的更新状态。
+              </Text>
+            </Box>
+          ) : null}
+
+          <Box className="pz-version-section">
+            <Text color="gray.800" fontSize="sm" fontWeight="700">创建 / 捕获</Text>
+            <HStack align="center" gap="2" mt="2" wrap="wrap">
+              <Input
+                aria-label="版本备注"
+                maxW="240px"
+                onChange={(event) => setVersionLabelDraft(event.currentTarget.value)}
+                placeholder="版本备注（可选）"
+                size="sm"
+                value={versionLabelDraft}
+              />
+              <Button
+                colorPalette="blue"
+                disabled={!versionStatus.gamePath || versionBusy}
+                onClick={() => void createVersionSnapshot()}
+                size="sm"
+              >
+                {versionStatus.versions.length > 0 ? "创建检查点" : "创建基准版本"}
+              </Button>
+              <Button
+                disabled={!versionStatus.gamePath || versionStatus.versions.length === 0 || versionBusy}
+                onClick={captureVersion}
+                size="sm"
+                variant="outline"
+              >
+                捕获新版本（增量）
+              </Button>
+              <Button
+                disabled={!versionStatus.gamePath || versionStatus.versions.length === 0 || versionBusy}
+                onClick={verifyVersion}
+                size="sm"
+                variant="outline"
+              >
+                校验当前目录
+              </Button>
+              {versionBusy ? (
+                <Button colorPalette="red" onClick={cancelVersionOperation} size="sm" variant="outline">
+                  取消
+                </Button>
+              ) : null}
+            </HStack>
+            <Text color="gray.500" fontSize="xs" mt="1">
+              完整快照 = 母文件/检查点；捕获 = 与最新版本比对，只保存变化部分。所有操作都在后台进行，可在下方看进度。
+            </Text>
+            <Text color="gray.500" fontSize="xs" mt="1">
+              已安装 PZ Optimization 时，还原会先卸载、成功后自动重装；想保留原版状态请先到「支持库」卸载。
+            </Text>
+            {versionChainDepth >= 5 ? (
+              <Text color="orange.700" fontSize="xs" mt="1">
+                当前增量链已有 {versionChainDepth} 层，建议创建一个检查点，减少还原时的重建时间。
+              </Text>
+            ) : null}
+          </Box>
+
+          {versionOperation ? (
+            <Box className="pz-version-section">
+              <HStack align="flex-start" gap="3" justify="space-between" wrap="wrap">
+                <Text color="gray.800" fontSize="sm" fontWeight="700">
+                  {versionOperation.status === "completed"
+                    ? "上次操作完成"
+                    : versionOperation.status === "error"
+                      ? "上次操作失败"
+                      : "正在执行版本操作"}
+                </Text>
+                <Text color="gray.500" fontSize="xs">
+                  {versionOperation.totalFiles > 0
+                    ? `${versionOperation.processedFiles} / ${versionOperation.totalFiles} 个文件 · `
+                    : ""}
+                  {versionProgressPercent(versionOperation)}%
+                </Text>
+              </HStack>
+              <Box bg="gray.200" borderRadius="full" h="2" mt="2" overflow="hidden">
+                <Box
+                  bg={versionOperation.status === "error" ? "red.400" : "blue.500"}
+                  h="full"
+                  transition="width 0.2s"
+                  width={`${versionProgressPercent(versionOperation)}%`}
+                />
+              </Box>
+              <Text
+                color={versionOperation.status === "error" ? "red.600" : "gray.600"}
+                fontSize="xs"
+                mt="2"
+                whiteSpace="pre-wrap"
+              >
+                {versionOperation.status === "error"
+                  ? versionOperation.error ?? "版本操作失败"
+                  : versionOperation.message ?? `${versionPhaseLabel(versionOperation.phase)}…`}
+              </Text>
+              {versionOperation.currentPath && versionOperation.status !== "completed" ? (
+                <Text color="gray.400" fontSize="xs" mt="1" overflowWrap="anywhere">
+                  {versionOperation.currentPath}
+                </Text>
+              ) : null}
+            </Box>
+          ) : null}
+
+          <Box className="pz-version-section">
+            <HStack align="center" gap="3" justify="space-between" wrap="wrap">
+              <Text color="gray.800" fontSize="sm" fontWeight="700">版本历史</Text>
+              <Text color="gray.500" fontSize="xs">{versionStatus.versions.length} 个版本</Text>
+            </HStack>
+            {versionStatus.versions.length === 0 ? (
+              <Text color="gray.500" fontSize="sm" mt="3">
+                还没有版本记录。先创建一个基准版本，把当前游戏目录完整存下来。
+              </Text>
+            ) : (
+              <Box className="pz-version-list" mt="2">
+                {versionStatus.versions
+                  .slice()
+                  .reverse()
+                  .map((record, index) => {
+                    const changeLog = record.changeLog;
+                    const isLatest = index === 0;
+                    const isCurrent = versionStatus.currentMatch.versionId === record.id;
+                    const expanded = versionExpandedId === record.id;
+                    return (
+                      <Box className="pz-version-entry" key={record.id}>
+                        <HStack align="flex-start" gap="3" justify="space-between" wrap="wrap">
+                          <Box flex="1" minW="240px">
+                            <HStack align="center" gap="2" wrap="wrap">
+                              <Text color="gray.900" fontSize="sm" fontWeight="700">{record.label}</Text>
+                              <Badge colorPalette={record.baseType === "full" ? "purple" : "blue"} size="sm">
+                                {versionBaseTypeLabel(record.baseType, record.parentId)}
+                              </Badge>
+                              {isCurrent ? <Badge colorPalette="green" size="sm">当前</Badge> : null}
+                              {record.steamBuildId ? (
+                                <Badge size="sm" variant="subtle">build {record.steamBuildId}</Badge>
+                              ) : null}
+                            </HStack>
+                            <Text color="gray.500" fontSize="xs" mt="1">
+                              {formatVersionTime(record.createdAt)} · {record.fileCount} 个文件 · {formatVersionBytes(record.totalBytes)} · {shortVersionHash(record.rootHash)}
+                            </Text>
+                            <Text color="gray.500" fontSize="xs" mt="0.5">
+                              {changeLog
+                                ? `相对上一版本：${versionChangeSummary(changeLog)}`
+                                : "完整快照（母文件/检查点）"}
+                            </Text>
+                          </Box>
+                          <HStack align="center" gap="2" wrap="wrap">
+                            {changeLog ? (
+                              <Button
+                                onClick={() => setVersionExpandedId(expanded ? null : record.id)}
+                                size="xs"
+                                variant="ghost"
+                              >
+                                {expanded ? "收起变更" : "查看变更"}
+                              </Button>
+                            ) : null}
+                            <Button
+                              disabled={versionBusy}
+                              onClick={() => void restoreVersion(record)}
+                              size="xs"
+                              variant="outline"
+                            >
+                              还原到此版本
+                            </Button>
+                            {isLatest ? (
+                              <Button
+                                colorPalette="red"
+                                disabled={versionBusy}
+                                onClick={() => void deleteVersion(record)}
+                                size="xs"
+                                variant="ghost"
+                              >
+                                删除
+                              </Button>
+                            ) : null}
+                          </HStack>
+                        </HStack>
+                        {expanded && changeLog ? (
+                          <Box className="pz-version-entry-diff">
+                            <Stack gap="2">
+                              {changeLog.added.length > 0 ? (
+                                <Box>
+                                  <Text color="green.700" fontSize="xs" fontWeight="700">新增 {changeLog.added.length}</Text>
+                                  {changeLog.added.slice(0, 200).map((entry) => (
+                                    <Text
+                                      color="gray.600"
+                                      fontFamily="mono"
+                                      fontSize="xs"
+                                      key={`added-${entry.path}`}
+                                      overflowWrap="anywhere"
+                                      pl="2"
+                                    >
+                                      {entry.path} · {formatVersionBytes(entry.size)}
+                                    </Text>
+                                  ))}
+                                  {changeLog.added.length > 200 ? (
+                                    <Text color="gray.400" fontSize="xs" pl="2">还有 {changeLog.added.length - 200} 项…</Text>
+                                  ) : null}
+                                </Box>
+                              ) : null}
+                              {changeLog.modified.length > 0 ? (
+                                <Box>
+                                  <Text color="orange.700" fontSize="xs" fontWeight="700">修改 {changeLog.modified.length}</Text>
+                                  {changeLog.modified.slice(0, 200).map((entry) => (
+                                    <Text
+                                      color="gray.600"
+                                      fontFamily="mono"
+                                      fontSize="xs"
+                                      key={`modified-${entry.path}`}
+                                      overflowWrap="anywhere"
+                                      pl="2"
+                                    >
+                                      {entry.path} · {formatVersionBytes(entry.oldSize)} → {formatVersionBytes(entry.newSize)}
+                                    </Text>
+                                  ))}
+                                  {changeLog.modified.length > 200 ? (
+                                    <Text color="gray.400" fontSize="xs" pl="2">还有 {changeLog.modified.length - 200} 项…</Text>
+                                  ) : null}
+                                </Box>
+                              ) : null}
+                              {changeLog.removed.length > 0 ? (
+                                <Box>
+                                  <Text color="red.600" fontSize="xs" fontWeight="700">删除 {changeLog.removed.length}</Text>
+                                  {changeLog.removed.slice(0, 200).map((path) => (
+                                    <Text
+                                      color="gray.600"
+                                      fontFamily="mono"
+                                      fontSize="xs"
+                                      key={`removed-${path}`}
+                                      overflowWrap="anywhere"
+                                      pl="2"
+                                    >
+                                      {path}
+                                    </Text>
+                                  ))}
+                                  {changeLog.removed.length > 200 ? (
+                                    <Text color="gray.400" fontSize="xs" pl="2">还有 {changeLog.removed.length - 200} 项…</Text>
+                                  ) : null}
+                                </Box>
+                              ) : null}
+                              {changeLog.fromBuildId || changeLog.toBuildId ? (
+                                <Text color="gray.400" fontSize="xs">
+                                  build {changeLog.fromBuildId ?? "未知"} → {changeLog.toBuildId ?? "未知"}
+                                </Text>
+                              ) : null}
+                            </Stack>
+                          </Box>
+                        ) : null}
+                      </Box>
+                    );
+                  })}
+              </Box>
+            )}
+          </Box>
+        </>
+      ) : null}
+    </Box>
+  );
+
   const settingsContent = (
     <Box className="pz-resource-center pz-settings-center">
       <Box as="nav" aria-label="设置分类" className="pz-resource-center-sidebar">
@@ -7752,6 +8658,17 @@ function App() {
             通用
           </Button>
           <Button
+            aria-current={settingsPage === "versions" ? "page" : undefined}
+            className={`pz-resource-center-sidebar-item ${
+              settingsPage === "versions" ? "pz-resource-center-sidebar-item-active" : ""
+            }`}
+            onClick={() => setSettingsPage("versions")}
+            size="sm"
+            variant="ghost"
+          >
+            版本
+          </Button>
+          <Button
             aria-current={settingsPage === "translator" ? "page" : undefined}
             className={`pz-resource-center-sidebar-item ${
               settingsPage === "translator" ? "pz-resource-center-sidebar-item-active" : ""
@@ -7772,6 +8689,17 @@ function App() {
             variant="ghost"
           >
             控制台
+          </Button>
+          <Button
+            aria-current={settingsPage === "logs" ? "page" : undefined}
+            className={`pz-resource-center-sidebar-item ${
+              settingsPage === "logs" ? "pz-resource-center-sidebar-item-active" : ""
+            }`}
+            onClick={() => setSettingsPage("logs")}
+            size="sm"
+            variant="ghost"
+          >
+            日志
           </Button>
           <Button
             aria-current={settingsPage === "downloader" ? "page" : undefined}
@@ -7813,10 +8741,14 @@ function App() {
           ? aboutSettingsContent
           : settingsPage === "general"
             ? generalSettingsContent
+          : settingsPage === "versions"
+            ? versionSettingsContent
           : settingsPage === "translator"
             ? translatorSettingsContent
             : settingsPage === "console"
               ? consoleContent
+              : settingsPage === "logs"
+                ? launcherLogSettingsContent
               : settingsPage === "downloader"
                 ? downloaderSettingsContent
                 : settingsPage === "modLoader"
@@ -7940,6 +8872,15 @@ function App() {
                     (entry) => entry.id.toLowerCase() === mod.id.toLowerCase(),
                   );
                   return (
+              <ModRowContextMenu
+                busy={busy}
+                canEnable={mod.hasB42}
+                enabled={mod.enabled}
+                onDisable={() => void setLuaModsEnabled([mod], false)}
+                onEnable={() => void setLuaModsEnabled([mod], true)}
+                onOpenWorkshop={(link) => void openWorkshopLink(link)}
+                workshopId={mod.workshopId}
+              >
               <Box
                 aria-checked={selected}
                 aria-label={`选择 ${mod.name}`}
@@ -8091,6 +9032,7 @@ function App() {
                   </Box>
                 </Box>
               </Box>
+              </ModRowContextMenu>
                   );
                 }}
               />
@@ -8232,15 +9174,26 @@ function App() {
                     render={() => {
                       const selected = selectedJarModKeys.has(modKey);
                       const expanded = expandedJarModKeys.has(modKey);
+                      const enabled = mod.decision === true && !mod.disabled;
+                      const busy = luaModBatchAction !== null || jarModBatchAction !== null;
                       const toggleExpanded = () => {
                         setExpandedJarModKeys((current) => toggleJarModExpansion(current, modKey));
                       };
 
                       return (
+                  <ModRowContextMenu
+                    busy={busy}
+                    canEnable
+                    enabled={enabled}
+                    onDisable={() => void setJarModDecisions([mod], false)}
+                    onEnable={() => void setJarModDecisions([mod], true)}
+                    onOpenWorkshop={(link) => void openWorkshopLink(link)}
+                    workshopId={mod.workshopId}
+                  >
                   <Box
                     aria-checked={selected}
                     aria-label={`选择 ${mod.id}`}
-                    className={`pz-mod-row pz-jar-mod-row${selected ? " is-selected" : ""}${mod.decision === true && !mod.disabled ? " is-enabled" : ""}${mod.disabled || mod.decision === false ? " is-rejected" : ""}${expanded ? " pz-jar-mod-row-expanded" : ""}`}
+                    className={`pz-mod-row pz-jar-mod-row${selected ? " is-selected" : ""}${enabled ? " is-enabled" : ""}${mod.disabled || mod.decision === false ? " is-rejected" : ""}${expanded ? " pz-jar-mod-row-expanded" : ""}`}
                     key={modKey}
                     onClick={(event) => {
                       const target = event.target as HTMLElement;
@@ -8305,8 +9258,8 @@ function App() {
                           onKeyDown={(event) => event.stopPropagation()}
                         >
                           <Switch.Root
-                            aria-label={`${mod.decision === true && !mod.disabled ? "禁用" : "启用"} ${mod.id}`}
-                            checked={mod.decision === true && !mod.disabled}
+                            aria-label={`${enabled ? "禁用" : "启用"} ${mod.id}`}
+                            checked={enabled}
                             disabled={luaModBatchAction !== null || jarModBatchAction !== null}
                             onCheckedChange={(details) => void setJarModDecisions([mod], details.checked)}
                             size="sm"
@@ -8394,6 +9347,7 @@ function App() {
                       </Box>
                     </Box>
                   </Box>
+                  </ModRowContextMenu>
                       );
                     }}
                   />

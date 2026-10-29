@@ -3,9 +3,9 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use zip::ZipArchive;
 
 mod downloader;
 mod feedback;
+mod launcher_log;
 mod memclean;
 mod news;
 mod news_translation;
@@ -23,6 +24,7 @@ mod overlay_session;
 mod resource;
 mod steam_relay;
 mod update;
+mod versioning;
 mod workshop;
 
 const PROJECT_ZOMBOID_APP_ID: &str = "108600";
@@ -745,6 +747,9 @@ struct PzOptimizationStatus {
     installed_revision: Option<String>,
     available_revision: Option<String>,
     missing_components: Vec<String>,
+    /// 没有匹配当前游戏版本的 pzopt-classes，但找到了官方 install.ps1。
+    /// 可以用脚本从 GitHub 下载匹配当前版本的构建。
+    force_install_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1245,9 +1250,51 @@ fn pz_optimization_source_from_libraries(
     best.map(|(classes, installer, revision, _)| (classes, installer, revision))
 }
 
+fn pz_optimization_installer_from_libraries(libraries: &[PathBuf]) -> Option<PathBuf> {
+    let mut best: Option<(PathBuf, u64)> = None;
+
+    for library in libraries {
+        let mod_root = library
+            .join("steamapps")
+            .join("workshop")
+            .join("content")
+            .join(PROJECT_ZOMBOID_APP_ID)
+            .join(PZ_OPTIMIZATION_MOD_ID)
+            .join("mods")
+            .join("PZ_Optimization");
+        let Ok(entries) = fs::read_dir(&mod_root) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let version_root = entry.path();
+            let installer = version_root.join("install.ps1");
+            if !installer.is_file() {
+                continue;
+            }
+            let built = pz_optimization_build_info(&version_root.join("pzopt-classes"))
+                .and_then(|info| info.get("built").and_then(|value| value.parse::<u64>().ok()))
+                .unwrap_or(0);
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_built)| built > *best_built)
+            {
+                best = Some((installer, built));
+            }
+        }
+    }
+
+    best.map(|(installer, _)| installer)
+}
+
 fn pz_optimization_status(game_path: Option<&Path>, libraries: &[PathBuf]) -> PzOptimizationStatus {
     let game_revision = game_path.and_then(project_zomboid_revision);
     let source = pz_optimization_source_from_libraries(libraries, game_revision.as_deref());
+    let fallback_installer = pz_optimization_installer_from_libraries(libraries);
+    let force_install_available = source.is_none() && fallback_installer.is_some();
     let installed_revision = game_path
         .and_then(|path| fs::read_to_string(path.join("pzopt").join("build-info.properties")).ok())
         .and_then(|content| simple_properties(&content).get("revision").cloned());
@@ -1268,7 +1315,7 @@ fn pz_optimization_status(game_path: Option<&Path>, libraries: &[PathBuf]) -> Pz
     }
 
     let (source_path, installer_path, available_revision) =
-        source.map_or((None, None, None), |(classes, installer, revision)| {
+        source.map_or((None, fallback_installer.map(|path| path.to_string_lossy().into_owned()), None), |(classes, installer, revision)| {
             (
                 Some(classes.to_string_lossy().into_owned()),
                 Some(installer.to_string_lossy().into_owned()),
@@ -1284,6 +1331,7 @@ fn pz_optimization_status(game_path: Option<&Path>, libraries: &[PathBuf]) -> Pz
         installed_revision,
         available_revision,
         missing_components,
+        force_install_available,
     }
 }
 
@@ -1988,6 +2036,15 @@ struct AppSettings {
     /// 「Steam 网络加速 › 本地代理」：如 `http://127.0.0.1:7897` 或
     /// `socks5://127.0.0.1:1080`；空 / 无效 = 不用显式代理（走系统代理）。
     steam_proxy: Option<String>,
+    /// 「设置 › 版本」的版本存储目录；空 / 缺失 = `.pzmanager/versions`。
+    version_store_path: Option<String>,
+    /// 「设置 › 版本」：哈希/复制是否使用多线程；缺失 = 默认开启。
+    #[serde(default = "default_version_parallel_enabled")]
+    version_parallel: bool,
+}
+
+fn default_version_parallel_enabled() -> bool {
+    true
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4348,9 +4405,574 @@ fn delete_shaderpack_at(directory: &Path, name: &str) -> Result<(), String> {
     fs::remove_file(path).map_err(|error| format!("删除光影包失败: {error}"))
 }
 
+// ---------------------------------------------------------------------------
+// PZ 版本隔离（设置 › 版本）
+// ---------------------------------------------------------------------------
+
+const VERSION_STORE_DIR: &str = "versions";
+
+static VERSION_OPERATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static VERSION_OPERATION_CANCELLED: AtomicBool = AtomicBool::new(false);
+static NEXT_VERSION_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionProgressUpdate {
+    operation_id: u64,
+    operation: String,
+    status: String,
+    phase: String,
+    processed_files: u64,
+    total_files: u64,
+    processed_bytes: u64,
+    total_bytes: u64,
+    current_path: Option<String>,
+    message: Option<String>,
+    error: Option<String>,
+}
+
+struct VersionContext {
+    game_path: PathBuf,
+    store_path: PathBuf,
+    steam_build_id: Option<String>,
+    branch: String,
+    parallel: bool,
+}
+
+fn configured_version_options() -> Result<(PathBuf, bool), String> {
+    let settings = load_app_settings_at(&app_settings_path()?)?;
+    let store_path = if let Some(path) = settings
+        .version_store_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        PathBuf::from(path)
+    } else {
+        pzmanager_directory()?.join(VERSION_STORE_DIR)
+    };
+    Ok((store_path, settings.version_parallel))
+}
+
+fn configured_version_store_path() -> Result<PathBuf, String> {
+    configured_version_options().map(|(path, _)| path)
+}
+
+fn detected_game_path() -> Option<PathBuf> {
+    find_project_zomboid_paths()
+        .ok()
+        .and_then(|paths| paths.install_path)
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+fn version_path_key(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+fn steam_manifest_path_for_game(game_path: &Path) -> Option<PathBuf> {
+    let mut current = Some(game_path);
+    while let Some(directory) = current {
+        if directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("steamapps"))
+        {
+            return Some(
+                directory.join(format!("appmanifest_{PROJECT_ZOMBOID_APP_ID}.acf")),
+            );
+        }
+        current = directory.parent();
+    }
+
+    // 游戏目录不在常规的 `<库>/steamapps/common/<installdir>` 下时，退回到
+    // 遍历 Steam 库并比对 appmanifest 里解析出的安装路径。
+    let game_key = version_path_key(game_path);
+    for root in steam_roots() {
+        for library in library_paths_from_config(&root) {
+            if let Some(candidate) = game_path_from_library(&library) {
+                if version_path_key(Path::new(&candidate)) == game_key {
+                    return Some(
+                        library
+                            .join("steamapps")
+                            .join(format!("appmanifest_{PROJECT_ZOMBOID_APP_ID}.acf")),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+fn steam_manifest_value_for_game(game_path: &Path, key: &str) -> Option<String> {
+    let path = steam_manifest_path_for_game(game_path)?;
+    let content = fs::read_to_string(path).ok()?;
+    vdf_value(&content, key).filter(|value| !value.trim().is_empty())
+}
+
+fn version_context() -> Result<VersionContext, String> {
+    let game_path = detected_game_path().ok_or_else(|| {
+        "未检测到 Project Zomboid 安装目录，请先确认 Steam 已安装游戏。".to_string()
+    })?;
+    let (store_path, parallel) = configured_version_options()?;
+    versioning::ensure_store_outside_game(&store_path, &game_path)?;
+    let steam_build_id = steam_manifest_value_for_game(&game_path, "buildid");
+    let branch = steam_manifest_value_for_game(&game_path, "betakey")
+        .unwrap_or_else(|| "stable".to_string());
+    Ok(VersionContext {
+        game_path,
+        store_path,
+        steam_build_id,
+        branch,
+        parallel,
+    })
+}
+
+#[cfg(windows)]
+fn project_zomboid_running() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq ProjectZomboid64.exe", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .to_ascii_lowercase()
+                .contains("projectzomboid64.exe")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn project_zomboid_running() -> bool {
+    false
+}
+
+fn ensure_game_closed() -> Result<(), String> {
+    if project_zomboid_running() {
+        return Err("请先关闭 Project Zomboid，再执行版本操作。".to_string());
+    }
+    Ok(())
+}
+
+fn emit_version_progress(
+    app: &tauri::AppHandle,
+    operation_id: u64,
+    operation: &str,
+    status: &str,
+    phase: &str,
+    processed_files: u64,
+    total_files: u64,
+    processed_bytes: u64,
+    total_bytes: u64,
+    current_path: Option<String>,
+    message: Option<String>,
+    error: Option<String>,
+) {
+    let _ = app.emit(
+        "version-progress",
+        VersionProgressUpdate {
+            operation_id,
+            operation: operation.to_string(),
+            status: status.to_string(),
+            phase: phase.to_string(),
+            processed_files,
+            total_files,
+            processed_bytes,
+            total_bytes,
+            current_path,
+            message,
+            error,
+        },
+    );
+}
+
+/// 版本操作耗时较长（扫描、复制、哈希都可能到分钟级），放进后台线程，
+/// 用 `version-progress` 事件推送进度；同一时间只允许一个版本操作。
+fn spawn_version_operation<F>(
+    app: tauri::AppHandle,
+    operation: &str,
+    runner: F,
+) -> Result<u64, String>
+where
+    F: FnOnce(&mut dyn FnMut(versioning::ProgressEvent) -> Result<(), String>) -> Result<String, String>
+        + Send
+        + 'static,
+{
+    if VERSION_OPERATION_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("已有版本操作正在进行，请等待完成或先取消。".to_string());
+    }
+    VERSION_OPERATION_CANCELLED.store(false, Ordering::SeqCst);
+    let operation_id = NEXT_VERSION_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
+    let operation_name = operation.to_string();
+
+    thread::spawn(move || {
+        launcher_log::info(&format!("版本操作开始：{operation_name}"));
+        emit_version_progress(
+            &app,
+            operation_id,
+            &operation_name,
+            "started",
+            "preparing",
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+        );
+
+        let mut last_emit: Option<Instant> = None;
+        let mut last_phase = String::from("preparing");
+        let mut last_processed = 0u64;
+        let mut last_total = 0u64;
+        let mut last_processed_bytes = 0u64;
+        let mut last_total_bytes = 0u64;
+        let mut last_path: Option<String> = None;
+
+        let mut progress = |event: versioning::ProgressEvent| -> Result<(), String> {
+            if VERSION_OPERATION_CANCELLED.load(Ordering::SeqCst) {
+                return Err("操作已取消".to_string());
+            }
+            last_processed = event.processed_files;
+            last_total = event.total_files;
+            last_processed_bytes = event.processed_bytes;
+            last_total_bytes = event.total_bytes;
+            last_path = event.current_path.clone();
+
+            let finished = event.total_files > 0 && event.processed_files >= event.total_files;
+            let should_emit = event.phase != last_phase
+                || last_emit.is_none_or(|last| last.elapsed() >= Duration::from_millis(120))
+                || finished;
+            if should_emit {
+                last_emit = Some(Instant::now());
+                last_phase = event.phase.clone();
+                emit_version_progress(
+                    &app,
+                    operation_id,
+                    &operation_name,
+                    "progress",
+                    &event.phase,
+                    event.processed_files,
+                    event.total_files,
+                    event.processed_bytes,
+                    event.total_bytes,
+                    event.current_path,
+                    None,
+                    None,
+                );
+            }
+            Ok(())
+        };
+
+        let result = runner(&mut progress);
+        drop(progress);
+        // 先释放“正在进行”标记再推最终事件：前端收到 completed 后会立刻刷新状态，
+        // 如果这里还没清标记，刷新会读回 operationRunning=true，把按钮永久卡在忙碌态。
+        VERSION_OPERATION_ACTIVE.store(false, Ordering::SeqCst);
+
+        match &result {
+            Ok(message) => {
+                launcher_log::info(&format!("版本操作完成：{operation_name}：{message}"))
+            }
+            Err(error) => {
+                launcher_log::error(&format!("版本操作失败：{operation_name}：{error}"))
+            }
+        }
+
+        match result {
+            Ok(message) => emit_version_progress(
+                &app,
+                operation_id,
+                &operation_name,
+                "completed",
+                "done",
+                last_processed,
+                last_total,
+                last_processed_bytes,
+                last_total_bytes,
+                last_path,
+                Some(message),
+                None,
+            ),
+            Err(error) => emit_version_progress(
+                &app,
+                operation_id,
+                &operation_name,
+                "error",
+                "error",
+                last_processed,
+                last_total,
+                last_processed_bytes,
+                last_total_bytes,
+                last_path,
+                None,
+                Some(error),
+            ),
+        }
+    });
+
+    Ok(operation_id)
+}
+
+#[tauri::command(async)]
+fn get_version_status() -> Result<versioning::VersionStatus, String> {
+    let store_path = configured_version_store_path()?;
+    let game_path = detected_game_path();
+    let steam_build_id =
+        game_path.as_deref().and_then(|path| steam_manifest_value_for_game(path, "buildid"));
+    let branch = game_path
+        .as_deref()
+        .and_then(|path| steam_manifest_value_for_game(path, "betakey"))
+        .unwrap_or_else(|| "stable".to_string());
+    versioning::get_status(
+        game_path.as_deref(),
+        &store_path,
+        steam_build_id.as_deref(),
+        &branch,
+        VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst),
+    )
+}
+
+#[tauri::command(async)]
+fn save_version_store_path(path: String) -> Result<(), String> {
+    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
+        return Err("请等待当前版本操作完成后再修改存储目录。".to_string());
+    }
+    let trimmed = path.trim();
+    let game_path = detected_game_path();
+    let next = if trimmed.is_empty() {
+        None
+    } else {
+        let candidate = PathBuf::from(trimmed);
+        if !candidate.is_absolute() {
+            return Err("版本存储目录必须是绝对路径。".to_string());
+        }
+        if let Some(game) = game_path.as_deref() {
+            versioning::ensure_store_outside_game(&candidate, game)?;
+        }
+        fs::create_dir_all(&candidate).map_err(|error| {
+            format!("创建版本存储目录失败（{}）：{error}", candidate.display())
+        })?;
+        Some(candidate)
+    };
+
+    let settings_path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&settings_path)?;
+    settings.version_store_path = next.map(|value| value.to_string_lossy().into_owned());
+    save_app_settings_at(&settings_path, &settings)
+}
+
+#[tauri::command(async)]
+fn save_version_parallel(enabled: bool) -> Result<(), String> {
+    let settings_path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&settings_path)?;
+    settings.version_parallel = enabled;
+    save_app_settings_at(&settings_path, &settings)
+}
+
+#[tauri::command(async)]
+fn start_version_snapshot(
+    app: tauri::AppHandle,
+    label: Option<String>,
+) -> Result<u64, String> {
+    ensure_game_closed()?;
+    let context = version_context()?;
+    spawn_version_operation(app, "snapshot", move |progress| {
+        let outcome = versioning::create_full_snapshot(
+            &context.game_path,
+            &context.store_path,
+            context.steam_build_id.as_deref(),
+            &context.branch,
+            label.as_deref(),
+            context.parallel,
+            progress,
+        )?;
+        Ok(outcome.message)
+    })
+}
+
+#[tauri::command(async)]
+fn start_version_capture(
+    app: tauri::AppHandle,
+    label: Option<String>,
+) -> Result<u64, String> {
+    ensure_game_closed()?;
+    let context = version_context()?;
+    spawn_version_operation(app, "capture", move |progress| {
+        let outcome = versioning::capture_version(
+            &context.game_path,
+            &context.store_path,
+            context.steam_build_id.as_deref(),
+            &context.branch,
+            label.as_deref(),
+            context.parallel,
+            progress,
+        )?;
+        Ok(outcome.message)
+    })
+}
+
+fn pz_optimization_installed_for_game(game_path: &Path) -> bool {
+    let libraries = all_libraries_from_roots(&steam_roots());
+    pz_optimization_status(Some(game_path), &libraries).installed
+}
+
+fn version_pzopt_progress(label: &str) -> versioning::ProgressEvent {
+    versioning::ProgressEvent {
+        phase: "pzopt".to_string(),
+        processed_files: 0,
+        total_files: 0,
+        processed_bytes: 0,
+        total_bytes: 0,
+        current_path: Some(label.to_string()),
+    }
+}
+
+#[tauri::command(async)]
+fn start_version_restore(
+    app: tauri::AppHandle,
+    version_id: String,
+    force: bool,
+) -> Result<u64, String> {
+    ensure_game_closed()?;
+    let context = version_context()?;
+    spawn_version_operation(app, "restore", move |progress| {
+        // PZ Optimization 会替换游戏类文件。还原前先让它把自己的改动撤回原版，
+        // 还原成功后再按“还原后的游戏版本”重新安装；否则切换版本后模组状态会残留/失效。
+        let pz_was_installed = pz_optimization_installed_for_game(&context.game_path);
+        if pz_was_installed {
+            // 这一步已经进入收尾阶段，不再响应取消：PowerShell 安装器无法安全中断。
+            let _ = progress(version_pzopt_progress("还原前卸载 PZ Optimization"));
+            uninstall_pz_optimization().map_err(|error| {
+                format!("还原前卸载 PZ Optimization 失败，已中止还原：{error}")
+            })?;
+        }
+
+        let restore_result = versioning::restore_version(
+            &context.game_path,
+            &context.store_path,
+            &version_id,
+            force,
+            context.parallel,
+            progress,
+        );
+
+        let outcome = match restore_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if pz_was_installed {
+                    return Err(format!(
+                        "{error}\n\n提示：PZ Optimization 已在还原前卸载，还原失败后不会自动重装；可以到「支持库」手动安装。"
+                    ));
+                }
+                return Err(error);
+            }
+        };
+
+        let mut message = outcome.message;
+        if pz_was_installed {
+            let _ = progress(version_pzopt_progress("还原后重新安装 PZ Optimization"));
+            match install_pz_optimization_impl(true) {
+                Ok(result) => {
+                    if result.already_installed {
+                        message.push_str("\nPZ Optimization 保持已安装状态。");
+                    } else {
+                        let revision = result
+                            .installed_revision
+                            .map(|value| format!("（版本 {value}）"))
+                            .unwrap_or_default();
+                        message.push_str(&format!("\nPZ Optimization 已重新安装{revision}。"));
+                    }
+                }
+                Err(error) => {
+                    message.push_str(&format!(
+                        "\nPZ Optimization 未能自动重装：{error}\n可以到「支持库」手动安装。"
+                    ));
+                }
+            }
+        }
+
+        Ok(message)
+    })
+}
+
+#[tauri::command(async)]
+fn start_version_verify(app: tauri::AppHandle) -> Result<u64, String> {
+    let context = version_context()?;
+    let verify_app = app.clone();
+    spawn_version_operation(app, "verify", move |progress| {
+        let outcome = versioning::verify_current_version(
+            &context.game_path,
+            &context.store_path,
+            context.parallel,
+            progress,
+        )?;
+        // 额外的结构化结果：前端用它把「疑似」升级成「已校验」。
+        let _ = verify_app.emit("version-verified", outcome.clone());
+        Ok(outcome.message)
+    })
+}
+
+#[tauri::command]
+fn cancel_version_operation() -> Result<(), String> {
+    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
+        VERSION_OPERATION_CANCELLED.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn delete_version(version_id: String) -> Result<String, String> {
+    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
+        return Err("请等待当前版本操作完成后再删除版本。".to_string());
+    }
+    let store_path = configured_version_store_path()?;
+    versioning::delete_version(&store_path, &version_id)
+}
+
+#[tauri::command(async)]
+fn read_launcher_log(limit: Option<u64>) -> Result<launcher_log::LauncherLogTail, String> {
+    launcher_log::read_tail(limit)
+}
+
+#[tauri::command(async)]
+fn clear_launcher_log() -> Result<(), String> {
+    launcher_log::clear()
+}
+
+#[tauri::command(async)]
+fn open_launcher_log_folder() -> Result<(), String> {
+    launcher_log::open_folder()
+}
+
+#[tauri::command]
+fn log_frontend_message(level: String, message: String) {
+    launcher_log::frontend(&level, &message);
+}
+
 #[tauri::command(async)]
 fn detect_project_zomboid() -> Result<ProjectZomboidPaths, String> {
-    find_project_zomboid_paths()
+    let result = find_project_zomboid_paths();
+    match &result {
+        Ok(paths) => launcher_log::info(&format!(
+            "检测游戏目录：{}",
+            paths.install_path.as_deref().unwrap_or("未找到")
+        )),
+        Err(error) => launcher_log::warn(&format!("检测游戏目录失败：{error}")),
+    }
+    result
 }
 
 #[tauri::command(async)]
@@ -5288,18 +5910,59 @@ fn install_zombie_buddy() -> Result<ZombieBuddyInstallResult, String> {
     }
 }
 
-#[tauri::command(async)]
-fn install_pz_optimization() -> Result<PzOptimizationInstallResult, String> {
+#[cfg(windows)]
+fn run_pz_optimization_installer(
+    installer_path: &Path,
+    game_path: &Path,
+    source_path: Option<&Path>,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(installer_path)
+        .arg("-Dir")
+        .arg(game_path);
+    if let Some(source_path) = source_path {
+        command.arg("-From").arg(source_path);
+    }
+
+    let output = command
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("启动 PZ Optimization 安装器失败: {error}"))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = format!("{stdout}\n{stderr}").trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("PZ Optimization 安装器退出码：{}", output.status)
+        } else {
+            format!("PZ Optimization 安装失败：{detail}")
+        });
+    }
+    Ok(())
+}
+
+fn install_pz_optimization_impl(force: bool) -> Result<PzOptimizationInstallResult, String> {
     #[cfg(not(windows))]
     {
+        let _ = force;
         return Err("PZ Optimization 一键安装只支持 Windows".to_string());
     }
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
         let roots = steam_roots();
         let libraries = all_libraries_from_roots(&roots);
         let game_path = libraries
@@ -5321,67 +5984,78 @@ fn install_pz_optimization() -> Result<PzOptimizationInstallResult, String> {
             });
         }
 
-        let source_path = status
-            .source_path
-            .as_deref()
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                "找不到匹配当前游戏版本的 PZ_Optimization Workshop 文件，请先在 Steam 订阅并等待下载完成。"
-                    .to_string()
-            })?;
-        let installer_path = status
-            .installer_path
-            .as_deref()
-            .map(PathBuf::from)
-            .ok_or_else(|| "PZ_Optimization 缺少 install.ps1".to_string())?;
-
         if crate::overlay::imp::find_game_process().is_some() {
             return Err(
                 "请先完全退出 Project Zomboid，再执行 PZ Optimization 一键安装。".to_string(),
             );
         }
 
-        let output = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(&installer_path)
-            .arg("-From")
-            .arg(&source_path)
-            .arg("-Dir")
-            .arg(&game_path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|error| format!("启动 PZ Optimization 安装器失败: {error}"))?;
+        let source_path = status.source_path.as_deref().map(PathBuf::from);
+        let installer_path = status
+            .installer_path
+            .as_deref()
+            .map(PathBuf::from)
+            .ok_or_else(|| "找不到 PZ Optimization 官方安装脚本 install.ps1。".to_string())?;
 
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = format!("{stdout}\n{stderr}").trim().to_string();
-            return Err(if detail.is_empty() {
-                format!("PZ Optimization 安装器退出码：{}", output.status)
-            } else {
-                format!("PZ Optimization 安装失败：{detail}")
-            });
+        if force && source_path.is_none() {
+            // 脚本会优先使用自己旁边的 pzopt-classes（那是旧版本，revision 不匹配）；
+            // 复制到临时目录后，它才会走“按当前游戏 revision 从 GitHub 下载匹配构建”的分支。
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            let temp_dir = std::env::temp_dir().join(format!(
+                "pzmanager-pzopt-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&temp_dir)
+                .map_err(|error| format!("创建 PZ Optimization 临时目录失败：{error}"))?;
+            let temp_installer = temp_dir.join("install.ps1");
+            fs::copy(&installer_path, &temp_installer)
+                .map_err(|error| format!("复制 PZ Optimization 安装脚本失败：{error}"))?;
+
+            launcher_log::info(&format!(
+                "强制安装 PZ Optimization：使用官方脚本 {}（从 GitHub 下载匹配当前游戏版本的构建）",
+                installer_path.display()
+            ));
+            let result = run_pz_optimization_installer(&temp_installer, &game_path, None);
+            let _ = fs::remove_dir_all(&temp_dir);
+            result?;
+        } else {
+            let source_path = source_path.ok_or_else(|| {
+                "找不到匹配当前游戏版本的 PZ_Optimization Workshop 文件，请先在 Steam 订阅并等待下载完成。"
+                    .to_string()
+            })?;
+            launcher_log::info(&format!(
+                "安装 PZ Optimization：源 {}，安装器 {}，游戏 {}",
+                source_path.display(),
+                installer_path.display(),
+                game_path.display()
+            ));
+            run_pz_optimization_installer(&installer_path, &game_path, Some(&source_path))?;
         }
 
         let installed = pz_optimization_status(Some(&game_path), &libraries);
         if !installed.installed {
             return Err("PZ Optimization 安装器已结束，但未检测到安装清单".to_string());
         }
+        launcher_log::info(&format!(
+            "PZ Optimization 安装完成（revision {}）。",
+            installed.installed_revision.as_deref().unwrap_or("未知")
+        ));
 
         Ok(PzOptimizationInstallResult {
             changed: true,
             already_installed: false,
-            source_path: source_path.to_string_lossy().into_owned(),
+            source_path: status.source_path.unwrap_or_default(),
             installed_revision: installed.installed_revision,
         })
     }
+}
+
+#[tauri::command(async)]
+fn install_pz_optimization(force: Option<bool>) -> Result<PzOptimizationInstallResult, String> {
+    install_pz_optimization_impl(force.unwrap_or(false))
 }
 
 #[derive(Debug, Serialize)]
@@ -5442,6 +6116,11 @@ fn uninstall_pz_optimization() -> Result<PzOptimizationUninstallResult, String> 
                     "找不到 PZ Optimization 卸载脚本（pzopt\\uninstall\\install.ps1）。".to_string()
                 })?
         };
+        launcher_log::info(&format!(
+            "卸载 PZ Optimization：安装器 {}，游戏 {}",
+            installer_path.display(),
+            game_path.display()
+        ));
 
         let output = std::process::Command::new("powershell.exe")
             .args([
@@ -5475,6 +6154,7 @@ fn uninstall_pz_optimization() -> Result<PzOptimizationUninstallResult, String> 
         if after.installed {
             return Err("卸载器已结束，但仍检测到 PZ Optimization 安装清单".to_string());
         }
+        launcher_log::info("PZ Optimization 已卸载。");
 
         Ok(PzOptimizationUninstallResult {
             changed: true,
@@ -5719,6 +6399,11 @@ fn launch_project_zomboid(
         if policy_agent.is_none() {
             strip_loader_agent_tokens(&mut effective_launch_args);
         }
+        launcher_log::info(&format!(
+            "启动游戏：内存 {memory_mb} MB，加载器方案 {scheme}，极速启动 {}，启动参数 {}",
+            if fast_launch_agent.is_some() { "开" } else { "关" },
+            effective_launch_args.join(" ")
+        ));
         patch_steam_launch_options_at_paths(
             &steam_configs,
             Some(memory_mb),
@@ -5729,6 +6414,10 @@ fn launch_project_zomboid(
         // 会覆盖启动器设置）；只有方案启用了加载器时才把它的 agent 归一化成 policy=allow-all
         // （策略只在 agent 第一次加载时锁定，而 JSON/BAT 往往先于 Steam 参数被 JVM 读到）。
         apply_launch_loader(Some(memory_mb), policy_agent, fast_launch_agent.as_deref())?;
+        launcher_log::info(&format!(
+            "启动配置已写入（Steam 配置 {} 个）。",
+            steam_configs.len()
+        ));
 
         // 「启动时清理内存」：拉起游戏之前先把各进程的工作集还给系统。
         // 此刻游戏还没起来，所以这次清理不会被 memclean 的保护名单挡掉任何东西。
@@ -5738,22 +6427,35 @@ fn launch_project_zomboid(
             .is_some_and(|settings| settings.clean_memory_on_launch)
         {
             let report = memclean::clean_memory();
+            launcher_log::info(&format!(
+                "启动前清理内存：释放 {} MB（清理 {} 个进程，跳过 {} 个，耗时 {} ms）",
+                report.freed_mb, report.trimmed, report.skipped, report.elapsed_ms
+            ));
             eprintln!(
                 "启动前清理内存：释放 {} MB（清理 {} 个进程，跳过 {} 个，耗时 {} ms）",
                 report.freed_mb, report.trimmed, report.skipped, report.elapsed_ms
             );
         }
 
-        Command::new("cmd")
+        let launch_result = Command::new("cmd")
             .args([
                 "/C",
                 "start",
                 "",
                 &format!("steam://rungameid/{PROJECT_ZOMBOID_APP_ID}"),
             ])
-            .spawn()
-            .map_err(|error| format!("启动 Project Zomboid 失败: {error}"))?;
-        Ok(())
+            .spawn();
+        match launch_result {
+            Ok(_) => {
+                launcher_log::info("已发送 Steam 启动请求。");
+                Ok(())
+            }
+            Err(error) => {
+                let message = format!("启动 Project Zomboid 失败: {error}");
+                launcher_log::error(&message);
+                Err(message)
+            }
+        }
     }
 }
 
@@ -5801,6 +6503,13 @@ fn dir_is_writable(dir: &std::path::Path) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    launcher_log::start_session();
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        launcher_log::error(&format!("未捕获异常：{info}"));
+        default_panic_hook(info);
+    }));
+
     // 必须在 tauri::Builder 构建之前设置，WebView2 才会读取它。
     #[cfg(target_os = "windows")]
     ensure_webview2_data_folder();
@@ -5850,6 +6559,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             detect_project_zomboid,
+            read_launcher_log,
+            clear_launcher_log,
+            open_launcher_log_folder,
+            log_frontend_message,
             get_system_memory_mb,
             get_app_settings,
             save_memory_limit,
@@ -5870,6 +6583,15 @@ pub fn run() {
             save_steam_relay_settings,
             save_steam_proxy,
             detect_steam_proxy,
+            get_version_status,
+            save_version_store_path,
+            save_version_parallel,
+            start_version_snapshot,
+            start_version_capture,
+            start_version_restore,
+            start_version_verify,
+            cancel_version_operation,
+            delete_version,
             submit_feedback,
             ping_steam_relay,
             get_memory_status,
@@ -6031,6 +6753,48 @@ mod tests {
     }
 
     #[test]
+    fn offers_force_install_when_workshop_classes_match_no_game_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("library");
+        let version_root = library
+            .join("steamapps")
+            .join("workshop")
+            .join("content")
+            .join(PROJECT_ZOMBOID_APP_ID)
+            .join("3805285544")
+            .join("mods")
+            .join("PZ_Optimization")
+            .join("42");
+        let classes = version_root.join("pzopt-classes");
+        fs::create_dir_all(classes.join("pzopt")).unwrap();
+        fs::write(classes.join("pzopt-files.txt"), "pzopt/Test.class\n").unwrap();
+        fs::write(classes.join("pzopt").join("Test.class"), b"class").unwrap();
+        fs::write(
+            classes.join("pzopt").join("build-info.properties"),
+            "revision=4a0e9546ec\nbuilt=42\n",
+        )
+        .unwrap();
+        fs::write(version_root.join("install.ps1"), "# fixture\n").unwrap();
+
+        // 模拟 b42.22：游戏 revision 与 Workshop 里的构建不一致。
+        let game = temp.path().join("game");
+        fs::create_dir_all(&game).unwrap();
+        let jar = fs::File::create(game.join("projectzomboid.jar")).unwrap();
+        let mut zip = ZipWriter::new(jar);
+        zip.start_file("zombie/GitVersion.class", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"revision e013dbb529").unwrap();
+        zip.finish().unwrap();
+
+        let libraries = [library];
+        let status = pz_optimization_status(Some(&game), &libraries);
+        assert!(!status.available);
+        assert!(status.force_install_available);
+        assert!(status.installer_path.is_some());
+        assert_eq!(status.source_path, None);
+    }
+
+    #[test]
     fn persists_background_and_memory_settings() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("settings.json");
@@ -6059,6 +6823,8 @@ mod tests {
             steam_relay_mode: Some("relay".to_string()),
             steam_relay_base: Some("https://mirror.example/steam".to_string()),
             steam_proxy: Some("socks5://127.0.0.1:1080".to_string()),
+            version_store_path: None,
+            version_parallel: true,
         };
 
         save_app_settings_at(&path, &settings).unwrap();

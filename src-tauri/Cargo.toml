@@ -16,6 +16,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 与覆盖层 DLL 共用的纯解析逻辑（阶段/完成标记/进度估算）。
+overlay-core = { path = "../overlay-core" }
 tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }

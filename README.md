@@ -1,12 +1,14 @@
 # pzmanager
 
-Project Zomboid（僵尸毁灭工程）Windows 桌面启动器 + 模组管理器。基于 Tauri 2 + Rust + React 19 + TypeScript，负责 Steam 环境探测、启动链改写（内存上限 / ZombieBuddy agent 策略）、Lua 与 JAR 模组管理、Viewpoint 截图与光影包管理、创意工坊浏览与资源下载、开发者新闻翻译，以及游戏内加载覆盖层（注入 DLL + Hook OpenGL）。
+Project Zomboid（僵尸毁灭工程）Windows 桌面启动器 + 模组管理器。基于 Tauri 2 + Rust + React 19 + TypeScript，负责 Steam 环境探测、启动链改写（内存上限 / ZombieBuddy agent 策略）、Lua 与 JAR 模组管理、Viewpoint 截图与光影包管理、创意工坊浏览与资源下载、开发者新闻翻译、游戏版本隔离（母文件 + 增量链），以及游戏内加载覆盖层（注入 DLL + Hook OpenGL）。
 
 ## 文档
 
 | 文档 | 内容 |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | **从这里开始**：分层结构、前后端模块职责、Tauri 命令清单、磁盘与跨进程状态、测试与构建、已知技术债 |
+| [docs/version-isolation.md](docs/version-isolation.md) | 游戏版本隔离：母文件/检查点、版本清单与根哈希、CDC 增量格式、还原流程与命令 |
+| [docs/launcher-log.md](docs/launcher-log.md) | 启动器日志：记录范围、轮转、设置页查看/复制/清空、反馈附带规则 |
 | [docs/overlay-injection.md](docs/overlay-injection.md) | 覆盖层注入：注入链路、Hook 原理、GDI/GL 界面、停止条件、实测数据与排错表 |
 | [docs/superpowers/](docs/superpowers) | 最初"路径探测"阶段的计划与设计（历史归档，已过时） |
 

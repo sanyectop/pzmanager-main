@@ -73,6 +73,7 @@ test("overlay DLL parses bgcolor, tints both paths and picks readable ink", () =
   assert.match(overlayLib, /glClearColor\(/);
   // 浅色背景要自动换深色字
   assert.match(overlayUi, /fn ink_for\(rgb: \(u8, u8, u8\)\) -> \(u8, u8, u8\)/);
-  // 颜色变化要触发纹理重传
-  assert.match(overlayUi, /background_changed/);
+  // 颜色变化要触发纹理重传（现在由 apply_status_config 处理）
+  assert.match(overlayUi, /fn apply_status_config\(snapshot: &StatusSnapshot\)/);
+  assert.match(overlayUi, /ui\.background != background/);
 });

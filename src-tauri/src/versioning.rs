@@ -1,0 +1,2617 @@
+//! PZ 版本隔离（方案 D：母文件 + 增量链）。
+//!
+//! 存储布局（`store` 默认是 `<用户 Zomboid>/.pzmanager/versions`）：
+//!
+//! ```text
+//! versions/
+//! ├── base/<id>/                第一个完整快照（母文件）
+//! ├── checkpoints/<id>/         后续的完整快照（检查点）
+//! ├── deltas/<from>__<to>/      每次捕获的增量包
+//! ├── manifests/<id>.json       每个版本的文件清单
+//! ├── trash/restore-*/          还原时被移出的“目标版本里没有”的文件
+//! ├── tmp/                      操作过程中的临时文件
+//! └── meta.json                 版本链元数据
+//! ```
+//!
+//! 版本身份 = 根哈希（所有文件的相对路径 + 大小 + SHA-256 排序后再哈希）。
+//! 增量包使用内容定义分块（CDC，Gear hash）+ COPY/ADD 指令：只有真正变化的
+//! 分块才写入增量包，插入/删除一段数据不会让后面所有分块整体错位。
+//!
+//! 还原任意版本时从最近的完整快照出发，按父链逐个应用增量包；每个文件写出
+//! 后都会用清单里的 SHA-256 校验，校验不过就中止并删除临时文件。
+
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::OnceLock;
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const MANIFEST_DIR: &str = "manifests";
+const BASE_DIR: &str = "base";
+const CHECKPOINT_DIR: &str = "checkpoints";
+const DELTA_DIR: &str = "deltas";
+const TRASH_DIR: &str = "trash";
+const TMP_DIR: &str = "tmp";
+const META_FILE: &str = "meta.json";
+const META_FORMAT: u32 = 1;
+
+const DELTA_MAGIC: &[u8; 4] = b"PZD1";
+const CHUNK_MIN: usize = 16 * 1024;
+const CHUNK_MAX: usize = 128 * 1024;
+const CHUNK_MASK: u64 = 0xFFFF;
+const MAX_CHAIN_DEPTH: u32 = 64;
+/// 并行哈希/复制最多开多少个 worker；再多通常被磁盘或 CPU 限住，反而增加内存。
+const MAX_PARALLEL_WORKERS: usize = 6;
+
+/// 一次扫描 / 快照 / 还原的进度。回调返回 `Err` 表示用户取消。
+#[derive(Debug, Clone)]
+pub struct ProgressEvent {
+    pub phase: String,
+    pub processed_files: u64,
+    pub total_files: u64,
+    pub processed_bytes: u64,
+    pub total_bytes: u64,
+    pub current_path: Option<String>,
+}
+
+type Progress<'a> = &'a mut dyn FnMut(ProgressEvent) -> Result<(), String>;
+
+/// 并行度：关闭多线程或只有一个文件时退回单线程；否则按逻辑核心数取 2–6。
+fn worker_count(file_count: usize, parallel: bool) -> usize {
+    if !parallel || file_count <= 1 {
+        return 1;
+    }
+    let cores = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4);
+    cores.clamp(1, MAX_PARALLEL_WORKERS).min(file_count)
+}
+
+fn sort_manifest_files(files: &mut Vec<ManifestFile>) {
+    files.sort_by(|left, right| {
+        normalize_key(&left.path)
+            .cmp(&normalize_key(&right.path))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestFile {
+    /// 相对游戏目录，统一用 `/` 分隔。
+    pub path: String,
+    pub size: u64,
+    pub mtime: u64,
+    /// 十六进制 SHA-256（不带 `sha256:` 前缀）。
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionManifest {
+    pub version_id: String,
+    pub parent_version_id: Option<String>,
+    pub steam_build_id: Option<String>,
+    pub branch: String,
+    /// `full` = 完整快照（母文件/检查点）；`delta` = 增量版本。
+    pub base_type: String,
+    pub created_at: u64,
+    pub root_hash: String,
+    pub total_bytes: u64,
+    pub files: Vec<ManifestFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionAddedFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+    /// 相对版本存储目录的增量包路径。
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionModifiedFile {
+    pub path: String,
+    pub old_size: u64,
+    pub new_size: u64,
+    pub old_sha256: String,
+    pub new_sha256: String,
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionChangeLog {
+    pub from: String,
+    pub to: String,
+    pub from_build_id: Option<String>,
+    pub to_build_id: Option<String>,
+    pub added: Vec<VersionAddedFile>,
+    pub removed: Vec<String>,
+    pub modified: Vec<VersionModifiedFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionRecord {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub steam_build_id: Option<String>,
+    pub branch: String,
+    pub base_type: String,
+    pub created_at: u64,
+    pub root_hash: String,
+    /// 只含“相对路径 + 大小”的指纹，用于不读清单就快速识别当前目录。
+    #[serde(default)]
+    pub metadata_hash: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub label: String,
+    pub change_log: Option<VersionChangeLog>,
+}
+
+impl VersionRecord {
+    fn is_full(&self) -> bool {
+        self.base_type == "full"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionStoreMeta {
+    #[serde(default = "meta_format")]
+    format: u32,
+    #[serde(default)]
+    versions: Vec<VersionRecord>,
+    #[serde(default)]
+    last_seen_build_id: Option<String>,
+    #[serde(default)]
+    active_version_id: Option<String>,
+}
+
+fn meta_format() -> u32 {
+    META_FORMAT
+}
+
+impl Default for VersionStoreMeta {
+    fn default() -> Self {
+        Self {
+            format: META_FORMAT,
+            versions: Vec::new(),
+            last_seen_build_id: None,
+            active_version_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionCurrentMatch {
+    /// `hash` / `metadata` / `unknown` / `none` / `missing`
+    pub kind: String,
+    pub version_id: Option<String>,
+    pub candidates: Vec<String>,
+    pub checked_hashes: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionPendingChanges {
+    pub added: u64,
+    pub removed: u64,
+    pub modified: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionStatus {
+    pub game_path: Option<String>,
+    pub store_path: String,
+    pub store_exists: bool,
+    pub steam_build_id: Option<String>,
+    pub branch: String,
+    pub last_captured_build_id: Option<String>,
+    pub steam_update_pending: bool,
+    pub versions: Vec<VersionRecord>,
+    pub current_match: VersionCurrentMatch,
+    pub pending_changes: Option<VersionPendingChanges>,
+    pub active_version_id: Option<String>,
+    pub operation_running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotOutcome {
+    pub created: bool,
+    pub version: Option<VersionRecord>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureOutcome {
+    pub created: bool,
+    pub version: Option<VersionRecord>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreOutcome {
+    pub replaced: u64,
+    pub kept: u64,
+    pub removed: u64,
+    pub bytes_written: u64,
+    pub trash_path: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyOutcome {
+    pub matched_version_id: Option<String>,
+    pub root_hash: String,
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------------
+// 通用工具
+// ---------------------------------------------------------------------------
+
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+fn normalize_key(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
+}
+
+fn display_relative(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut index = 0;
+    while value >= 1024.0 && index + 1 < UNITS.len() {
+        value /= 1024.0;
+        index += 1;
+    }
+    if index == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[index])
+    }
+}
+
+/// UTC 的 `YYYYMMDD-HHMMSS`，只用于版本 ID（展示时间由前端按本地时区渲染）。
+fn utc_stamp(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let remainder = seconds % 86_400;
+    let hour = remainder / 3_600;
+    let minute = (remainder % 3_600) / 60;
+    let second = remainder % 60;
+
+    // Howard Hinnant 的 civil_from_days。
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = (z - era * 146_097) as u64;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    if month <= 2 {
+        year += 1;
+    }
+
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
+}
+
+fn mtime_seconds(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn io_error(action: &str, path: &Path, error: io::Error) -> String {
+    format!("{action}失败（{}）：{error}", path.display())
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn path_compare_key(path: &Path) -> String {
+    let resolved = path.canonicalize().unwrap_or_else(|_| absolute_path(path));
+    resolved
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+/// 版本存储目录不能放在游戏目录里，否则快照会把存储区自己也扫进去。
+pub fn ensure_store_outside_game(store: &Path, game: &Path) -> Result<(), String> {
+    let store_key = path_compare_key(store);
+    let game_key = path_compare_key(game);
+    if store_key == game_key || store_key.starts_with(&format!("{game_key}\\")) {
+        return Err("版本存储目录不能放在游戏目录内，请换一个位置。".to_string());
+    }
+    Ok(())
+}
+
+fn remove_if_exists(path: &Path) {
+    if path.is_dir() {
+        let _ = fs::remove_dir_all(path);
+    } else if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 扫描 / 清单
+// ---------------------------------------------------------------------------
+
+fn collect_relative_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(directory) = stack.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| io_error("读取游戏目录", &directory, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| io_error("读取游戏目录项", &directory, error))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| io_error("读取文件类型", &path, error))?;
+            // 跳过符号链接 / junction，避免递归环和“链接指向游戏目录外”的意外。
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| format!("无法计算相对路径：{}", path.display()))?;
+                files.push(relative.to_path_buf());
+            }
+        }
+    }
+
+    files.sort_by(|left, right| {
+        let left_key = normalize_key(&display_relative(left));
+        let right_key = normalize_key(&display_relative(right));
+        left_key
+            .cmp(&right_key)
+            .then_with(|| display_relative(left).cmp(&display_relative(right)))
+    });
+    Ok(files)
+}
+
+fn hash_file(path: &Path) -> Result<String, String> {
+    hash_file_with_size(path).map(|(hash, _)| hash)
+}
+
+fn hash_file_with_size(path: &Path) -> Result<(String, u64), String> {
+    let mut file = File::open(path).map_err(|error| io_error("打开文件", path, error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut size = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| io_error("读取文件", path, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((hex(&hasher.finalize()), size))
+}
+
+pub fn scan_directory(
+    root: &Path,
+    parallel: bool,
+    progress: Progress<'_>,
+) -> Result<Vec<ManifestFile>, String> {
+    let relatives = collect_relative_files(root)?;
+    if relatives.is_empty() {
+        return Err("游戏目录里没有可扫描的文件，请确认游戏安装目录是否正确。".to_string());
+    }
+
+    let mut total_bytes = 0u64;
+    for relative in &relatives {
+        let metadata = fs::symlink_metadata(root.join(relative))
+            .map_err(|error| io_error("读取文件信息", &root.join(relative), error))?;
+        total_bytes += metadata.len();
+    }
+
+    let workers = worker_count(relatives.len(), parallel);
+    scan_directory_with_workers(root, &relatives, total_bytes, workers, progress)
+}
+
+fn scan_directory_with_workers(
+    root: &Path,
+    relatives: &[PathBuf],
+    total_bytes: u64,
+    workers: usize,
+    progress: Progress<'_>,
+) -> Result<Vec<ManifestFile>, String> {
+    let total_files = relatives.len() as u64;
+
+    // 单线程路径保持原样：机械硬盘可以在设置里关掉多线程。
+    if workers <= 1 {
+        let mut files = Vec::with_capacity(relatives.len());
+        let mut processed_bytes = 0u64;
+        for (index, relative) in relatives.iter().enumerate() {
+            let path = root.join(relative);
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| io_error("读取文件信息", &path, error))?;
+            let (sha256, size) = hash_file_with_size(&path)?;
+            processed_bytes += size;
+            files.push(ManifestFile {
+                path: display_relative(relative),
+                size,
+                mtime: mtime_seconds(&metadata),
+                sha256,
+            });
+            progress(ProgressEvent {
+                phase: "hashing".to_string(),
+                processed_files: index as u64 + 1,
+                total_files,
+                processed_bytes,
+                total_bytes,
+                current_path: Some(display_relative(relative)),
+            })?;
+        }
+        sort_manifest_files(&mut files);
+        return Ok(files);
+    }
+
+    let next = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    let (sender, receiver) = mpsc::channel::<(usize, Result<ManifestFile, String>)>();
+    let mut results: Vec<Option<ManifestFile>> = (0..relatives.len()).map(|_| None).collect();
+    let mut first_error: Option<String> = None;
+    let mut processed_files = 0u64;
+    let mut processed_bytes = 0u64;
+
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let next = &next;
+            let cancelled = &cancelled;
+            scope.spawn(move || loop {
+                if cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= relatives.len() {
+                    break;
+                }
+                let relative = &relatives[index];
+                let path = root.join(relative);
+                let result = (|| -> Result<ManifestFile, String> {
+                    let metadata = fs::symlink_metadata(&path)
+                        .map_err(|error| io_error("读取文件信息", &path, error))?;
+                    let (sha256, size) = hash_file_with_size(&path)?;
+                    Ok(ManifestFile {
+                        path: display_relative(relative),
+                        size,
+                        mtime: mtime_seconds(&metadata),
+                        sha256,
+                    })
+                })();
+                if sender.send((index, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+
+        for (index, result) in receiver {
+            match result {
+                Ok(file) => {
+                    processed_files += 1;
+                    processed_bytes += file.size;
+                    let current_path = file.path.clone();
+                    results[index] = Some(file);
+                    if first_error.is_none() && !cancelled.load(Ordering::SeqCst) {
+                        if let Err(error) = progress(ProgressEvent {
+                            phase: "hashing".to_string(),
+                            processed_files,
+                            total_files,
+                            processed_bytes,
+                            total_bytes,
+                            current_path: Some(current_path),
+                        }) {
+                            first_error = Some(error);
+                            cancelled.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    cancelled.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    });
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    let mut files = Vec::with_capacity(results.len());
+    for (index, value) in results.into_iter().enumerate() {
+        let Some(file) = value else {
+            return Err(format!(
+                "并行扫描未完成文件：{}",
+                display_relative(&relatives[index])
+            ));
+        };
+        files.push(file);
+    }
+    sort_manifest_files(&mut files);
+    Ok(files)
+}
+
+fn scan_metadata(root: &Path) -> Result<Vec<(String, u64)>, String> {
+    let relatives = collect_relative_files(root)?;
+    let mut pairs = Vec::with_capacity(relatives.len());
+    for relative in relatives {
+        let path = root.join(&relative);
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| io_error("读取文件信息", &path, error))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        pairs.push((normalize_key(&display_relative(&relative)), metadata.len()));
+    }
+    pairs.sort();
+    Ok(pairs)
+}
+
+fn compute_metadata_hash_from_pairs(pairs: &[(String, u64)]) -> String {
+    let mut sorted = pairs.to_vec();
+    sorted.sort();
+    let mut hasher = Sha256::new();
+    for (path, size) in sorted {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(size.to_le_bytes());
+        hasher.update(b"\n");
+    }
+    format!("sha256:{}", hex(&hasher.finalize()))
+}
+
+pub fn compute_metadata_hash(files: &[ManifestFile]) -> String {
+    let pairs: Vec<(String, u64)> = files
+        .iter()
+        .map(|file| (normalize_key(&file.path), file.size))
+        .collect();
+    compute_metadata_hash_from_pairs(&pairs)
+}
+
+pub fn compute_root_hash(files: &[ManifestFile]) -> String {
+    let mut sorted: Vec<&ManifestFile> = files.iter().collect();
+    sorted.sort_by(|left, right| {
+        normalize_key(&left.path)
+            .cmp(&normalize_key(&right.path))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let mut hasher = Sha256::new();
+    for file in sorted {
+        hasher.update(normalize_key(&file.path).as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.size.to_le_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.sha256.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("sha256:{}", hex(&hasher.finalize()))
+}
+
+// ---------------------------------------------------------------------------
+// 存储读写
+// ---------------------------------------------------------------------------
+
+fn meta_path(store: &Path) -> PathBuf {
+    store.join(META_FILE)
+}
+
+fn manifest_path(store: &Path, version_id: &str) -> PathBuf {
+    store.join(MANIFEST_DIR).join(format!("{version_id}.json"))
+}
+
+fn full_snapshot_root(store: &Path, record: &VersionRecord) -> PathBuf {
+    if record.parent_id.is_none() {
+        store.join(BASE_DIR).join(&record.id)
+    } else {
+        store.join(CHECKPOINT_DIR).join(&record.id)
+    }
+}
+
+fn load_meta(store: &Path) -> Result<VersionStoreMeta, String> {
+    let path = meta_path(store);
+    if !path.is_file() {
+        return Ok(VersionStoreMeta::default());
+    }
+    let content = fs::read_to_string(&path).map_err(|error| io_error("读取版本元数据", &path, error))?;
+    if content.trim().is_empty() {
+        return Ok(VersionStoreMeta::default());
+    }
+    serde_json::from_str(&content).map_err(|error| format!("解析版本元数据失败：{error}"))
+}
+
+fn save_meta(store: &Path, meta: &VersionStoreMeta) -> Result<(), String> {
+    fs::create_dir_all(store).map_err(|error| io_error("创建版本存储目录", store, error))?;
+    let content = serde_json::to_string_pretty(meta)
+        .map_err(|error| format!("序列化版本元数据失败：{error}"))?;
+    let path = meta_path(store);
+    let temp = store.join("meta.json.tmp");
+    fs::write(&temp, format!("{content}\n"))
+        .map_err(|error| io_error("写入版本元数据", &temp, error))?;
+    fs::rename(&temp, &path).map_err(|error| io_error("保存版本元数据", &path, error))
+}
+
+fn load_manifest(store: &Path, version_id: &str) -> Result<VersionManifest, String> {
+    let path = manifest_path(store, version_id);
+    let content =
+        fs::read_to_string(&path).map_err(|error| io_error("读取版本清单", &path, error))?;
+    serde_json::from_str(&content).map_err(|error| format!("解析版本清单失败：{error}"))
+}
+
+fn save_manifest(store: &Path, manifest: &VersionManifest) -> Result<(), String> {
+    let directory = store.join(MANIFEST_DIR);
+    fs::create_dir_all(&directory)
+        .map_err(|error| io_error("创建版本清单目录", &directory, error))?;
+    let path = manifest_path(store, &manifest.version_id);
+    let content =
+        serde_json::to_string(manifest).map_err(|error| format!("序列化版本清单失败：{error}"))?;
+    fs::write(&path, format!("{content}\n")).map_err(|error| io_error("写入版本清单", &path, error))
+}
+
+fn new_version_id(store: &Path, meta: &VersionStoreMeta) -> String {
+    let stamp = utc_stamp(now_seconds());
+    let mut candidate = format!("v{stamp}");
+    let mut suffix = 2;
+    while meta.versions.iter().any(|version| version.id == candidate)
+        || manifest_path(store, &candidate).exists()
+    {
+        candidate = format!("v{stamp}-{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
+fn default_label(first: bool, full: bool, build_id: Option<&str>) -> String {
+    if full {
+        let kind = if first { "基准版本" } else { "检查点" };
+        match build_id {
+            Some(build) => format!("{kind} · build {build}"),
+            None => kind.to_string(),
+        }
+    } else {
+        match build_id {
+            Some(build) => format!("build {build}"),
+            None => "增量版本".to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 增量格式（CDC + COPY/ADD）
+// ---------------------------------------------------------------------------
+
+fn gear_table() -> &'static [u64; 256] {
+    static TABLE: OnceLock<[u64; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = [0u64; 256];
+        for (index, slot) in table.iter_mut().enumerate() {
+            let mut value = (index as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+            value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            *slot = value ^ (value >> 31);
+        }
+        table
+    })
+}
+
+/// 带 64KB 缓冲的逐字节读取器：CDC 需要按字节推进 Gear hash，
+/// 直接 `File::read` 每字节一次系统调用会非常慢。
+struct ByteReader<R: Read> {
+    inner: R,
+    buffer: Box<[u8; 65_536]>,
+    position: usize,
+    length: usize,
+}
+
+impl<R: Read> ByteReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buffer: Box::new([0u8; 65_536]),
+            position: 0,
+            length: 0,
+        }
+    }
+
+    fn next_byte(&mut self) -> io::Result<Option<u8>> {
+        if self.position == self.length {
+            self.length = self.inner.read(&mut self.buffer[..])?;
+            self.position = 0;
+            if self.length == 0 {
+                return Ok(None);
+            }
+        }
+        let byte = self.buffer[self.position];
+        self.position += 1;
+        Ok(Some(byte))
+    }
+}
+
+fn read_chunk<R: Read>(reader: &mut ByteReader<R>, chunk: &mut Vec<u8>) -> io::Result<bool> {
+    chunk.clear();
+    let table = gear_table();
+    let mut hash = 0u64;
+    while chunk.len() < CHUNK_MAX {
+        let Some(byte) = reader.next_byte()? else {
+            break;
+        };
+        chunk.push(byte);
+        hash = (hash << 1).wrapping_add(table[byte as usize]);
+        if chunk.len() >= CHUNK_MIN && (hash & CHUNK_MASK) == 0 {
+            break;
+        }
+    }
+    Ok(!chunk.is_empty())
+}
+
+fn digest_array(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
+}
+
+fn write_u64(writer: &mut impl Write, value: u64) -> Result<(), String> {
+    writer
+        .write_all(&value.to_le_bytes())
+        .map_err(|error| format!("写入增量包失败：{error}"))
+}
+
+fn read_u64(reader: &mut impl Read) -> Result<u64, String> {
+    let mut buffer = [0u8; 8];
+    reader
+        .read_exact(&mut buffer)
+        .map_err(|error| format!("读取增量包失败：{error}"))?;
+    Ok(u64::from_le_bytes(buffer))
+}
+
+fn normalize_hash(value: &str) -> String {
+    if value.starts_with("sha256:") {
+        value.to_string()
+    } else {
+        format!("sha256:{value}")
+    }
+}
+
+/// 生成 `base -> target` 的增量包。`base` 为 `None` 表示新增文件（空基准）。
+/// 返回目标文件大小。
+fn create_delta(
+    base_path: Option<&Path>,
+    target_path: &Path,
+    delta_path: &Path,
+) -> Result<u64, String> {
+    let result = (|| -> Result<u64, String> {
+        let mut index: HashMap<[u8; 32], (u64, u64)> = HashMap::new();
+        let mut base_len = 0u64;
+        let mut base_hasher = Sha256::new();
+
+        if let Some(path) = base_path {
+            let file = File::open(path).map_err(|error| io_error("打开基准文件", path, error))?;
+            let mut reader = ByteReader::new(file);
+            let mut chunk = Vec::with_capacity(CHUNK_MAX);
+            let mut offset = 0u64;
+            while read_chunk(&mut reader, &mut chunk)
+                .map_err(|error| io_error("读取基准文件", path, error))?
+            {
+                let digest = digest_array(&chunk);
+                index.entry(digest).or_insert((offset, chunk.len() as u64));
+                base_hasher.update(&chunk);
+                offset += chunk.len() as u64;
+            }
+            base_len = offset;
+        }
+
+        let base_hash: [u8; 32] = base_hasher.finalize().into();
+        let target_file =
+            File::open(target_path).map_err(|error| io_error("打开目标文件", target_path, error))?;
+        let mut target_reader = ByteReader::new(target_file);
+        let mut target_hasher = Sha256::new();
+        let mut target_len = 0u64;
+
+        if let Some(parent) = delta_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| io_error("创建增量目录", parent, error))?;
+        }
+        let output =
+            File::create(delta_path).map_err(|error| io_error("创建增量包", delta_path, error))?;
+        let mut writer = BufWriter::new(output);
+
+        writer
+            .write_all(DELTA_MAGIC)
+            .map_err(|error| format!("写入增量包失败：{error}"))?;
+        write_u64(&mut writer, base_len)?;
+        writer
+            .write_all(&base_hash)
+            .map_err(|error| format!("写入增量包失败：{error}"))?;
+        // target_len / target_hash 先占位，流式写完指令后再回填。
+        writer
+            .write_all(&[0u8; 40])
+            .map_err(|error| format!("写入增量包失败：{error}"))?;
+
+        let mut chunk = Vec::with_capacity(CHUNK_MAX);
+        loop {
+            if !read_chunk(&mut target_reader, &mut chunk)
+                .map_err(|error| io_error("读取目标文件", target_path, error))?
+            {
+                break;
+            }
+            target_len += chunk.len() as u64;
+            target_hasher.update(&chunk);
+            let digest = digest_array(&chunk);
+            match index.get(&digest) {
+                Some((offset, length)) if *length == chunk.len() as u64 => {
+                    writer
+                        .write_all(&[0u8])
+                        .map_err(|error| format!("写入增量包失败：{error}"))?;
+                    write_u64(&mut writer, *offset)?;
+                    write_u64(&mut writer, *length)?;
+                }
+                _ => {
+                    writer
+                        .write_all(&[1u8])
+                        .map_err(|error| format!("写入增量包失败：{error}"))?;
+                    write_u64(&mut writer, chunk.len() as u64)?;
+                    writer
+                        .write_all(&chunk)
+                        .map_err(|error| format!("写入增量包失败：{error}"))?;
+                }
+            }
+        }
+
+        let target_hash: [u8; 32] = target_hasher.finalize().into();
+        writer
+            .seek(SeekFrom::Start(44))
+            .map_err(|error| format!("写入增量包失败：{error}"))?;
+        writer
+            .write_all(&target_len.to_le_bytes())
+            .map_err(|error| format!("写入增量包失败：{error}"))?;
+        writer
+            .write_all(&target_hash)
+            .map_err(|error| format!("写入增量包失败：{error}"))?;
+        writer
+            .flush()
+            .map_err(|error| format!("写入增量包失败：{error}"))?;
+        Ok(target_len)
+    })();
+
+    if result.is_err() {
+        remove_if_exists(delta_path);
+    }
+    result
+}
+
+/// 应用增量包，并校验目标 SHA-256（增量包自带的 trailer + 清单里的期望值）。
+fn apply_delta(
+    base_path: Option<&Path>,
+    delta_path: &Path,
+    output_path: &Path,
+    expected_hash: &str,
+) -> Result<(), String> {
+    let result = (|| -> Result<(), String> {
+        let input = File::open(delta_path)
+            .map_err(|error| io_error("打开增量包", delta_path, error))?;
+        let mut reader = BufReader::new(input);
+
+        let mut magic = [0u8; 4];
+        reader
+            .read_exact(&mut magic)
+            .map_err(|error| format!("读取增量包失败：{error}"))?;
+        if &magic != DELTA_MAGIC {
+            return Err("增量包格式不受支持（magic 不匹配）。".to_string());
+        }
+        let base_len = read_u64(&mut reader)?;
+        let mut base_hash = [0u8; 32];
+        reader
+            .read_exact(&mut base_hash)
+            .map_err(|error| format!("读取增量包失败：{error}"))?;
+        let target_len = read_u64(&mut reader)?;
+        let mut target_hash = [0u8; 32];
+        reader
+            .read_exact(&mut target_hash)
+            .map_err(|error| format!("读取增量包失败：{error}"))?;
+
+        let base_file = match base_path {
+            Some(path) => {
+                let metadata = fs::metadata(path)
+                    .map_err(|error| io_error("读取基准文件信息", path, error))?;
+                if metadata.len() != base_len {
+                    return Err(format!(
+                        "增量包与基准文件大小不一致（期望 {base_len}，实际 {}）。",
+                        metadata.len()
+                    ));
+                }
+                Some(File::open(path).map_err(|error| io_error("打开基准文件", path, error))?)
+            }
+            None => {
+                if base_len != 0 {
+                    return Err("增量包需要基准文件，但本次没有提供。".to_string());
+                }
+                None
+            }
+        };
+        let mut base_reader = base_file.map(BufReader::new);
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| io_error("创建目标目录", parent, error))?;
+        }
+        let output =
+            File::create(output_path).map_err(|error| io_error("创建目标文件", output_path, error))?;
+        let mut writer = BufWriter::new(output);
+
+        let mut written = 0u64;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 256 * 1024];
+
+        while written < target_len {
+            let mut opcode = [0u8; 1];
+            reader
+                .read_exact(&mut opcode)
+                .map_err(|error| format!("读取增量包失败：{error}"))?;
+            match opcode[0] {
+                0 => {
+                    let offset = read_u64(&mut reader)?;
+                    let length = read_u64(&mut reader)?;
+                    if written + length > target_len {
+                        return Err("增量包指令越界（COPY）。".to_string());
+                    }
+                    let base = base_reader
+                        .as_mut()
+                        .ok_or_else(|| "增量包引用了基准文件，但本次没有提供。".to_string())?;
+                    base.seek(SeekFrom::Start(offset))
+                        .map_err(|error| format!("定位基准文件失败：{error}"))?;
+                    let mut remaining = length;
+                    while remaining > 0 {
+                        let take = remaining.min(buffer.len() as u64) as usize;
+                        base.read_exact(&mut buffer[..take])
+                            .map_err(|error| format!("读取基准文件失败：{error}"))?;
+                        writer
+                            .write_all(&buffer[..take])
+                            .map_err(|error| format!("写入目标文件失败：{error}"))?;
+                        hasher.update(&buffer[..take]);
+                        remaining -= take as u64;
+                        written += take as u64;
+                    }
+                }
+                1 => {
+                    let length = read_u64(&mut reader)?;
+                    if written + length > target_len {
+                        return Err("增量包指令越界（ADD）。".to_string());
+                    }
+                    let mut remaining = length;
+                    while remaining > 0 {
+                        let take = remaining.min(buffer.len() as u64) as usize;
+                        reader
+                            .read_exact(&mut buffer[..take])
+                            .map_err(|error| format!("读取增量包失败：{error}"))?;
+                        writer
+                            .write_all(&buffer[..take])
+                            .map_err(|error| format!("写入目标文件失败：{error}"))?;
+                        hasher.update(&buffer[..take]);
+                        remaining -= take as u64;
+                        written += take as u64;
+                    }
+                }
+                other => return Err(format!("增量包包含未知指令：{other}")),
+            }
+        }
+        writer
+            .flush()
+            .map_err(|error| format!("写入目标文件失败：{error}"))?;
+
+        let actual = format!("sha256:{}", hex(&hasher.finalize()));
+        let trailer = format!("sha256:{}", hex(&target_hash));
+        if actual != trailer {
+            return Err("增量包自校验失败（输出哈希与 trailer 不一致）。".to_string());
+        }
+        if !expected_hash.is_empty() && actual != normalize_hash(expected_hash) {
+            return Err("增量还原结果与版本清单的 SHA-256 不一致。".to_string());
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        remove_if_exists(output_path);
+    }
+    result
+}
+
+fn delta_for_file(record: &VersionRecord, key: &str) -> Option<String> {
+    let change_log = record.change_log.as_ref()?;
+    if let Some(entry) = change_log
+        .added
+        .iter()
+        .find(|entry| normalize_key(&entry.path) == key)
+    {
+        return Some(entry.delta.clone());
+    }
+    if let Some(entry) = change_log
+        .modified
+        .iter()
+        .find(|entry| normalize_key(&entry.path) == key)
+    {
+        return Some(entry.delta.clone());
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// 重建器：从完整快照 + 增量链还原单个文件
+// ---------------------------------------------------------------------------
+
+struct Materializer<'a> {
+    store: &'a Path,
+    meta: &'a VersionStoreMeta,
+    manifests: HashMap<String, Rc<VersionManifest>>,
+    file_maps: HashMap<String, Rc<HashMap<String, ManifestFile>>>,
+}
+
+impl<'a> Materializer<'a> {
+    fn new(store: &'a Path, meta: &'a VersionStoreMeta) -> Self {
+        Self {
+            store,
+            meta,
+            manifests: HashMap::new(),
+            file_maps: HashMap::new(),
+        }
+    }
+
+    fn record(&self, version_id: &str) -> Result<VersionRecord, String> {
+        self.meta
+            .versions
+            .iter()
+            .find(|record| record.id == version_id)
+            .cloned()
+            .ok_or_else(|| format!("版本不存在：{version_id}"))
+    }
+
+    fn manifest(&mut self, version_id: &str) -> Result<Rc<VersionManifest>, String> {
+        if let Some(manifest) = self.manifests.get(version_id) {
+            return Ok(manifest.clone());
+        }
+        let manifest = Rc::new(load_manifest(self.store, version_id)?);
+        self.manifests
+            .insert(version_id.to_string(), manifest.clone());
+        Ok(manifest)
+    }
+
+    fn file_map(&mut self, version_id: &str) -> Result<Rc<HashMap<String, ManifestFile>>, String> {
+        if let Some(map) = self.file_maps.get(version_id) {
+            return Ok(map.clone());
+        }
+        let manifest = self.manifest(version_id)?;
+        let map: HashMap<String, ManifestFile> = manifest
+            .files
+            .iter()
+            .cloned()
+            .map(|file| (normalize_key(&file.path), file))
+            .collect();
+        let map = Rc::new(map);
+        self.file_maps.insert(version_id.to_string(), map.clone());
+        Ok(map)
+    }
+
+    fn materialize(
+        &mut self,
+        version_id: &str,
+        relative_path: &str,
+        destination: &Path,
+        depth: u32,
+    ) -> Result<(), String> {
+        if depth > MAX_CHAIN_DEPTH {
+            return Err("版本链过深，请创建一个新的完整检查点。".to_string());
+        }
+        let record = self.record(version_id)?;
+        let key = normalize_key(relative_path);
+        let file_map = self.file_map(&record.id)?;
+        let entry = file_map
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| format!("版本「{}」的清单里没有文件：{relative_path}", record.label))?;
+
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| io_error("创建还原目标目录", parent, error))?;
+        }
+
+        if record.is_full() {
+            let source = full_snapshot_root(self.store, &record).join(&entry.path);
+            if !source.is_file() {
+                return Err(format!("完整快照缺少文件：{}", source.display()));
+            }
+            if destination.exists() {
+                fs::remove_file(destination)
+                    .map_err(|error| io_error("覆盖还原目标", destination, error))?;
+            }
+            fs::copy(&source, destination)
+                .map_err(|error| io_error("复制完整快照文件", &source, error))?;
+            let copied = fs::metadata(destination)
+                .map_err(|error| io_error("读取还原目标信息", destination, error))?
+                .len();
+            if copied != entry.size {
+                remove_if_exists(destination);
+                return Err(format!("完整快照文件大小不一致：{}", entry.path));
+            }
+            return Ok(());
+        }
+
+        let parent_id = record
+            .parent_id
+            .clone()
+            .ok_or_else(|| format!("增量版本「{}」缺少父版本。", record.label))?;
+        let parent_map = self.file_map(&parent_id)?;
+        let parent_entry = parent_map.get(&key).cloned();
+
+        // 这个文件在父版本里没变：直接沿父链继续往上游找完整快照。
+        if let Some(parent) = parent_entry.as_ref() {
+            if parent.sha256 == entry.sha256 {
+                // 用父版本清单里的路径大小写，避免 Windows 大小写不敏感之外的文件系统找不到文件。
+                let parent_path = parent.path.clone();
+                return self.materialize(&parent_id, &parent_path, destination, depth + 1);
+            }
+        }
+
+        let delta_relative = delta_for_file(&record, &key).ok_or_else(|| {
+            format!(
+                "版本「{}」缺少文件 {} 的增量包，版本链可能已损坏。",
+                record.label, entry.path
+            )
+        })?;
+        let delta_path = self.store.join(&delta_relative);
+
+        match parent_entry {
+            Some(parent) => {
+                let file_name = destination
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file");
+                let base_temp =
+                    destination.with_file_name(format!(".{file_name}.pzbase{depth}"));
+                let parent_path = parent.path.clone();
+                let result = (|| -> Result<(), String> {
+                    self.materialize(&parent_id, &parent_path, &base_temp, depth + 1)?;
+                    apply_delta(Some(&base_temp), &delta_path, destination, &entry.sha256)
+                })();
+                remove_if_exists(&base_temp);
+                result
+            }
+            None => apply_delta(None, &delta_path, destination, &entry.sha256),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 快照 / 捕获
+// ---------------------------------------------------------------------------
+
+fn copy_snapshot_files(
+    game_path: &Path,
+    snapshot_root: &Path,
+    files: &[ManifestFile],
+    total_bytes: u64,
+    workers: usize,
+    progress: Progress<'_>,
+) -> Result<(), String> {
+    let total_files = files.len() as u64;
+
+    // 单线程路径：保留原来的逐文件复制行为。
+    if workers <= 1 {
+        let mut processed_bytes = 0u64;
+        for (index, file) in files.iter().enumerate() {
+            let source = game_path.join(&file.path);
+            let destination = snapshot_root.join(&file.path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| io_error("创建快照目录", parent, error))?;
+            }
+            let copied = fs::copy(&source, &destination)
+                .map_err(|error| io_error("复制快照文件", &source, error))?;
+            if copied != file.size {
+                return Err(format!("复制快照文件大小不一致：{}", file.path));
+            }
+            processed_bytes += file.size;
+            progress(ProgressEvent {
+                phase: "copying".to_string(),
+                processed_files: index as u64 + 1,
+                total_files,
+                processed_bytes,
+                total_bytes,
+                current_path: Some(file.path.clone()),
+            })?;
+        }
+        return Ok(());
+    }
+
+    // 并行复制前先串行创建所有目录，避免多个 worker 同时 create_dir_all。
+    let mut parents = HashSet::new();
+    for file in files {
+        if let Some(parent) = Path::new(&file.path).parent() {
+            if !parent.as_os_str().is_empty() {
+                parents.insert(snapshot_root.join(parent));
+            }
+        }
+    }
+    for parent in parents {
+        fs::create_dir_all(&parent)
+            .map_err(|error| io_error("创建快照目录", &parent, error))?;
+    }
+
+    let next = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    let (sender, receiver) = mpsc::channel::<(usize, Result<(), String>)>();
+    let mut first_error: Option<String> = None;
+    let mut processed_files = 0u64;
+    let mut processed_bytes = 0u64;
+
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let next = &next;
+            let cancelled = &cancelled;
+            scope.spawn(move || loop {
+                if cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= files.len() {
+                    break;
+                }
+                let file = &files[index];
+                let source = game_path.join(&file.path);
+                let destination = snapshot_root.join(&file.path);
+                let result = match fs::copy(&source, &destination) {
+                    Ok(copied) if copied == file.size => Ok(()),
+                    Ok(_) => Err(format!("复制快照文件大小不一致：{}", file.path)),
+                    Err(error) => Err(io_error("复制快照文件", &source, error)),
+                };
+                if sender.send((index, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+
+        for (index, result) in receiver {
+            match result {
+                Ok(()) => {
+                    processed_files += 1;
+                    let file = &files[index];
+                    processed_bytes += file.size;
+                    if first_error.is_none() && !cancelled.load(Ordering::SeqCst) {
+                        if let Err(error) = progress(ProgressEvent {
+                            phase: "copying".to_string(),
+                            processed_files,
+                            total_files,
+                            processed_bytes,
+                            total_bytes,
+                            current_path: Some(file.path.clone()),
+                        }) {
+                            first_error = Some(error);
+                            cancelled.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    cancelled.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    });
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    if processed_files != total_files {
+        return Err("并行复制未完成全部文件。".to_string());
+    }
+    Ok(())
+}
+
+pub fn create_full_snapshot(
+    game_path: &Path,
+    store: &Path,
+    steam_build_id: Option<&str>,
+    branch: &str,
+    label: Option<&str>,
+    parallel: bool,
+    progress: Progress<'_>,
+) -> Result<SnapshotOutcome, String> {
+    ensure_store_outside_game(store, game_path)?;
+    let mut meta = load_meta(store)?;
+    let files = scan_directory(game_path, parallel, progress)?;
+    let root_hash = compute_root_hash(&files);
+    let total_bytes: u64 = files.iter().map(|file| file.size).sum();
+
+    // 最新版本已经是同样内容的完整快照时没必要再复制一份；
+    // 但如果最新版本是增量版本，仍然允许补一个检查点来缩短重建链。
+    let duplicate_full = meta
+        .versions
+        .last()
+        .filter(|latest| latest.is_full() && latest.root_hash == root_hash)
+        .cloned();
+    if let Some(latest) = duplicate_full {
+        // 内容没变但 Steam buildid 可能变了（例如只改了 depot 清单）：
+        // 记下新的 buildid，避免页面上永远挂着「Steam 可能已经更新」。
+        if let Some(build) = steam_build_id {
+            if meta.last_seen_build_id.as_deref() != Some(build) {
+                meta.last_seen_build_id = Some(build.to_string());
+                save_meta(store, &meta)?;
+            }
+        }
+        return Ok(SnapshotOutcome {
+            created: false,
+            version: Some(latest.clone()),
+            message: format!("当前目录与「{}」完全一致，无需重复创建完整快照。", latest.label),
+        });
+    }
+
+    let id = new_version_id(store, &meta);
+    let parent_id = meta.versions.last().map(|record| record.id.clone());
+    let base_type = "full";
+    let label = label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| default_label(meta.versions.is_empty(), true, steam_build_id));
+
+    let snapshot_root = if parent_id.is_none() {
+        store.join(BASE_DIR).join(&id)
+    } else {
+        store.join(CHECKPOINT_DIR).join(&id)
+    };
+
+    let workers = worker_count(files.len(), parallel);
+    if let Err(error) =
+        copy_snapshot_files(game_path, &snapshot_root, &files, total_bytes, workers, progress)
+    {
+        remove_if_exists(&snapshot_root);
+        return Err(error);
+    }
+
+    let now = now_seconds();
+    let manifest = VersionManifest {
+        version_id: id.clone(),
+        parent_version_id: parent_id.clone(),
+        steam_build_id: steam_build_id.map(str::to_string),
+        branch: branch.to_string(),
+        base_type: base_type.to_string(),
+        created_at: now,
+        root_hash: root_hash.clone(),
+        total_bytes,
+        files,
+    };
+    let record = VersionRecord {
+        id: id.clone(),
+        parent_id,
+        steam_build_id: steam_build_id.map(str::to_string),
+        branch: branch.to_string(),
+        base_type: base_type.to_string(),
+        created_at: now,
+        root_hash,
+        metadata_hash: compute_metadata_hash(&manifest.files),
+        file_count: manifest.files.len() as u64,
+        total_bytes,
+        label: label.clone(),
+        change_log: None,
+    };
+
+    if let Err(error) = save_manifest(store, &manifest) {
+        remove_if_exists(&snapshot_root);
+        return Err(error);
+    }
+    meta.versions.push(record.clone());
+    if let Some(build) = steam_build_id {
+        meta.last_seen_build_id = Some(build.to_string());
+    }
+    meta.active_version_id = Some(id);
+    if let Err(error) = save_meta(store, &meta) {
+        remove_if_exists(&snapshot_root);
+        let _ = fs::remove_file(manifest_path(store, &record.id));
+        return Err(error);
+    }
+
+    Ok(SnapshotOutcome {
+        created: true,
+        version: Some(record.clone()),
+        message: format!(
+            "已创建完整快照「{}」：{} 个文件，{}。",
+            label,
+            manifest.files.len(),
+            format_bytes(total_bytes)
+        ),
+    })
+}
+
+pub fn capture_version(
+    game_path: &Path,
+    store: &Path,
+    steam_build_id: Option<&str>,
+    branch: &str,
+    label: Option<&str>,
+    parallel: bool,
+    progress: Progress<'_>,
+) -> Result<CaptureOutcome, String> {
+    ensure_store_outside_game(store, game_path)?;
+    let mut meta = load_meta(store)?;
+    let latest = meta
+        .versions
+        .last()
+        .cloned()
+        .ok_or_else(|| "还没有基准版本，请先创建一个完整快照。".to_string())?;
+    let latest_manifest = load_manifest(store, &latest.id)?;
+
+    let files = scan_directory(game_path, parallel, progress)?;
+    let root_hash = compute_root_hash(&files);
+    if root_hash == latest.root_hash {
+        if let Some(build) = steam_build_id {
+            if meta.last_seen_build_id.as_deref() != Some(build) {
+                meta.last_seen_build_id = Some(build.to_string());
+                save_meta(store, &meta)?;
+            }
+        }
+        return Ok(CaptureOutcome {
+            created: false,
+            version: Some(latest.clone()),
+            message: format!("当前目录与最新版本「{}」完全一致，没有需要捕获的变化。", latest.label),
+        });
+    }
+
+    let latest_map: HashMap<String, ManifestFile> = latest_manifest
+        .files
+        .iter()
+        .cloned()
+        .map(|file| (normalize_key(&file.path), file))
+        .collect();
+    let next_map: HashMap<String, ManifestFile> = files
+        .iter()
+        .cloned()
+        .map(|file| (normalize_key(&file.path), file))
+        .collect();
+
+    let added: Vec<ManifestFile> = files
+        .iter()
+        .filter(|file| !latest_map.contains_key(&normalize_key(&file.path)))
+        .cloned()
+        .collect();
+    let removed: Vec<String> = latest_manifest
+        .files
+        .iter()
+        .filter(|file| !next_map.contains_key(&normalize_key(&file.path)))
+        .map(|file| file.path.clone())
+        .collect();
+    let modified: Vec<(ManifestFile, ManifestFile)> = files
+        .iter()
+        .filter_map(|file| {
+            let key = normalize_key(&file.path);
+            let old = latest_map.get(&key)?;
+            (old.sha256 != file.sha256).then(|| (old.clone(), file.clone()))
+        })
+        .collect();
+
+    if added.is_empty() && removed.is_empty() && modified.is_empty() {
+        return Ok(CaptureOutcome {
+            created: false,
+            version: Some(latest.clone()),
+            message: format!("当前目录与最新版本「{}」没有文件级差异。", latest.label),
+        });
+    }
+
+    let id = new_version_id(store, &meta);
+    let label = label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| default_label(false, false, steam_build_id));
+    let delta_folder = format!("{}__{}", latest.id, id);
+    let delta_root = store.join(DELTA_DIR).join(&delta_folder);
+    let temp_root = store.join(TMP_DIR).join(&id);
+
+    let result = (|| -> Result<(Vec<VersionAddedFile>, Vec<VersionModifiedFile>, u64), String> {
+        fs::create_dir_all(&delta_root)
+            .map_err(|error| io_error("创建增量目录", &delta_root, error))?;
+        fs::create_dir_all(&temp_root)
+            .map_err(|error| io_error("创建临时目录", &temp_root, error))?;
+
+        let total_changes = (modified.len() + added.len()) as u64;
+        let mut processed = 0u64;
+        let mut delta_bytes = 0u64;
+        let mut modified_entries = Vec::with_capacity(modified.len());
+        let mut added_entries = Vec::with_capacity(added.len());
+
+        {
+            let mut materializer = Materializer::new(store, &meta);
+
+            for (index, (old, new)) in modified.iter().enumerate() {
+                let old_temp = temp_root.join(format!("{index:04}.old"));
+                materializer.materialize(&latest.id, &new.path, &old_temp, 0)?;
+                let delta_relative = format!("{delta_folder}/{index:04}.pzd");
+                let delta_path = store.join(&delta_relative);
+                let new_path = game_path.join(&new.path);
+                create_delta(Some(&old_temp), &new_path, &delta_path)?;
+                delta_bytes += fs::metadata(&delta_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                remove_if_exists(&old_temp);
+                processed += 1;
+                progress(ProgressEvent {
+                    phase: "delta".to_string(),
+                    processed_files: processed,
+                    total_files: total_changes,
+                    processed_bytes: delta_bytes,
+                    total_bytes: 0,
+                    current_path: Some(new.path.clone()),
+                })?;
+                modified_entries.push(VersionModifiedFile {
+                    path: new.path.clone(),
+                    old_size: old.size,
+                    new_size: new.size,
+                    old_sha256: old.sha256.clone(),
+                    new_sha256: new.sha256.clone(),
+                    delta: delta_relative,
+                });
+            }
+
+            for (index, new) in added.iter().enumerate() {
+                let delta_relative = format!("{delta_folder}/add-{index:04}.pzd");
+                let delta_path = store.join(&delta_relative);
+                create_delta(None, &game_path.join(&new.path), &delta_path)?;
+                delta_bytes += fs::metadata(&delta_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                processed += 1;
+                progress(ProgressEvent {
+                    phase: "delta".to_string(),
+                    processed_files: processed,
+                    total_files: total_changes,
+                    processed_bytes: delta_bytes,
+                    total_bytes: 0,
+                    current_path: Some(new.path.clone()),
+                })?;
+                added_entries.push(VersionAddedFile {
+                    path: new.path.clone(),
+                    size: new.size,
+                    sha256: new.sha256.clone(),
+                    delta: delta_relative,
+                });
+            }
+        }
+
+        Ok((added_entries, modified_entries, delta_bytes))
+    })();
+
+    remove_if_exists(&temp_root);
+
+    let (added_entries, modified_entries, delta_bytes) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            remove_if_exists(&delta_root);
+            return Err(error);
+        }
+    };
+
+    let now = now_seconds();
+    let total_bytes: u64 = files.iter().map(|file| file.size).sum();
+    let added_count = added_entries.len();
+    let removed_count = removed.len();
+    let modified_count = modified_entries.len();
+    let change_log = VersionChangeLog {
+        from: latest.id.clone(),
+        to: id.clone(),
+        from_build_id: latest.steam_build_id.clone(),
+        to_build_id: steam_build_id.map(str::to_string),
+        added: added_entries,
+        removed: removed.clone(),
+        modified: modified_entries,
+    };
+    let manifest = VersionManifest {
+        version_id: id.clone(),
+        parent_version_id: Some(latest.id.clone()),
+        steam_build_id: steam_build_id.map(str::to_string),
+        branch: branch.to_string(),
+        base_type: "delta".to_string(),
+        created_at: now,
+        root_hash: root_hash.clone(),
+        total_bytes,
+        files,
+    };
+    let record = VersionRecord {
+        id: id.clone(),
+        parent_id: Some(latest.id.clone()),
+        steam_build_id: steam_build_id.map(str::to_string),
+        branch: branch.to_string(),
+        base_type: "delta".to_string(),
+        created_at: now,
+        root_hash,
+        metadata_hash: compute_metadata_hash(&manifest.files),
+        file_count: manifest.files.len() as u64,
+        total_bytes,
+        label: label.clone(),
+        change_log: Some(change_log.clone()),
+    };
+
+    // 额外落一份独立的 changelog 到增量目录，便于离线查看/排障；
+    // 页面展示仍用 meta 里的记录，避免每次展开都读磁盘。
+    let changelog_result = (|| -> Result<(), String> {
+        let changelog_path = delta_root.join("changelog.json");
+        let content = serde_json::to_string_pretty(&change_log)
+            .map_err(|error| format!("序列化变更清单失败：{error}"))?;
+        fs::write(&changelog_path, format!("{content}\n"))
+            .map_err(|error| io_error("写入变更清单", &changelog_path, error))
+    })();
+    if let Err(error) = changelog_result {
+        remove_if_exists(&delta_root);
+        return Err(error);
+    }
+
+    if let Err(error) = save_manifest(store, &manifest) {
+        remove_if_exists(&delta_root);
+        return Err(error);
+    }
+    meta.versions.push(record.clone());
+    if let Some(build) = steam_build_id {
+        meta.last_seen_build_id = Some(build.to_string());
+    }
+    meta.active_version_id = Some(id);
+    if let Err(error) = save_meta(store, &meta) {
+        let _ = fs::remove_file(manifest_path(store, &record.id));
+        remove_if_exists(&delta_root);
+        return Err(error);
+    }
+
+    Ok(CaptureOutcome {
+        created: true,
+        version: Some(record),
+        message: format!(
+            "已捕获新版本「{}」：新增 {}，删除 {}，修改 {}；增量包共 {}。",
+            label,
+            added_count,
+            removed_count,
+            modified_count,
+            format_bytes(delta_bytes)
+        ),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 还原 / 校验
+// ---------------------------------------------------------------------------
+
+struct RestoreFileOutcome {
+    replaced: bool,
+    size: u64,
+}
+
+fn restore_file_is_current(
+    entry: &ManifestFile,
+    current_map: &HashMap<String, ManifestFile>,
+) -> bool {
+    current_map
+        .get(&normalize_key(&entry.path))
+        .is_some_and(|current| current.size == entry.size && current.sha256 == entry.sha256)
+}
+
+fn restore_one_file(
+    game_path: &Path,
+    record: &VersionRecord,
+    entry: &ManifestFile,
+    index: usize,
+    materializer: &mut Materializer<'_>,
+) -> Result<RestoreFileOutcome, String> {
+    let target_path = game_path.join(&entry.path);
+    let file_name = target_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let temp_path = target_path.with_file_name(format!(".{file_name}.pzrestore{index}"));
+
+    let result = (|| -> Result<(), String> {
+        materializer.materialize(&record.id, &entry.path, &temp_path, 0)?;
+        let actual = hash_file(&temp_path)?;
+        if actual != entry.sha256 {
+            return Err(format!(
+                "还原文件校验失败：{}（期望 {}，实际 {}）",
+                entry.path, entry.sha256, actual
+            ));
+        }
+        if target_path.exists() {
+            fs::remove_file(&target_path)
+                .map_err(|error| io_error("覆盖游戏文件", &target_path, error))?;
+        }
+        fs::rename(&temp_path, &target_path).or_else(|_| {
+            fs::copy(&temp_path, &target_path)
+                .map(|_| ())
+                .and_then(|_| fs::remove_file(&temp_path))
+                .map_err(|error| io_error("写入游戏文件", &target_path, error))
+        })?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        remove_if_exists(&temp_path);
+        return Err(error);
+    }
+    Ok(RestoreFileOutcome {
+        replaced: true,
+        size: entry.size,
+    })
+}
+
+fn restore_target_files(
+    game_path: &Path,
+    store: &Path,
+    meta: &VersionStoreMeta,
+    record: &VersionRecord,
+    target_files: &[ManifestFile],
+    current_map: &HashMap<String, ManifestFile>,
+    total_files: u64,
+    total_bytes: u64,
+    workers: usize,
+    progress: Progress<'_>,
+) -> Result<(u64, u64, u64), String> {
+    // 单线程路径：保留原来的逐文件还原行为。
+    if workers <= 1 {
+        let mut materializer = Materializer::new(store, meta);
+        let mut replaced = 0u64;
+        let mut kept = 0u64;
+        let mut bytes_written = 0u64;
+
+        for (index, entry) in target_files.iter().enumerate() {
+            if restore_file_is_current(entry, current_map) {
+                kept += 1;
+                // 还原写入阶段不再响应取消，避免留下“改了一半”的游戏目录。
+                let _ = progress(ProgressEvent {
+                    phase: "restoring".to_string(),
+                    processed_files: index as u64 + 1,
+                    total_files,
+                    processed_bytes: bytes_written,
+                    total_bytes,
+                    current_path: Some(entry.path.clone()),
+                });
+                continue;
+            }
+
+            let outcome =
+                restore_one_file(game_path, record, entry, index, &mut materializer)?;
+            replaced += 1;
+            bytes_written += outcome.size;
+            let _ = progress(ProgressEvent {
+                phase: "restoring".to_string(),
+                processed_files: index as u64 + 1,
+                total_files,
+                processed_bytes: bytes_written,
+                total_bytes,
+                current_path: Some(entry.path.clone()),
+            });
+        }
+        return Ok((replaced, kept, bytes_written));
+    }
+
+    let next = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    let (sender, receiver) = mpsc::channel::<(usize, Result<RestoreFileOutcome, String>)>();
+    let mut first_error: Option<String> = None;
+    let mut replaced = 0u64;
+    let mut kept = 0u64;
+    let mut bytes_written = 0u64;
+    let mut completed = 0u64;
+
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let next = &next;
+            let cancelled = &cancelled;
+            scope.spawn(move || {
+                // Materializer 内部的清单缓存用 Rc，不能跨线程共享；每个 worker 自己持有一个。
+                let mut materializer = Materializer::new(store, meta);
+                loop {
+                    if cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= target_files.len() {
+                        break;
+                    }
+                    let entry = &target_files[index];
+                    let result = if restore_file_is_current(entry, current_map) {
+                        Ok(RestoreFileOutcome {
+                            replaced: false,
+                            size: 0,
+                        })
+                    } else {
+                        restore_one_file(game_path, record, entry, index, &mut materializer)
+                    };
+                    if sender.send((index, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+
+        for (index, result) in receiver {
+            completed += 1;
+            match result {
+                Ok(outcome) => {
+                    if outcome.replaced {
+                        replaced += 1;
+                        bytes_written += outcome.size;
+                    } else {
+                        kept += 1;
+                    }
+                    let entry = &target_files[index];
+                    // 写入阶段忽略回调错误：取消请求不会把还原切成半截。
+                    let _ = progress(ProgressEvent {
+                        phase: "restoring".to_string(),
+                        processed_files: completed,
+                        total_files,
+                        processed_bytes: bytes_written,
+                        total_bytes,
+                        current_path: Some(entry.path.clone()),
+                    });
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    cancelled.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    });
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    if completed != target_files.len() as u64 {
+        return Err("并行还原未完成全部文件。".to_string());
+    }
+    Ok((replaced, kept, bytes_written))
+}
+
+pub fn restore_version(
+    game_path: &Path,
+    store: &Path,
+    version_id: &str,
+    force: bool,
+    parallel: bool,
+    progress: Progress<'_>,
+) -> Result<RestoreOutcome, String> {
+    ensure_store_outside_game(store, game_path)?;
+    let mut meta = load_meta(store)?;
+    let record = meta
+        .versions
+        .iter()
+        .find(|record| record.id == version_id)
+        .cloned()
+        .ok_or_else(|| format!("版本不存在：{version_id}"))?;
+    let target_manifest = load_manifest(store, &record.id)?;
+    let target_map: HashMap<String, ManifestFile> = target_manifest
+        .files
+        .iter()
+        .cloned()
+        .map(|file| (normalize_key(&file.path), file))
+        .collect();
+
+    // 先完整校验当前目录：不匹配任何已记录版本时，除非用户明确选择强制还原，
+    // 否则不覆盖（方案 D 的“未知修改不自动覆盖”原则）。
+    let current_files = scan_directory(game_path, parallel, progress)?;
+    let current_root = compute_root_hash(&current_files);
+    let known = meta
+        .versions
+        .iter()
+        .any(|version| version.root_hash == current_root);
+    if !known && !force {
+        return Err(
+            "当前游戏目录不是任何已记录版本（可能被 Steam 更新或手动修改）。请先「捕获新版本」，或确认强制还原。"
+                .to_string(),
+        );
+    }
+
+    let current_map: HashMap<String, ManifestFile> = current_files
+        .iter()
+        .cloned()
+        .map(|file| (normalize_key(&file.path), file))
+        .collect();
+    let total_files = target_manifest.files.len() as u64 + current_files.len() as u64;
+    let total_bytes = target_manifest.total_bytes;
+    let workers = worker_count(target_manifest.files.len(), parallel);
+    let (replaced, kept, bytes_written) = restore_target_files(
+        game_path,
+        store,
+        &meta,
+        &record,
+        &target_manifest.files,
+        &current_map,
+        total_files,
+        total_bytes,
+        workers,
+        progress,
+    )?;
+    let mut removed = 0u64;
+    let mut trash_root: Option<PathBuf> = None;
+
+    for (index, current) in current_files.iter().enumerate() {
+        let key = normalize_key(&current.path);
+        if target_map.contains_key(&key) {
+            continue;
+        }
+        let source = game_path.join(&current.path);
+        let root = trash_root.get_or_insert_with(|| {
+            store
+                .join(TRASH_DIR)
+                .join(format!("restore-{}", now_seconds()))
+        });
+        let destination = root.join(&current.path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| io_error("创建回收目录", parent, error))?;
+        }
+        if fs::rename(&source, &destination).is_err() {
+            fs::copy(&source, &destination)
+                .map_err(|error| io_error("移动多余文件到回收区", &source, error))?;
+            fs::remove_file(&source)
+                .map_err(|error| io_error("移除多余文件", &source, error))?;
+        }
+        removed += 1;
+        let _ = progress(ProgressEvent {
+            phase: "cleaning".to_string(),
+            processed_files: index as u64 + 1,
+            total_files,
+            processed_bytes: bytes_written,
+            total_bytes,
+            current_path: Some(current.path.clone()),
+        });
+    }
+
+    meta.active_version_id = Some(record.id.clone());
+    save_meta(store, &meta)?;
+
+    let trash_path = trash_root.map(|path| path.to_string_lossy().into_owned());
+    let mut message = format!(
+        "已还原到「{}」：替换 {} 个文件，保留 {} 个未变化文件，移出 {} 个多余文件（写入 {}）。",
+        record.label,
+        replaced,
+        kept,
+        removed,
+        format_bytes(bytes_written)
+    );
+    if let Some(path) = &trash_path {
+        message.push_str(&format!(" 多余文件已移到回收区：{path}"));
+    }
+
+    Ok(RestoreOutcome {
+        replaced,
+        kept,
+        removed,
+        bytes_written,
+        trash_path,
+        message,
+    })
+}
+
+pub fn verify_current_version(
+    game_path: &Path,
+    store: &Path,
+    parallel: bool,
+    progress: Progress<'_>,
+) -> Result<VerifyOutcome, String> {
+    let meta = load_meta(store)?;
+    let files = scan_directory(game_path, parallel, progress)?;
+    let root_hash = compute_root_hash(&files);
+    let matched = meta
+        .versions
+        .iter()
+        .rev()
+        .find(|record| record.root_hash == root_hash)
+        .cloned();
+
+    let message = match &matched {
+        Some(record) => format!("当前游戏目录与「{}」完全一致（根哈希已校验）。", record.label),
+        None => format!(
+            "当前游戏目录不是任何已记录版本，根哈希为 {}。",
+            root_hash
+        ),
+    };
+
+    Ok(VerifyOutcome {
+        matched_version_id: matched.map(|record| record.id),
+        root_hash,
+        message,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 状态 / 删除
+// ---------------------------------------------------------------------------
+
+fn metadata_matches(record: &VersionRecord, metadata_hash: &str) -> bool {
+    !record.metadata_hash.is_empty() && record.metadata_hash == metadata_hash
+}
+
+pub fn get_status(
+    game_path: Option<&Path>,
+    store: &Path,
+    steam_build_id: Option<&str>,
+    branch: &str,
+    operation_running: bool,
+) -> Result<VersionStatus, String> {
+    let meta = load_meta(store)?;
+    let versions = meta.versions.clone();
+    let latest = versions.last().cloned();
+    let last_captured_build_id = meta
+        .last_seen_build_id
+        .clone()
+        .or_else(|| latest.as_ref().and_then(|record| record.steam_build_id.clone()));
+    let steam_update_pending = match (steam_build_id, last_captured_build_id.as_deref()) {
+        (Some(current), Some(previous)) => current != previous,
+        _ => false,
+    };
+
+    let mut current_match = VersionCurrentMatch {
+        kind: "none".to_string(),
+        version_id: None,
+        candidates: Vec::new(),
+        checked_hashes: false,
+        message: "还没有版本记录，先创建一个基准版本。".to_string(),
+    };
+    let mut pending_changes = None;
+
+    match game_path {
+        None => {
+            current_match = VersionCurrentMatch {
+                kind: "missing".to_string(),
+                version_id: None,
+                candidates: Vec::new(),
+                checked_hashes: false,
+                message: "未检测到 Project Zomboid 安装目录。".to_string(),
+            };
+        }
+        Some(game) if !game.is_dir() => {
+            current_match = VersionCurrentMatch {
+                kind: "missing".to_string(),
+                version_id: None,
+                candidates: Vec::new(),
+                checked_hashes: false,
+                message: "Project Zomboid 安装目录不存在。".to_string(),
+            };
+        }
+        // 还没有任何版本时不用扫游戏目录：页面只需要显示“先创建基准版本”。
+        Some(_) if versions.is_empty() => {}
+        Some(game) => {
+            let pairs = scan_metadata(game)?;
+            let metadata_hash = compute_metadata_hash_from_pairs(&pairs);
+            if !versions.is_empty() {
+                let candidates: Vec<String> = versions
+                    .iter()
+                    .filter(|record| metadata_matches(record, &metadata_hash))
+                    .map(|record| record.id.clone())
+                    .collect();
+                if let Some(version_id) = candidates.last().cloned() {
+                    let label = versions
+                        .iter()
+                        .find(|record| record.id == version_id)
+                        .map(|record| record.label.clone())
+                        .unwrap_or_else(|| version_id.clone());
+                    current_match = VersionCurrentMatch {
+                        kind: "metadata".to_string(),
+                        version_id: Some(version_id),
+                        candidates,
+                        checked_hashes: false,
+                        message: format!(
+                            "当前目录的文件路径和大小与「{label}」一致（未校验内容哈希，可点「校验当前目录」确认）。"
+                        ),
+                    };
+                } else {
+                    current_match = VersionCurrentMatch {
+                        kind: "unknown".to_string(),
+                        version_id: None,
+                        candidates: Vec::new(),
+                        checked_hashes: false,
+                        message:
+                            "当前目录与所有已记录版本的路径/大小都不一致，可能被 Steam 更新或手动修改过。"
+                                .to_string(),
+                    };
+                }
+
+                if let Some(latest) = &latest {
+                    if let Ok(manifest) = load_manifest(store, &latest.id) {
+                        let latest_map: HashMap<String, u64> = manifest
+                            .files
+                            .iter()
+                            .map(|file| (normalize_key(&file.path), file.size))
+                            .collect();
+                        let current_map: HashMap<String, u64> = pairs.into_iter().collect();
+                        let added = current_map
+                            .keys()
+                            .filter(|key| !latest_map.contains_key(*key))
+                            .count() as u64;
+                        let removed = latest_map
+                            .keys()
+                            .filter(|key| !current_map.contains_key(*key))
+                            .count() as u64;
+                        let modified = current_map
+                            .iter()
+                            .filter(|(key, size)| {
+                                latest_map.get(*key).is_some_and(|old| old != *size)
+                            })
+                            .count() as u64;
+                        if added + removed + modified > 0 {
+                            pending_changes = Some(VersionPendingChanges {
+                                added,
+                                removed,
+                                modified,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(VersionStatus {
+        game_path: game_path.map(|path| path.to_string_lossy().into_owned()),
+        store_path: store.to_string_lossy().into_owned(),
+        store_exists: store.is_dir(),
+        steam_build_id: steam_build_id.map(str::to_string),
+        branch: branch.to_string(),
+        last_captured_build_id,
+        steam_update_pending,
+        versions,
+        current_match,
+        pending_changes,
+        active_version_id: meta.active_version_id,
+        operation_running,
+    })
+}
+
+pub fn delete_version(store: &Path, version_id: &str) -> Result<String, String> {
+    let mut meta = load_meta(store)?;
+    let Some(index) = meta
+        .versions
+        .iter()
+        .position(|record| record.id == version_id)
+    else {
+        return Err(format!("版本不存在：{version_id}"));
+    };
+    if index + 1 != meta.versions.len() {
+        return Err("只能删除最新的版本；旧版本仍被后续版本的增量链引用。".to_string());
+    }
+
+    let record = meta.versions.pop().expect("index checked above");
+    // 先落盘新的 meta，再删文件：即使删文件中途失败，也只是留下孤儿文件，
+    // 不会出现「meta 里还有版本、manifest 已经被删掉」的不可还原状态。
+    meta.active_version_id = meta.versions.last().map(|record| record.id.clone());
+    meta.last_seen_build_id = meta
+        .versions
+        .last()
+        .and_then(|record| record.steam_build_id.clone());
+    save_meta(store, &meta)?;
+
+    remove_if_exists(&manifest_path(store, &record.id));
+    if record.is_full() {
+        remove_if_exists(&full_snapshot_root(store, &record));
+    }
+    if let Some(parent_id) = &record.parent_id {
+        remove_if_exists(&store.join(DELTA_DIR).join(format!("{parent_id}__{}", record.id)));
+    }
+    remove_if_exists(&store.join(TMP_DIR).join(&record.id));
+
+    Ok(format!("已删除版本「{}」。", record.label))
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_file(root: &Path, relative: &str, content: &[u8]) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut file = File::create(path).unwrap();
+        file.write_all(content).unwrap();
+    }
+
+    fn read_file(root: &Path, relative: &str) -> Vec<u8> {
+        fs::read(root.join(relative)).unwrap()
+    }
+
+    fn ignore_progress(_: ProgressEvent) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn pseudo_random(length: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed.max(1);
+        let mut output = Vec::with_capacity(length);
+        for _ in 0..length {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            output.push(state as u8);
+        }
+        output
+    }
+
+    #[test]
+    fn root_hash_is_stable_and_case_insensitive() {
+        let files = vec![
+            ManifestFile {
+                path: "Media/Core.pak".to_string(),
+                size: 10,
+                mtime: 1,
+                sha256: "aa".to_string(),
+            },
+            ManifestFile {
+                path: "ProjectZomboid64.exe".to_string(),
+                size: 20,
+                mtime: 2,
+                sha256: "bb".to_string(),
+            },
+        ];
+        let mut reordered = files.clone();
+        reordered.reverse();
+        reordered[0].path = reordered[0].path.to_lowercase();
+        assert_eq!(compute_root_hash(&files), compute_root_hash(&reordered));
+
+        let mut changed = files.clone();
+        changed[0].size = 11;
+        assert_ne!(compute_root_hash(&files), compute_root_hash(&changed));
+    }
+
+    #[test]
+    fn delta_roundtrip_handles_insertions_with_cdc() {
+        let directory = tempfile::tempdir().unwrap();
+        let old_path = directory.path().join("old.bin");
+        let new_path = directory.path().join("new.bin");
+        let delta_path = directory.path().join("change.pzd");
+        let output_path = directory.path().join("output.bin");
+
+        let old = pseudo_random(1024 * 1024, 7);
+        let mut new = Vec::with_capacity(old.len() + 160 * 1024);
+        new.extend_from_slice(&pseudo_random(64 * 1024, 11));
+        new.extend_from_slice(&old);
+        new.extend_from_slice(&pseudo_random(96 * 1024, 13));
+        // 中间再改 4KB，确保 COPY/ADD 混合。
+        let middle = old.len() / 2;
+        for (index, byte) in new[middle + 64 * 1024..middle + 68 * 1024]
+            .iter_mut()
+            .enumerate()
+        {
+            *byte = (index as u8).wrapping_mul(31);
+        }
+
+        fs::write(&old_path, &old).unwrap();
+        fs::write(&new_path, &new).unwrap();
+        let target_size = create_delta(Some(&old_path), &new_path, &delta_path).unwrap();
+        assert_eq!(target_size, new.len() as u64);
+        let delta_size = fs::metadata(&delta_path).unwrap().len();
+        assert!(
+            delta_size < new.len() as u64 / 2,
+            "delta should only store changed chunks, got {delta_size} for {} bytes",
+            new.len()
+        );
+
+        let target_hash = hex(&Sha256::digest(&new));
+        apply_delta(Some(&old_path), &delta_path, &output_path, &target_hash).unwrap();
+        assert_eq!(fs::read(&output_path).unwrap(), new);
+    }
+
+    #[test]
+    fn parallel_scan_matches_sequential_and_forced_workers() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        fs::create_dir_all(&game).unwrap();
+        for index in 0..32u64 {
+            write_file(
+                &game,
+                &format!("media/{index:02}.bin"),
+                &pseudo_random(2048 + index as usize * 17, index + 1),
+            );
+        }
+
+        let sequential = scan_directory(&game, false, &mut ignore_progress).unwrap();
+        let parallel = scan_directory(&game, true, &mut ignore_progress).unwrap();
+        assert_eq!(sequential, parallel);
+        assert_eq!(compute_root_hash(&sequential), compute_root_hash(&parallel));
+
+        let relatives = collect_relative_files(&game).unwrap();
+        let total_bytes: u64 = relatives
+            .iter()
+            .map(|relative| fs::metadata(game.join(relative)).unwrap().len())
+            .sum();
+        let forced = scan_directory_with_workers(
+            &game,
+            &relatives,
+            total_bytes,
+            4,
+            &mut ignore_progress,
+        )
+        .unwrap();
+        assert_eq!(sequential, forced);
+    }
+
+    #[test]
+    fn parallel_scan_propagates_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        fs::create_dir_all(&game).unwrap();
+        for index in 0..24u64 {
+            write_file(&game, &format!("{index:02}.bin"), &pseudo_random(4096, index + 1));
+        }
+
+        let mut calls = 0;
+        let result = scan_directory(&game, true, &mut |_: ProgressEvent| {
+            calls += 1;
+            if calls >= 3 {
+                Err("stop".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert!(calls >= 3);
+    }
+
+    fn snapshot(game: &Path, store: &Path) -> SnapshotOutcome {
+        create_full_snapshot(
+            game,
+            store,
+            Some("100"),
+            "stable",
+            None,
+            true,
+            &mut ignore_progress,
+        )
+        .unwrap()
+    }
+
+    fn capture(game: &Path, store: &Path, build: &str) -> CaptureOutcome {
+        capture_version(
+            game,
+            store,
+            Some(build),
+            "stable",
+            None,
+            true,
+            &mut ignore_progress,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn full_capture_restore_roundtrip_with_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+
+        write_file(&game, "ProjectZomboid64.exe", b"exe-v1");
+        write_file(&game, "media/core.pak", &pseudo_random(300 * 1024, 21));
+        write_file(&game, "old.txt", b"will be removed");
+
+        let first = snapshot(&game, &store);
+        assert!(first.created);
+        assert_eq!(first.version.as_ref().unwrap().base_type, "full");
+
+        // 改一个文件、加一个文件、删一个文件。
+        write_file(&game, "media/core.pak", &{
+            let mut data = pseudo_random(300 * 1024, 21);
+            data[1024] ^= 0xFF;
+            data
+        });
+        write_file(&game, "new.txt", b"new file");
+        fs::remove_file(game.join("old.txt")).unwrap();
+
+        let second = capture(&game, &store, "200");
+        assert!(second.created);
+        let second_record = second.version.unwrap();
+        let change_log = second_record.change_log.as_ref().unwrap();
+        assert_eq!(change_log.added.len(), 1);
+        assert_eq!(change_log.removed, vec!["old.txt".to_string()]);
+        assert_eq!(change_log.modified.len(), 1);
+        assert_eq!(second_record.base_type, "delta");
+
+        let changelog_path = store
+            .join(DELTA_DIR)
+            .join(format!(
+                "{}__{}",
+                first.version.as_ref().unwrap().id,
+                second_record.id
+            ))
+            .join("changelog.json");
+        let changelog_text = fs::read_to_string(&changelog_path).unwrap();
+        let changelog_on_disk: VersionChangeLog = serde_json::from_str(&changelog_text).unwrap();
+        assert_eq!(changelog_on_disk.added.len(), 1);
+        assert_eq!(changelog_on_disk.modified.len(), 1);
+
+        let status = get_status(Some(&game), &store, Some("200"), "stable", false).unwrap();
+        assert_eq!(status.versions.len(), 2);
+        assert_eq!(status.current_match.kind, "metadata");
+        assert_eq!(
+            status.current_match.version_id.as_deref(),
+            Some(second_record.id.as_str())
+        );
+        assert!(!status.steam_update_pending);
+
+        // 还原到 v1：当前目录是已知的 v2，允许直接还原。
+        let restore_first = restore_version(
+            &game,
+            &store,
+            &first.version.as_ref().unwrap().id,
+            false,
+            true,
+            &mut ignore_progress,
+        )
+        .unwrap();
+        assert_eq!(restore_first.removed, 1);
+        assert!(restore_first.replaced >= 1);
+        assert_eq!(read_file(&game, "ProjectZomboid64.exe"), b"exe-v1");
+        assert_eq!(
+            read_file(&game, "media/core.pak"),
+            pseudo_random(300 * 1024, 21)
+        );
+        assert!(game.join("old.txt").is_file());
+        assert!(!game.join("new.txt").exists());
+
+        // 再还原到 v2：新增文件要能用“空基准增量”恢复。
+        restore_version(&game, &store, &second_record.id, false, true, &mut ignore_progress).unwrap();
+        assert!(!game.join("old.txt").exists());
+        assert_eq!(read_file(&game, "new.txt"), b"new file");
+
+        let verified = verify_current_version(&game, &store, true, &mut ignore_progress).unwrap();
+        assert_eq!(
+            verified.matched_version_id.as_deref(),
+            Some(second_record.id.as_str())
+        );
+
+        // 检查点：完整快照后继续捕获增量，再从检查点 + 增量重建。
+        let checkpoint = snapshot(&game, &store);
+        assert!(checkpoint.created);
+        assert_eq!(checkpoint.version.as_ref().unwrap().base_type, "full");
+        write_file(&game, "ProjectZomboid64.exe", b"exe-v3");
+        let third = capture(&game, &store, "300");
+        assert!(third.created);
+        let third_record = third.version.unwrap();
+        restore_version(&game, &store, &third_record.id, false, true, &mut ignore_progress).unwrap();
+        assert_eq!(read_file(&game, "ProjectZomboid64.exe"), b"exe-v3");
+
+        // 只能删最新版本。
+        assert!(delete_version(&store, &first.version.as_ref().unwrap().id).is_err());
+        delete_version(&store, &third_record.id).unwrap();
+        let status = get_status(Some(&game), &store, Some("200"), "stable", false).unwrap();
+        assert_eq!(status.versions.len(), 3);
+    }
+
+    #[test]
+    fn restore_refuses_unknown_directory_unless_forced() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+        write_file(&game, "a.txt", b"a");
+        let first = snapshot(&game, &store);
+        write_file(&game, "unknown.txt", b"not captured");
+
+        let error = restore_version(
+            &game,
+            &store,
+            first.version.as_ref().unwrap().id.as_str(),
+            false,
+            false,
+            &mut ignore_progress,
+        )
+        .unwrap_err();
+        assert!(error.contains("不是任何已记录版本"));
+
+        restore_version(
+            &game,
+            &store,
+            first.version.as_ref().unwrap().id.as_str(),
+            true,
+            true,
+            &mut ignore_progress,
+        )
+        .unwrap();
+        assert!(!game.join("unknown.txt").exists());
+    }
+
+    #[test]
+    fn metadata_hash_tracks_size_changes() {
+        let files = vec![
+            ManifestFile {
+                path: "a.txt".to_string(),
+                size: 1,
+                mtime: 1,
+                sha256: "aa".to_string(),
+            },
+            ManifestFile {
+                path: "B.txt".to_string(),
+                size: 2,
+                mtime: 1,
+                sha256: "bb".to_string(),
+            },
+        ];
+        let first = compute_metadata_hash(&files);
+        let mut changed = files.clone();
+        changed[1].size = 3;
+        assert_ne!(first, compute_metadata_hash(&changed));
+        let mut renamed = files.clone();
+        renamed[0].path = "A.TXT".to_string();
+        assert_eq!(first, compute_metadata_hash(&renamed));
+    }
+}

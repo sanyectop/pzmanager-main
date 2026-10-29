@@ -13,6 +13,10 @@ dist
 dist-ssr
 *.local
 
+# overlay-core 是 src-tauri / overlay-dll 共享的纯解析 lib，不需要自己的构建产物和测试 lock。
+overlay-core/target/
+overlay-core/Cargo.lock
+
 # WebView2 用户数据目录。正常机器上它位于 %LOCALAPPDATA%，
 # 但当该位置不可写（受限/沙箱环境）时，程序会回退到项目根或可执行文件旁。
 .webview2-data

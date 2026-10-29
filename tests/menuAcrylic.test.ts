@@ -34,7 +34,11 @@ test("every menu surface carries the shared acrylic class", () => {
   assert.ok(menuLines.length >= 10, "菜单数量异常，检查 App.tsx 是否改动过大");
   for (const line of menuLines) {
     // 右键菜单不带滚动限制那一套，只挂自己的类；两者都在亚克力规则的选择器列表里。
-    assert.match(line, /pz-workshop-tag-menu-content|pz-workshop-context-menu/, line.trim());
+    assert.match(
+      line,
+      /pz-workshop-tag-menu-content|pz-workshop-context-menu|pz-mod-context-menu/,
+      line.trim(),
+    );
   }
   // 多级菜单（背景菜单里的子菜单）存在且共用同一套表面
   const layered = appSource.split("\n").filter((line) => line.includes("<Menu.Content") && line.includes("pz-background-menu-layer"));
@@ -54,7 +58,9 @@ test("menu acrylic is blur + tint + grain", () => {
   // 0.08 只有 0.87、肉眼看不见，别往下调。
   assert.match(cssCode, /--pz-menu-noise-image:\s*url\("data:image\/svg\+xml[^"]*opacity='0\.3'/);
 
-  const menu = rule(".pz-workshop-tag-menu-content,\n.pz-workshop-context-menu");
+  const menu = rule(
+    ".pz-workshop-tag-menu-content,\n.pz-workshop-context-menu,\n.pz-mod-context-menu",
+  );
   assert.notEqual(menu, "");
   assert.match(menu, /background-color:\s*var\(--pz-menu-tint\);/);
   assert.match(menu, /background-image:\s*var\(--pz-menu-noise-image\);/);
