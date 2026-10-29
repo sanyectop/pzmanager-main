@@ -71,3 +71,15 @@ test("forced-present mechanism stays removed", () => {
   assert.match(overlayLib, /fn install_gdi_swap_hook\(/);
   assert.match(overlayLib, /install_gdi_swap_hook\(\);/);
 });
+
+test("paint dedup is per-HDC and per-GL-context", () => {
+  // 42.22 加载屏同时走 wgl/gdi 两条 swap：旧的全局 5ms 去重会把真正呈现到窗口的
+  // 那一路当成重复帧跳过，游戏画面/黑块因此露出。现在只对同一 HDC + 同一上下文去重。
+  assert.match(overlayLib, /static LAST_PAINT_HDC: AtomicU64/);
+  assert.match(overlayLib, /static LAST_PAINT_CONTEXT: AtomicU64/);
+  assert.match(overlayLib, /fn should_paint_for\(/);
+  assert.match(overlayLib, /last_hdc == hdc/);
+  assert.match(overlayLib, /last_context == context/);
+  // UI 心跳同时报告换帧/绘制，便于判断是否漏掉某条呈现路径。
+  assert.match(overlayUi, /绘制=\{\}/);
+});

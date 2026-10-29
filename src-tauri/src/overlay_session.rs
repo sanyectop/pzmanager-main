@@ -109,7 +109,7 @@ mod imp {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use tauri::{AppHandle, Emitter};
     use windows::core::{BOOL, PCWSTR};
@@ -141,20 +141,7 @@ mod imp {
     const POLL_INTERVAL: Duration = Duration::from_millis(40);
     /// 等待 console.txt 被本次启动重写的最长时间。
     const CONSOLE_FRESH_TIMEOUT: Duration = Duration::from_secs(180);
-    /// `[ZB]` 输出静默多久判定加载完成 —— **只对收尾阶段有效**（见 `SILENCE_COMPLETION_PHASES`）。
-    ///
-    /// 只在"游戏已经开始换帧"之后才计时（见 idle_completion），因此可以收紧到 10 秒，
-    /// 避免主菜单已经出现、覆盖层还多画几帧（表现为"关闭后闪一下"）。
-    const ZB_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
-    /// 收尾阶段之外的静默，必须超过这个时长才兜底结束。
-    ///
-    /// 为什么不能一律用 10 秒：ZombieBuddy 会在加载**中途**联网（`Authors list fetch`，
-    /// 实测静默 10~41 秒）和跑 ClassGraph 全量扫描，那段时间完全没有 `[ZB]` 输出。
-    /// 用 10 秒判定会让覆盖层在游戏还没进主菜单时就被摘掉 —— 表现就是
-    /// "没有加载过程，直接跳到加载完成"。
-    const ZB_IDLE_TIMEOUT_ANY_PHASE: Duration = Duration::from_secs(120);
-    /// 允许"静默即完成"的收尾阶段；其它阶段的静默只能等 `ZB_IDLE_TIMEOUT_ANY_PHASE`。
-    const SILENCE_COMPLETION_PHASES: [&str; 2] = ["注册 Lua 接口", "初始化完成回调"];
+    // 静默阈值与收尾阶段由 overlay-core 统一维护（DLL 回退自读使用同一份）。
     /// 完全没有 `[ZB]` 输出时的兜底时长（从注入时刻起算）。
     const NO_ZB_TIMEOUT: Duration = Duration::from_secs(180);
     /// 注入后等待「覆盖层画出第一帧」的最长时间（游戏渲染启动可能很慢）。
@@ -163,18 +150,16 @@ mod imp {
     const SESSION_MAX_DURATION: Duration = Duration::from_secs(540);
     /// 进度事件最小发送间隔，避免刷爆前端。
     const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
-    /// 覆盖层达到 100% 后继续显示的时间，避免最后一帧来不及渲染。
-    const COMPLETION_HOLD: Duration = Duration::from_secs(2);
+    /// 覆盖层达到 100% 后继续显示的时间。
+    ///
+    /// 只留几帧给最后一帧上传/呈现。42.22 的主菜单在完成标记之后马上播放
+    /// Bink 过场（console 里的 `binkId:`），停留 2 秒会让覆盖层压在过场上，
+    /// 表现为加载完成时闪屏；这里收紧到 150ms。
+    const COMPLETION_HOLD: Duration = Duration::from_millis(150);
     /// 停止事件名前缀，需与 DLL 保持一致。
     const STOP_EVENT_PREFIX: &str = "Local\\PZManagerOverlayStop_";
     /// 「已开始绘制」事件名前缀，需与 DLL 保持一致。
     const STARTED_EVENT_PREFIX: &str = "Local\\PZManagerOverlayStarted_";
-    /// 主菜单/加载完成标记（游戏自身与 ZombieBuddy 的控制台输出）。
-    const COMPLETION_MARKERS: [&str; 3] = [
-        "STATE: exit zombie.gameStates.TermsOfServiceState",
-        "added to the main menu",
-        "ZombieBuddy.getVersion()",
-    ];
     /// `STILL_ACTIVE`（`GetExitCodeProcess` 的返回值）。
     const STILL_ACTIVE: u32 = 259;
 
@@ -199,10 +184,17 @@ mod imp {
         memory_limit_mb: Option<u64>,
         /// 覆盖层背景色（`#RRGGBB`）。None = 让 DLL 用它自己的默认纯红。
         background_color: Option<String>,
+        /// 游戏控制台路径：启动器关闭后 DLL 靠它自己继续读日志。
+        console_path: std::path::PathBuf,
+        launcher_pid: u32,
+        /// 本次会话的起始时间（UNIX 毫秒），DLL 用它拒绝上一局的日志。
+        session_start_ms: u64,
+        /// 心跳节流：即使没有新日志/进度，也至少每秒刷新一次状态文件。
+        last_heartbeat: Instant,
     }
 
     impl StatusFile {
-        fn new() -> Self {
+        fn new(console_path: std::path::PathBuf, session_start: SystemTime) -> Self {
             let path = std::env::temp_dir().join("pz_overlay_status.txt");
             // 清掉上一局残留，避免界面一开始就显示上次的终值（例如 89%/100%）。
             let _ = std::fs::remove_file(&path);
@@ -216,6 +208,10 @@ mod imp {
                 .and_then(|settings| settings.overlay_background_color)
                 .as_deref()
                 .and_then(crate::normalize_overlay_background_color);
+            let session_start_ms = session_start
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
             Self {
                 path,
                 last_write: Instant::now() - Duration::from_secs(1),
@@ -225,28 +221,23 @@ mod imp {
                 has_progress: false,
                 memory_limit_mb,
                 background_color,
+                console_path,
+                launcher_pid: std::process::id(),
+                session_start_ms,
+                last_heartbeat: Instant::now() - Duration::from_secs(1),
             }
         }
 
         /// 追加一行控制台输出（保留最新 6 行，剥掉 `LOG : General f:0>` 前缀）。
         fn push_line(&mut self, line: &str) {
-            let trimmed = line.trim_end_matches(['\r', '\n']).trim();
-            let content = match trimmed.rfind("> ") {
-                Some(index) => trimmed[index + 2..].trim(),
-                None => trimmed,
-            };
-            if content.is_empty() {
+            let Some(value) = overlay_core::normalize_console_line(line) else {
                 return;
-            }
-            let mut value: String = content.chars().take(120).collect();
-            if content.chars().count() > 120 {
-                value.push('…');
-            }
+            };
             if self.lines.back().is_some_and(|last| last == &value) {
                 return;
             }
             self.lines.push_back(value);
-            while self.lines.len() > 6 {
+            while self.lines.len() > overlay_core::MAX_CONSOLE_LINES {
                 self.lines.pop_front();
             }
             self.flush();
@@ -273,6 +264,18 @@ mod imp {
             self.flush();
         }
 
+        /// 启动器存活心跳：即使没有新日志/进度，也至少每秒刷一次状态文件。
+        ///
+        /// DLL 用 `beat=` 判断启动器是否还活着；没有这行时，`[ZB]` 长时间静默
+        /// （Authors list fetch / ClassGraph 扫描）会被误判为启动器已关闭。
+        fn heartbeat(&mut self) {
+            if self.last_heartbeat.elapsed() < Duration::from_secs(1) {
+                return;
+            }
+            self.last_heartbeat = Instant::now();
+            self.force_flush();
+        }
+
         fn close(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
@@ -283,7 +286,18 @@ mod imp {
                 return;
             }
             self.last_write = Instant::now();
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
             let mut text = String::new();
+            text.push_str(&format!("beat={now_ms}\n"));
+            text.push_str(&format!("launcherpid={}\n", self.launcher_pid));
+            text.push_str(&format!("session={}\n", self.session_start_ms));
+            text.push_str(&format!(
+                "console={}\n",
+                self.console_path.to_string_lossy()
+            ));
             if self.has_progress {
                 text.push_str(&format!("progress={:.3}\n", self.progress));
             }
@@ -436,11 +450,12 @@ mod imp {
             });
         let injected_at = Instant::now();
 
-        // 加载界面：只写状态文件，由 DLL 在游戏窗口**内部**绘制（红底 + 左下角控制台 + 底部进度条）。
-        let mut status = StatusFile::new();
-        status.set_phase_only("等待 ZombieBuddy 输出");
-
         let console_path = crate::user_zomboid_directory()?.join("console.txt");
+        let session_start = SystemTime::now() - started.elapsed();
+        // 加载界面：只写状态文件，由 DLL 在游戏窗口**内部**绘制（红底 + 左下角控制台 + 底部进度条）。
+        // 状态文件里同时带 console 路径、会话起始时间和心跳，启动器关闭后 DLL 可以自己继续读日志。
+        let mut status = StatusFile::new(console_path.clone(), session_start);
+        status.set_phase_only("等待 ZombieBuddy 输出");
         // 控制台记录里写"实际在进程里的那份 DLL"，预载旧副本时这条记录就是关键证据。
         let injection_record = format!(
             "[PZManager] 覆盖层 DLL {} 已{}（{}，PID {pid}）",
@@ -468,8 +483,6 @@ mod imp {
             started.elapsed(),
         );
 
-        let session_start = SystemTime::now() - started.elapsed();
-
         // 精确进度分母：由日志里 "[ZB] java mod list to load:" 的 jar 列表计算（见 track_console），
         // 运行期用 "[ZB] patching … with N advice(s)" 累加分子，两者高度吻合（实测 614 vs 611）。
         let expected_advices: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
@@ -486,11 +499,25 @@ mod imp {
             &expected_advices,
         );
 
+        match &outcome {
+            Ok(value) => crate::launcher_log::info(&format!("覆盖层会话结束：{}", value.reason)),
+            Err(error) => crate::launcher_log::warn(&format!("覆盖层会话失败：{error}")),
+        }
+
         if let Ok(outcome) = &outcome {
             status.set_precise_progress("加载完成", 1.0);
             status.force_flush();
-            // 100% 已经写入状态文件；此期间不发送停止事件，让 DLL 继续绘制最后画面。
-            thread::sleep(COMPLETION_HOLD);
+            // 主菜单标记 / ZombieBuddy 完成回调出现时不再等待：42.22 之后紧接着
+            // 加载纹理并播放 Bink 主菜单过场，哪怕 40ms 也可能压到过场首帧。
+            // 其它收尾只留 150ms 给最后一帧。
+            let hold = if outcome.reason.contains("主菜单标记")
+                || outcome.reason.contains("初始化完成回调")
+            {
+                Duration::ZERO
+            } else {
+                COMPLETION_HOLD
+            };
+            thread::sleep(hold);
             let _ = outcome;
         }
 
@@ -539,6 +566,8 @@ mod imp {
         // 等 console.txt 被本次启动重写；迟迟没变化就退化为读取现有内容。
         let fresh_deadline = injected_at + CONSOLE_FRESH_TIMEOUT;
         loop {
+            // 等文件期间也保持心跳：DLL 不能因为这里暂时没有新日志就误判启动器已关闭。
+            status.heartbeat();
             if let Ok(metadata) = std::fs::metadata(console_path) {
                 if metadata
                     .modified()
@@ -577,6 +606,7 @@ mod imp {
         let mut pending_jars: Vec<String> = Vec::new();
 
         loop {
+            status.heartbeat();
             if !process_alive(pid) {
                 return Ok(outcome("游戏进程已退出。", zb_lines, pid, String::new()));
             }
@@ -682,6 +712,14 @@ mod imp {
                         zb_lines += 1;
                         last_zb_line = line.clone();
                         phase = zb_phase(&line).to_string();
+                        if on_game_init_complete(&line) {
+                            return Ok(outcome(
+                                "ZombieBuddy 初始化完成回调结束，覆盖结束。",
+                                zb_lines,
+                                pid,
+                                String::new(),
+                            ));
+                        }
                         if let Some(count) = parse_advice_count(&line) {
                             applied_advices += count;
                         }
@@ -786,76 +824,25 @@ mod imp {
         last_zb_at: Option<Instant>,
         now: Instant,
     ) -> bool {
-        if !overlay_started {
-            return false;
-        }
-        let Some(last) = last_zb_at else {
-            return false;
-        };
-        let idle = now.duration_since(last);
-        if SILENCE_COMPLETION_PHASES.contains(&phase) {
-            idle >= ZB_IDLE_TIMEOUT
-        } else {
-            idle >= ZB_IDLE_TIMEOUT_ANY_PHASE
-        }
+        overlay_core::idle_completion(overlay_started, phase, last_zb_at, now)
     }
 
     /// 从 `[ZB]` 行推导当前加载阶段（用于前端显示）。
     fn zb_phase(line: &str) -> &'static str {
-        if line.contains("ZomboidFileSystem.loadMods") {
-            "扫描模组列表"
-        } else if line.contains("java mod list to load") {
-            "读取 Java 模组清单"
-        } else if line.contains("Java mod approvals read") {
-            "读取模组审批记录"
-        } else if line.contains("checking mods ban status") {
-            "校验模组来源"
-        } else if line.contains("ZBS verification") {
-            "校验模组签名"
-        } else if line.contains("Waiting for Java mods approval") {
-            "等待模组审批"
-        } else if line.contains("onGameInitComplete") {
-            "初始化完成回调"
-        } else if line.contains("Exposing class to Lua") {
-            "注册 Lua 接口"
-        } else if line.contains("Transformed:") {
-            "转换游戏类"
-        } else if line.contains("patching ") {
-            "注入游戏类"
-        } else {
-            "加载中"
-        }
+        overlay_core::zb_phase(line)
+    }
+
+    /// ZombieBuddy 的初始化完成回调是它在退出前的最后一条里程碑。
+    ///
+    /// 之后游戏还要加载纹理和主菜单，主菜单会播放 Bink 过场（console 的
+    /// `binkId:`）。等到主菜单标记再停，覆盖层已经压在过场上；这里在
+    /// 回调出现时就结束，宁可让游戏自己的加载画面露出来。
+    fn on_game_init_complete(line: &str) -> bool {
+        overlay_core::on_game_init_complete(line)
     }
 
     fn completion_marker(line: &str) -> Option<&'static str> {
-        COMPLETION_MARKERS
-            .iter()
-            .find(|marker| line.contains(**marker))
-            .copied()
-    }
-
-    /// 根据 `[ZB]` 阶段与已输出行数估算加载进度（0.0~1.0）。
-    ///
-    /// ZombieBuddy 不提供总进度，这里用"阶段里程碑 + 行数缓慢增长"的方式估算，
-    /// 并且 `OverlayUi::set_progress` 只会让进度前进，不会回退。
-    fn progress_for(phase: &str, zb_lines: u64) -> f32 {
-        let phase_value: f32 = match phase {
-            "扫描模组列表" => 0.15,
-            "读取 Java 模组清单" => 0.25,
-            "读取模组审批记录" => 0.35,
-            "校验模组来源" => 0.45,
-            "校验模组签名" => 0.55,
-            "等待模组审批" => 0.62,
-            "注入游戏类" => 0.72,
-            "转换游戏类" => 0.82,
-            "注册 Lua 接口" => 0.88,
-            "初始化完成回调" => 0.94,
-            "加载中" => 0.5,
-            _ => 0.08,
-        };
-        // 只是分母就绪前的兜底，压低上限避免"看起来卡住"。
-        let creep = (zb_lines as f32 / 3000.0 * 0.6).min(0.6);
-        phase_value.max(creep)
+        overlay_core::completion_marker(line)
     }
 
     /// 统计"本次真正要加载的 Java 模组 jar"声明的注入方法(advice)总数——进度条分母。
@@ -879,20 +866,12 @@ mod imp {
 
     /// 解析 `[ZB] patching <目标> with N advice(s)` 里的 N。
     fn parse_advice_count(line: &str) -> Option<u64> {
-        let tail = line.split("patching ").nth(1)?.split(" with ").nth(1)?;
-        let digits: String = tail
-            .chars()
-            .take_while(|character| character.is_ascii_digit())
-            .collect();
-        digits.parse().ok()
+        overlay_core::parse_advice_count(line)
     }
 
     /// 从 `[ZB]     <modId>   <路径>.jar` 行里取出最后的 jar 路径。
     fn extract_jar_path(line: &str) -> Option<String> {
-        line.split_whitespace()
-            .rev()
-            .find(|token| token.to_ascii_lowercase().ends_with(".jar"))
-            .map(str::to_string)
+        overlay_core::extract_jar_path(line)
     }
 
     /// 创建/打开会话用的命名事件（手动重置，初始未触发）。
@@ -975,9 +954,10 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::{
-            completion_marker, extract_jar_path, idle_completion, parse_advice_count, zb_phase,
-            ZB_IDLE_TIMEOUT, ZB_IDLE_TIMEOUT_ANY_PHASE,
+            completion_marker, extract_jar_path, idle_completion, on_game_init_complete,
+            parse_advice_count, zb_phase, StatusFile, COMPLETION_HOLD,
         };
+        use overlay_core::{ZB_IDLE_TIMEOUT, ZB_IDLE_TIMEOUT_ANY_PHASE};
         use std::time::{Duration, Instant};
 
         #[test]
@@ -1093,6 +1073,57 @@ mod imp {
             assert!(!idle_completion(true, "校验模组来源", Some(old), now));
             // 同一个阶段静默超过 120 秒才兜底结束。
             assert!(idle_completion(true, "校验模组来源", Some(ancient), now));
+        }
+
+        #[test]
+        fn status_file_writes_heartbeat_console_and_session() {
+            let temp = tempfile::tempdir().unwrap();
+            let console = temp.path().join("console.txt");
+            let status_path = temp.path().join("status.txt");
+            let mut status = StatusFile {
+                path: status_path.clone(),
+                last_write: Instant::now() - Duration::from_secs(10),
+                lines: std::collections::VecDeque::new(),
+                phase: "测试".to_string(),
+                progress: 0.0,
+                has_progress: false,
+                memory_limit_mb: Some(8192),
+                background_color: Some("#FF0000".to_string()),
+                console_path: console.clone(),
+                launcher_pid: 1234,
+                session_start_ms: 1_700_000_000_000,
+                last_heartbeat: Instant::now() - Duration::from_secs(10),
+            };
+            status.set_phase_only("测试");
+            status.force_flush();
+            status.heartbeat();
+
+            let content = std::fs::read_to_string(&status_path).unwrap();
+            assert!(content.contains("beat="));
+            assert!(content.contains("launcherpid=1234\n"));
+            assert!(content.contains("session=1700000000000\n"));
+            assert!(content.contains(&format!(
+                "console={}\n",
+                console.to_string_lossy()
+            )));
+            assert!(content.contains("phase=测试\n"));
+            assert!(content.contains("bgcolor=#FF0000\n"));
+        }
+
+        #[test]
+        fn completion_hold_leaves_room_before_the_menu_bink_intro() {
+            // 42.22 的完成标记后紧跟 binkId/主菜单过场；停留过长会压在过场上闪屏。
+            assert!(COMPLETION_HOLD <= Duration::from_millis(250));
+        }
+
+        #[test]
+        fn stops_on_zombie_buddy_init_complete_before_the_menu_bink() {
+            assert!(on_game_init_complete(
+                "LOG  : General      f:0> [ZB] Running callbacks for onGameInitComplete"
+            ));
+            assert!(!on_game_init_complete(
+                "LOG  : General      f:0> [ZB] patching zombie.IsoChunk"
+            ));
         }
 
         #[test]

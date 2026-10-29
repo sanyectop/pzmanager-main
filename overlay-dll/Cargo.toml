@@ -12,6 +12,8 @@ name = "pz_overlay"
 crate-type = ["cdylib"]
 
 [dependencies]
+# 启动器与 DLL 共用的纯解析逻辑（阶段/完成标记/进度估算）。
+overlay-core = { path = "../overlay-core" }
 # JNI 绑定：拿 JNIEnv 时用它而不是手写虚表——实测手写虚表会在
 # AttachCurrentThread 上抛 0xC0000005 崩进程（见 docs/architecture.md §6.3）。
 # 不开 invocation feature：那会要求构建机链接 libjvm。
@@ -34,6 +36,9 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
 ] }
+
+[dev-dependencies]
+tempfile = "3"
 
 # MSVC 的 C 编译器在给命令线加上 `-Z7`（调试信息）时编译 minhook 的 C 源码
 # 可能报 D8050（无法执行 c1.dll）。这里保留 Rust 侧的 debug info，
