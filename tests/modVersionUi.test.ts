@@ -12,18 +12,12 @@ import {
   type VersionRecord,
 } from "../src/versioning.ts";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
 const cssSource = readFileSync(
   fileURLToPath(new URL("../src/App.css", import.meta.url)),
   "utf8",
 );
-const backendSource = readFileSync(
-  fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)),
-  "utf8",
-);
+import { rustSource as backendSource } from "./sourceText.ts";
 
 function target(overrides: Partial<ModVersionTarget> = {}): ModVersionTarget {
   return {

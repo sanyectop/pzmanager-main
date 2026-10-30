@@ -7,14 +7,8 @@ import {
   versionStoreOnSystemDrive,
 } from "../src/versioning.ts";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
-const backendSource = readFileSync(
-  fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
+import { rustSource as backendSource } from "./sourceText.ts";
 
 test("only C: counts as the system drive", () => {
   assert.equal(versionStoreOnSystemDrive("C:\\Users\\me\\Zomboid\\.pzmanager\\versions"), true);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { appSource } from "./sourceText.ts";
 import {
   MEMORY_CLEAN_NO_DECREASE_GRACE_MS,
   MEMORY_CLEAN_PLATEAU_GRACE_MS,
@@ -119,10 +120,6 @@ test("任务行文案带上当前已清理的 MB", () => {
 });
 
 test("设置里的清理按钮改为登记任务中心任务并采样物理内存", () => {
-  const appSource = readFileSync(
-    fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-    "utf8",
-  );
   assert.match(appSource, /kind: "memory-clean"/);
   assert.match(appSource, /const taskId = "memory-task-" \+ \(\+\+taskIdRef\.current\)/);
   assert.match(appSource, /applyMemoryCleanSample\(tracker/);

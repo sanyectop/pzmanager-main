@@ -3,10 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
 
 test("adds the recommended Project Anime Backgrounds workshop submenu", () => {
   const subscriptionMenuStart = appSource.indexOf("<Text flex=\"1\">创意工坊订阅</Text>");

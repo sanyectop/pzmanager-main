@@ -3,18 +3,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
 const cssSource = readFileSync(
   fileURLToPath(new URL("../src/App.css", import.meta.url)),
   "utf8",
 );
-const backendSource = readFileSync(
-  fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)),
-  "utf8",
-);
+import { rustSource as backendSource } from "./sourceText.ts";
 
 test("mod presets are registered as backend commands and invoked from the mods sidebar", () => {
   for (const command of ["list_mod_presets", "save_mod_preset", "apply_mod_preset", "delete_mod_preset"]) {
