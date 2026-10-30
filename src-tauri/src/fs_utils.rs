@@ -110,20 +110,3 @@ pub(crate) fn backup_file(path: &Path, backup_dir: &Path, name: &str) -> Result<
         .map_err(|error| format!("备份 {} 失败: {error}", path.display()))?;
     Ok(())
 }
-
-/// 目录能被创建、且确实写得进文件才算可写。
-/// 只判断存在性不够：受限环境下目录可能"可读不可写"。
-#[cfg(target_os = "windows")]
-pub(crate) fn dir_is_writable(dir: &std::path::Path) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    let probe = dir.join(".pzmanager-write-probe");
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
