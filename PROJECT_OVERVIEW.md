@@ -428,9 +428,12 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 
 | 文件 | 行数 | 职责 |
 | --- | ---: | --- |
-| [src/App.tsx](src/App.tsx) | 7,178 | 全部页面、状态、IPC 调用与局部组件 |
-| [src/App.css](src/App.css) | 3,433 | 手写样式，类名统一 `pz-` 前缀 |
-| [src-tauri/src/lib.rs](src-tauri/src/lib.rs) | 8,130 | Steam 发现、配置事务、模组、背景、命令注册、内联测试 |
+| [src/App.tsx](src/App.tsx) | 8,434 | 剩余 `App()`：状态、effects、IPC 与页面编排 |
+| `src/app/` + `src/components/` | 3,358 | 类型、常量、纯函数与独立组件（见 [docs/refactor-modules.md](docs/refactor-modules.md)） |
+| [src/App.css](src/App.css) | 4,535 | 手写样式，类名统一 `pz-` 前缀 |
+| [src-tauri/src/lib.rs](src-tauri/src/lib.rs) | 2,736 | 命令注册、启动流程、工坊/资源命令、应用初始化 |
+| `src-tauri/src/` 领域模块 | 5,642 | launch_options / settings / steam / backgrounds / lua_mods / jar_mods / support / fast_launch / viewpoint_media / fs_utils |
+| [src-tauri/src/tests.rs](src-tauri/src/tests.rs) | 2,438 | 原 `lib.rs` 内联测试 |
 | [src-tauri/src/overlay_session.rs](src-tauri/src/overlay_session.rs) | 1,162 | 会话状态机、控制台解析、进度估算、启动时长 |
 | [overlay-dll/src/classfile.rs](overlay-dll/src/classfile.rs) | 1,478 | class 文件解析与字节码改写 |
 | [overlay-dll/src/fastlaunch.rs](overlay-dll/src/fastlaunch.rs) | 1,502 | JVMTI agent、函数表、类加载 hook |
@@ -450,7 +453,17 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 
 | 模块 | 职责 | 备注 |
 | --- | --- | --- |
-| `lib.rs` | 环境探测、配置改写事务、模组、背景/截图/光影、class 注解、命令注册 | 单一巨石文件；内联测试跨模块合计 117 条 |
+| `lib.rs` | 命令注册、启动流程、工坊/资源命令、应用初始化 | 领域模块通过 `pub(crate) use` 回到 crate 根；内联测试移到 `tests.rs` |
+| `launch_options.rs` | Steam / JSON / BAT 启动参数解析与改写 | 纯函数 |
+| `settings.rs` | 设置归一化、`settings.json` 读写与设置命令 | — |
+| `steam.rs` | Steam 库、账号与 Project Zomboid 路径探测 | — |
+| `backgrounds.rs` | 自定义 / 工坊背景扫描、导入、读取 | — |
+| `lua_mods.rs` | Lua 模组解析、启用顺序、启用/禁用 | — |
+| `jar_mods.rs` | JAR 扫描、状态文件、ZombieBuddy 决策、模组预设 | — |
+| `support.rs` | ZombieBuddy / PZ Optimization / Viewpoint 3D | — |
+| `fast_launch.rs` | 极速启动预扫描缓存与启动配置备份 | — |
+| `viewpoint_media.rs` | Viewpoint 截图与光影包管理 | — |
+| `fs_utils.rs` | 文件写入、事务式替换、备份 | — |
 | `workshop.rs` | 工坊浏览（HTML/SSR 解析，无 API Key）、详情 API | 300 s 缓存 |
 | `resource.rs` | Modrinth + CurseForge 光影检索 | 对齐 PCL2 的 `DlSourceModGet` |
 | `downloader.rs` | 多线程分块下载 + 进度事件 | 供下载器与资源中心共用 |
@@ -464,8 +477,10 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 
 ### 4.5 前端组织
 
-- **单组件 + 纯函数模块**：`App()` 内约 138 个 `useState` / 28 个 `useRef`，
+- **单组件 + 纯函数/组件模块**：`App()` 仍保留约 138 个 `useState` / 28 个 `useRef`，
   页面内容先构造成 `launchContent` / `overviewContent` / … 再按 `activePage` 渲染；
+  顶层类型、常量、纯函数和独立组件已拆到 `src/app/` 与 `src/components/`，边界见
+  [docs/refactor-modules.md](docs/refactor-modules.md)；
 - **可测试的纯函数**（[src/](src/)）：模组排序/多选/冲突分析/通知策略/启动参数/工坊链接/窗口状态/注入封装；
 - **竞态处理**：长请求用 `useRef` 保存请求序号或扫描 ID（`workshopRequestId`、
   `developerNewsRequestId`、`jarScanIdRef`、`workshopBackgroundScanIdRef`），回包时比对后丢弃过期结果；
@@ -862,8 +877,10 @@ MSVC 工具链（覆盖层 DLL 的 MinHook C 源码需要 `cl.exe`）。
 
 ## 11. 已知边界与技术债
 
-1. **巨石文件**：`App.tsx` 7,178 行、单组件约 138 个 state；`lib.rs` 8,130 行。抽取方向已存在
-   （`src/*.ts` 纯函数、`src-tauri/src/*.rs` 子模块），继续沿边界拆即可。
+1. **剩余巨石**：`App.tsx` 仍有 8,434 行（`App()` 约 8.2k 行）；`lib.rs` 已降到 2,736 行，
+   测试另在 `tests.rs`（2,438 行）。顶层类型/常量/组件和 Rust 领域模块已拆出，目录与规则见
+   [docs/refactor-modules.md](docs/refactor-modules.md)；下一步按功能 hook 继续拆 `App()`，
+   不要继续往单文件里堆代码。
 2. **源码文本断言**：重构成本被放大；见 §9。
 3. **极速启动未收敛**：游戏内加速未被证明，且有 duplicate class definition 崩溃；
    默认开关关闭，文档必须保持「实验性」措辞。
