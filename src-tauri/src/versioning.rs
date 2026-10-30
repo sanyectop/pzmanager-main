@@ -25,12 +25,13 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -48,8 +49,13 @@ const CHUNK_MIN: usize = 16 * 1024;
 const CHUNK_MAX: usize = 128 * 1024;
 const CHUNK_MASK: u64 = 0xFFFF;
 const MAX_CHAIN_DEPTH: u32 = 64;
-/// 并行哈希/复制最多开多少个 worker；再多通常被磁盘或 CPU 限住，反而增加内存。
-const MAX_PARALLEL_WORKERS: usize = 6;
+/// 并行哈希/复制最多开多少个 worker。按逻辑核心数取，SSD 上多开能跑满 CPU；
+/// 机械硬盘如果反而更慢，可以在设置里关掉「多线程加速」退回单线程。
+const MAX_PARALLEL_WORKERS: usize = 16;
+/// 每个 worker 复用的读缓冲大小；1 MiB 对 SHA-NI 和普通磁盘都够用。
+const HASH_BUFFER_SIZE: usize = 1024 * 1024;
+/// 复制文件时每个 worker 复用的读写缓冲（rayon 的 for_each_init 保证每线程一份）。
+const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// 一次扫描 / 快照 / 还原的进度。回调返回 `Err` 表示用户取消。
 #[derive(Debug, Clone)]
@@ -75,13 +81,6 @@ fn worker_count(file_count: usize, parallel: bool) -> usize {
     cores.clamp(1, MAX_PARALLEL_WORKERS).min(file_count)
 }
 
-fn sort_manifest_files(files: &mut Vec<ManifestFile>) {
-    files.sort_by(|left, right| {
-        normalize_key(&left.path)
-            .cmp(&normalize_key(&right.path))
-            .then_with(|| left.path.cmp(&right.path))
-    });
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +88,8 @@ pub struct ManifestFile {
     /// 相对游戏目录，统一用 `/` 分隔。
     pub path: String,
     pub size: u64,
+    /// 文件修改时间（Unix 毫秒）。增量捕获用它判断文件是否没动过，
+    /// 毫秒粒度可以避免“同一秒内改了两次、大小又没变”被漏掉。
     pub mtime: u64,
     /// 十六进制 SHA-256（不带 `sha256:` 前缀）。
     pub sha256: String,
@@ -142,6 +143,23 @@ pub struct VersionChangeLog {
     pub modified: Vec<VersionModifiedFile>,
 }
 
+/// 游戏大版本里关联的单个模组版本。每个模组仍是一条独立版本链，这里只存引用，
+/// 不把模组文件并进游戏快照。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModVersionRef {
+    /// 模组版本库的目录名（`workshop-<id>-<modId>` / `local-<modId>`）。
+    pub key: String,
+    pub mod_id: String,
+    pub name: String,
+    /// `local` / `workshop`
+    pub source: String,
+    pub workshop_id: Option<String>,
+    pub version_id: String,
+    /// 捕获时的模组根目录；当前目录里找不到同一模组时用它兜底。
+    pub root_path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionRecord {
@@ -159,6 +177,9 @@ pub struct VersionRecord {
     pub total_bytes: u64,
     pub label: String,
     pub change_log: Option<VersionChangeLog>,
+    /// 只有游戏大版本会填；模组自己的链里为空。
+    #[serde(default)]
+    pub mod_versions: Vec<ModVersionRef>,
 }
 
 impl VersionRecord {
@@ -338,12 +359,12 @@ fn utc_stamp(seconds: u64) -> String {
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
-fn mtime_seconds(metadata: &fs::Metadata) -> u64 {
+fn mtime_millis(metadata: &fs::Metadata) -> u64 {
     metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -370,12 +391,13 @@ fn path_compare_key(path: &Path) -> String {
         .to_lowercase()
 }
 
-/// 版本存储目录不能放在游戏目录里，否则快照会把存储区自己也扫进去。
-pub fn ensure_store_outside_game(store: &Path, game: &Path) -> Result<(), String> {
+/// 版本存储目录不能放在目标目录里，否则快照会把存储区自己也扫进去。
+/// 游戏目录和模组目录都调用这一条。
+pub fn ensure_store_outside_root(store: &Path, root: &Path) -> Result<(), String> {
     let store_key = path_compare_key(store);
-    let game_key = path_compare_key(game);
-    if store_key == game_key || store_key.starts_with(&format!("{game_key}\\")) {
-        return Err("版本存储目录不能放在游戏目录内，请换一个位置。".to_string());
+    let root_key = path_compare_key(root);
+    if store_key == root_key || store_key.starts_with(&format!("{root_key}\\")) {
+        return Err("备份位置不能放在要备份的目录里面，请换一个位置。".to_string());
     }
     Ok(())
 }
@@ -392,20 +414,31 @@ fn remove_if_exists(path: &Path) {
 // 扫描 / 清单
 // ---------------------------------------------------------------------------
 
-fn collect_relative_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// 目录遍历时顺手拿到的元数据。Windows 的目录枚举（FindNextFile）本来就带
+/// 大小 / 时间，`DirEntry::metadata()` 不会再多一次 stat；旧实现里每个文件要
+/// `symlink_metadata` 三次（统计总大小一次、哈希前一次、校验时一次），在几万个
+/// 小文件上光元数据就要跑很久。
+#[derive(Debug, Clone)]
+struct WalkEntry {
+    relative: PathBuf,
+    size: u64,
+    mtime: u64,
+}
+
+fn collect_walk_entries(root: &Path) -> Result<Vec<WalkEntry>, String> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(directory) = stack.pop() {
-        let entries = fs::read_dir(&directory)
-            .map_err(|error| io_error("读取游戏目录", &directory, error))?;
-        for entry in entries {
-            let entry = entry.map_err(|error| io_error("读取游戏目录项", &directory, error))?;
-            let path = entry.path();
-            let file_type = entry
+        let items = fs::read_dir(&directory)
+            .map_err(|error| io_error("读取目录", &directory, error))?;
+        for item in items {
+            let item = item.map_err(|error| io_error("读取目录项", &directory, error))?;
+            let path = item.path();
+            let file_type = item
                 .file_type()
                 .map_err(|error| io_error("读取文件类型", &path, error))?;
-            // 跳过符号链接 / junction，避免递归环和“链接指向游戏目录外”的意外。
+            // 跳过符号链接 / junction，避免递归环和“链接指向目标目录外”的意外。
             if file_type.is_symlink() {
                 continue;
             }
@@ -415,17 +448,24 @@ fn collect_relative_files(root: &Path) -> Result<Vec<PathBuf>, String> {
                 let relative = path
                     .strip_prefix(root)
                     .map_err(|_| format!("无法计算相对路径：{}", path.display()))?;
-                files.push(relative.to_path_buf());
+                let metadata = item
+                    .metadata()
+                    .map_err(|error| io_error("读取文件信息", &path, error))?;
+                files.push(WalkEntry {
+                    relative: relative.to_path_buf(),
+                    size: metadata.len(),
+                    mtime: mtime_millis(&metadata),
+                });
             }
         }
     }
 
     files.sort_by(|left, right| {
-        let left_key = normalize_key(&display_relative(left));
-        let right_key = normalize_key(&display_relative(right));
+        let left_key = normalize_key(&display_relative(&left.relative));
+        let right_key = normalize_key(&display_relative(&right.relative));
         left_key
             .cmp(&right_key)
-            .then_with(|| display_relative(left).cmp(&display_relative(right)))
+            .then_with(|| display_relative(&left.relative).cmp(&display_relative(&right.relative)))
     });
     Ok(files)
 }
@@ -434,14 +474,15 @@ fn hash_file(path: &Path) -> Result<String, String> {
     hash_file_with_size(path).map(|(hash, _)| hash)
 }
 
-fn hash_file_with_size(path: &Path) -> Result<(String, u64), String> {
+/// 每个 worker 复用同一个读缓冲：旧实现每哈希一个文件就 `vec![0u8; 1 MiB]`，
+/// 几万个文件等于反复 memset 几十 GB，纯属白烧 CPU / 内存带宽。
+fn hash_file_with_buffer(path: &Path, buffer: &mut [u8]) -> Result<(String, u64), String> {
     let mut file = File::open(path).map_err(|error| io_error("打开文件", path, error))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
     let mut size = 0u64;
     loop {
         let read = file
-            .read(&mut buffer)
+            .read(buffer)
             .map_err(|error| io_error("读取文件", path, error))?;
         if read == 0 {
             break;
@@ -452,69 +493,90 @@ fn hash_file_with_size(path: &Path) -> Result<(String, u64), String> {
     Ok((hex(&hasher.finalize()), size))
 }
 
+fn hash_file_with_size(path: &Path) -> Result<(String, u64), String> {
+    let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+    hash_file_with_buffer(path, &mut buffer)
+}
+
 pub fn scan_directory(
     root: &Path,
     parallel: bool,
     progress: Progress<'_>,
 ) -> Result<Vec<ManifestFile>, String> {
-    let relatives = collect_relative_files(root)?;
-    if relatives.is_empty() {
-        return Err("游戏目录里没有可扫描的文件，请确认游戏安装目录是否正确。".to_string());
+    let entries = collect_walk_entries(root)?;
+    if entries.is_empty() {
+        return Err(format!(
+            "目录里没有可扫描的文件：{}，请确认路径是否正确。",
+            root.display()
+        ));
     }
-
-    let mut total_bytes = 0u64;
-    for relative in &relatives {
-        let metadata = fs::symlink_metadata(root.join(relative))
-            .map_err(|error| io_error("读取文件信息", &root.join(relative), error))?;
-        total_bytes += metadata.len();
-    }
-
-    let workers = worker_count(relatives.len(), parallel);
-    scan_directory_with_workers(root, &relatives, total_bytes, workers, progress)
+    let cached = vec![None; entries.len()];
+    let workers = worker_count(entries.len(), parallel);
+    scan_entries(root, &entries, &cached, workers, progress)
 }
 
-fn scan_directory_with_workers(
+/// 按需哈希：`cached_hashes[i]` 有值表示这个文件的大小和修改时间都没变，
+/// 直接沿用上次清单里的 SHA-256，不打开文件。增量捕获主要省在这一步，
+/// 也避开 Windows Defender 对每个被打开文件的实时扫描。
+fn scan_entries(
     root: &Path,
-    relatives: &[PathBuf],
-    total_bytes: u64,
+    entries: &[WalkEntry],
+    cached_hashes: &[Option<String>],
     workers: usize,
     progress: Progress<'_>,
 ) -> Result<Vec<ManifestFile>, String> {
-    let total_files = relatives.len() as u64;
+    let pending: Vec<usize> = (0..entries.len())
+        .filter(|&index| cached_hashes.get(index).and_then(Option::as_ref).is_none())
+        .collect();
+    let total_files = pending.len() as u64;
+    let total_bytes: u64 = pending.iter().map(|&index| entries[index].size).sum();
 
-    // 单线程路径保持原样：机械硬盘可以在设置里关掉多线程。
+    let mut files: Vec<ManifestFile> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| ManifestFile {
+            path: display_relative(&entry.relative),
+            size: entry.size,
+            mtime: entry.mtime,
+            sha256: cached_hashes
+                .get(index)
+                .and_then(Option::as_ref)
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    // 全部命中缓存：没有要读的文件（entries 已经排好序）。
+    if pending.is_empty() {
+        return Ok(files);
+    }
+
+    // 单线程路径：机械硬盘可以在设置里关掉多线程。
     if workers <= 1 {
-        let mut files = Vec::with_capacity(relatives.len());
+        let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
         let mut processed_bytes = 0u64;
-        for (index, relative) in relatives.iter().enumerate() {
-            let path = root.join(relative);
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| io_error("读取文件信息", &path, error))?;
-            let (sha256, size) = hash_file_with_size(&path)?;
+        for (done, &index) in pending.iter().enumerate() {
+            let path = root.join(&entries[index].relative);
+            let (sha256, size) = hash_file_with_buffer(&path, &mut buffer)?;
             processed_bytes += size;
-            files.push(ManifestFile {
-                path: display_relative(relative),
-                size,
-                mtime: mtime_seconds(&metadata),
-                sha256,
-            });
+            files[index].sha256 = sha256;
+            files[index].size = size;
             progress(ProgressEvent {
                 phase: "hashing".to_string(),
-                processed_files: index as u64 + 1,
+                processed_files: done as u64 + 1,
                 total_files,
                 processed_bytes,
                 total_bytes,
-                current_path: Some(display_relative(relative)),
+                current_path: Some(files[index].path.clone()),
             })?;
         }
-        sort_manifest_files(&mut files);
         return Ok(files);
     }
 
     let next = AtomicUsize::new(0);
     let cancelled = AtomicBool::new(false);
-    let (sender, receiver) = mpsc::channel::<(usize, Result<ManifestFile, String>)>();
-    let mut results: Vec<Option<ManifestFile>> = (0..relatives.len()).map(|_| None).collect();
+    let pending_ref = &pending;
+    let (sender, receiver) = mpsc::channel::<(usize, Result<(String, u64), String>)>();
     let mut first_error: Option<String> = None;
     let mut processed_files = 0u64;
     let mut processed_bytes = 0u64;
@@ -524,29 +586,24 @@ fn scan_directory_with_workers(
             let sender = sender.clone();
             let next = &next;
             let cancelled = &cancelled;
-            scope.spawn(move || loop {
-                if cancelled.load(Ordering::SeqCst) {
-                    break;
-                }
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                if index >= relatives.len() {
-                    break;
-                }
-                let relative = &relatives[index];
-                let path = root.join(relative);
-                let result = (|| -> Result<ManifestFile, String> {
-                    let metadata = fs::symlink_metadata(&path)
-                        .map_err(|error| io_error("读取文件信息", &path, error))?;
-                    let (sha256, size) = hash_file_with_size(&path)?;
-                    Ok(ManifestFile {
-                        path: display_relative(relative),
-                        size,
-                        mtime: mtime_seconds(&metadata),
-                        sha256,
-                    })
-                })();
-                if sender.send((index, result)).is_err() {
-                    break;
+            let pending = pending_ref;
+            scope.spawn(move || {
+                // 读缓冲每个 worker 只分配一次，循环里复用。
+                let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+                loop {
+                    if cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let slot = next.fetch_add(1, Ordering::Relaxed);
+                    if slot >= pending.len() {
+                        break;
+                    }
+                    let index = pending[slot];
+                    let path = root.join(&entries[index].relative);
+                    let result = hash_file_with_buffer(&path, &mut buffer);
+                    if sender.send((index, result)).is_err() {
+                        break;
+                    }
                 }
             });
         }
@@ -554,11 +611,12 @@ fn scan_directory_with_workers(
 
         for (index, result) in receiver {
             match result {
-                Ok(file) => {
+                Ok((sha256, size)) => {
                     processed_files += 1;
-                    processed_bytes += file.size;
-                    let current_path = file.path.clone();
-                    results[index] = Some(file);
+                    processed_bytes += size;
+                    files[index].sha256 = sha256;
+                    files[index].size = size;
+                    let current_path = files[index].path.clone();
                     if first_error.is_none() && !cancelled.load(Ordering::SeqCst) {
                         if let Err(error) = progress(ProgressEvent {
                             phase: "hashing".to_string(),
@@ -586,32 +644,23 @@ fn scan_directory_with_workers(
     if let Some(error) = first_error {
         return Err(error);
     }
-
-    let mut files = Vec::with_capacity(results.len());
-    for (index, value) in results.into_iter().enumerate() {
-        let Some(file) = value else {
-            return Err(format!(
-                "并行扫描未完成文件：{}",
-                display_relative(&relatives[index])
-            ));
-        };
-        files.push(file);
+    if processed_files != total_files {
+        let missing = pending
+            .iter()
+            .map(|&index| files[index].path.clone())
+            .find(|path| !path.is_empty())
+            .unwrap_or_default();
+        return Err(format!("并行扫描未完成文件：{missing}"));
     }
-    sort_manifest_files(&mut files);
     Ok(files)
 }
 
 fn scan_metadata(root: &Path) -> Result<Vec<(String, u64)>, String> {
-    let relatives = collect_relative_files(root)?;
-    let mut pairs = Vec::with_capacity(relatives.len());
-    for relative in relatives {
-        let path = root.join(&relative);
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|error| io_error("读取文件信息", &path, error))?;
-        if !metadata.is_file() {
-            continue;
-        }
-        pairs.push((normalize_key(&display_relative(&relative)), metadata.len()));
+    // 遍历时已经带回大小，不用再逐个 stat（页面每次进「版本」都会走这条）。
+    let entries = collect_walk_entries(root)?;
+    let mut pairs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        pairs.push((normalize_key(&display_relative(&entry.relative)), entry.size));
     }
     pairs.sort();
     Ok(pairs)
@@ -701,6 +750,26 @@ fn save_meta(store: &Path, meta: &VersionStoreMeta) -> Result<(), String> {
     fs::rename(&temp, &path).map_err(|error| io_error("保存版本元数据", &path, error))
 }
 
+/// 只读版本链元数据。模组列表用它统计版本数，不会触发目录扫描。
+pub fn read_versions(store: &Path) -> Result<Vec<VersionRecord>, String> {
+    Ok(load_meta(store)?.versions)
+}
+
+/// 把模组版本引用写进某个游戏大版本的记录里。游戏快照/捕获完成后再回填，
+/// 所以不需要改 `create_full_snapshot` / `capture_version` 的签名。
+pub fn attach_mod_versions(
+    store: &Path,
+    version_id: &str,
+    mod_versions: Vec<ModVersionRef>,
+) -> Result<(), String> {
+    let mut meta = load_meta(store)?;
+    let Some(record) = meta.versions.iter_mut().find(|record| record.id == version_id) else {
+        return Err(format!("找不到版本记录：{version_id}"));
+    };
+    record.mod_versions = mod_versions;
+    save_meta(store, &meta)
+}
+
 fn load_manifest(store: &Path, version_id: &str) -> Result<VersionManifest, String> {
     let path = manifest_path(store, version_id);
     let content =
@@ -732,17 +801,16 @@ fn new_version_id(store: &Path, meta: &VersionStoreMeta) -> String {
 }
 
 fn default_label(first: bool, full: bool, build_id: Option<&str>) -> String {
+    // 面向用户的默认备注：只说这次是完整保存还是只存了变化，build 号留给开发者视角。
+    let _ = build_id;
     if full {
-        let kind = if first { "基准版本" } else { "检查点" };
-        match build_id {
-            Some(build) => format!("{kind} · build {build}"),
-            None => kind.to_string(),
+        if first {
+            "第一次完整备份".to_string()
+        } else {
+            "完整备份".to_string()
         }
     } else {
-        match build_id {
-            Some(build) => format!("build {build}"),
-            None => "增量版本".to_string(),
-        }
+        "保存变化".to_string()
     }
 }
 
@@ -1166,7 +1234,7 @@ impl<'a> Materializer<'a> {
         depth: u32,
     ) -> Result<(), String> {
         if depth > MAX_CHAIN_DEPTH {
-            return Err("版本链过深，请创建一个新的完整检查点。".to_string());
+            return Err("版本关联得太长，请先做一次「完整保存」再还原。".to_string());
         }
         let record = self.record(version_id)?;
         let key = normalize_key(relative_path);
@@ -1303,76 +1371,150 @@ fn copy_snapshot_files(
             .map_err(|error| io_error("创建快照目录", &parent, error))?;
     }
 
-    let next = AtomicUsize::new(0);
+    // 用 rayon 的有界线程池并发复制：文件之间并行，每个 rayon 线程复用一份读写缓冲。
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|index| format!("pz-version-copy-{index}"))
+        .build()
+        .map_err(|error| format!("创建复制线程池失败：{error}"))?;
+    let processed_files = AtomicU64::new(0);
+    let processed_bytes = AtomicU64::new(0);
     let cancelled = AtomicBool::new(false);
-    let (sender, receiver) = mpsc::channel::<(usize, Result<(), String>)>();
-    let mut first_error: Option<String> = None;
-    let mut processed_files = 0u64;
-    let mut processed_bytes = 0u64;
+    let finished = AtomicBool::new(false);
+    let first_error: Mutex<Option<String>> = Mutex::new(None);
+    let last_path: Mutex<Option<String>> = Mutex::new(None);
+    let mut progress_error: Option<String> = None;
 
     thread::scope(|scope| {
-        for _ in 0..workers {
-            let sender = sender.clone();
-            let next = &next;
-            let cancelled = &cancelled;
-            scope.spawn(move || loop {
-                if cancelled.load(Ordering::SeqCst) {
-                    break;
-                }
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                if index >= files.len() {
-                    break;
-                }
-                let file = &files[index];
-                let source = game_path.join(&file.path);
-                let destination = snapshot_root.join(&file.path);
-                let result = match fs::copy(&source, &destination) {
-                    Ok(copied) if copied == file.size => Ok(()),
-                    Ok(_) => Err(format!("复制快照文件大小不一致：{}", file.path)),
-                    Err(error) => Err(io_error("复制快照文件", &source, error)),
-                };
-                if sender.send((index, result)).is_err() {
-                    break;
-                }
-            });
-        }
-        drop(sender);
-
-        for (index, result) in receiver {
-            match result {
-                Ok(()) => {
-                    processed_files += 1;
-                    let file = &files[index];
-                    processed_bytes += file.size;
-                    if first_error.is_none() && !cancelled.load(Ordering::SeqCst) {
-                        if let Err(error) = progress(ProgressEvent {
-                            phase: "copying".to_string(),
-                            processed_files,
-                            total_files,
-                            processed_bytes,
-                            total_bytes,
-                            current_path: Some(file.path.clone()),
-                        }) {
-                            first_error = Some(error);
-                            cancelled.store(true, Ordering::SeqCst);
+        let handle = scope.spawn(|| {
+            pool.install(|| {
+                files.par_iter().for_each_init(
+                    || vec![0u8; COPY_BUFFER_SIZE],
+                    |buffer, file| {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return;
                         }
-                    }
-                }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+                        let source = game_path.join(&file.path);
+                        let destination = snapshot_root.join(&file.path);
+                        match copy_file_streaming(
+                            buffer,
+                            &source,
+                            &destination,
+                            file.size,
+                            &cancelled,
+                        ) {
+                            Ok(()) => {
+                                processed_files.fetch_add(1, Ordering::Relaxed);
+                                processed_bytes.fetch_add(file.size, Ordering::Relaxed);
+                                if let Ok(mut slot) = last_path.lock() {
+                                    *slot = Some(file.path.clone());
+                                }
+                            }
+                            Err(error) => {
+                                if let Ok(mut slot) = first_error.lock() {
+                                    if slot.is_none() {
+                                        *slot = Some(error);
+                                    }
+                                }
+                                cancelled.store(true, Ordering::SeqCst);
+                            }
+                        }
+                    },
+                );
+            });
+            finished.store(true, Ordering::SeqCst);
+        });
+
+        // progress 不是 Send，只能留在调用线程：每 120ms 读一次原子量上报。
+        let mut last_emit: Option<Instant> = None;
+        loop {
+            if finished.load(Ordering::SeqCst) {
+                break;
+            }
+            let should_emit =
+                last_emit.is_none_or(|last| last.elapsed() >= Duration::from_millis(120));
+            if should_emit && !cancelled.load(Ordering::SeqCst) {
+                last_emit = Some(Instant::now());
+                let copied = processed_files.load(Ordering::Relaxed);
+                let current_path = last_path.lock().ok().and_then(|slot| slot.clone());
+                if let Err(error) = progress(ProgressEvent {
+                    phase: "copying".to_string(),
+                    processed_files: copied,
+                    total_files,
+                    processed_bytes: processed_bytes.load(Ordering::Relaxed),
+                    total_bytes,
+                    current_path,
+                }) {
+                    progress_error = Some(error);
                     cancelled.store(true, Ordering::SeqCst);
                 }
             }
+            thread::sleep(Duration::from_millis(25));
         }
+        let _ = handle.join();
     });
 
-    if let Some(error) = first_error {
+    if let Some(error) = progress_error {
         return Err(error);
     }
-    if processed_files != total_files {
-        return Err("并行复制未完成全部文件。".to_string());
+    if let Some(error) = first_error.into_inner().unwrap_or(None) {
+        return Err(error);
+    }
+    let copied_files = processed_files.load(Ordering::Relaxed);
+    if copied_files != total_files {
+        return Err(format!(
+            "并行复制未完成全部文件（{copied_files}/{total_files}）。"
+        ));
+    }
+    // 收尾事件：把「复制文件」这一步推到 100%。
+    let _ = progress(ProgressEvent {
+        phase: "copying".to_string(),
+        processed_files: total_files,
+        total_files,
+        processed_bytes: total_bytes,
+        total_bytes,
+        current_path: None,
+    });
+    Ok(())
+}
+
+/// 流式复制单个文件：每块都检查取消，大文件也能在块边界中断；
+/// 结束后按清单里的 size 校验，避免拷到一半的文件被当成成功。
+fn copy_file_streaming(
+    buffer: &mut [u8],
+    source: &Path,
+    destination: &Path,
+    expected_size: u64,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let mut reader =
+        File::open(source).map_err(|error| io_error("打开源文件", source, error))?;
+    let mut writer =
+        File::create(destination).map_err(|error| io_error("创建目标文件", destination, error))?;
+    let mut written = 0u64;
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("操作已取消".to_string());
+        }
+        let read = reader
+            .read(buffer)
+            .map_err(|error| io_error("读取源文件", source, error))?;
+        if read == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| io_error("写入目标文件", destination, error))?;
+        written += read as u64;
+    }
+    writer
+        .flush()
+        .map_err(|error| io_error("写入目标文件", destination, error))?;
+    if written != expected_size {
+        return Err(format!(
+            "复制快照文件大小不一致：{}（期望 {expected_size}，实际 {written}）",
+            source.display()
+        ));
     }
     Ok(())
 }
@@ -1386,7 +1528,7 @@ pub fn create_full_snapshot(
     parallel: bool,
     progress: Progress<'_>,
 ) -> Result<SnapshotOutcome, String> {
-    ensure_store_outside_game(store, game_path)?;
+    ensure_store_outside_root(store, game_path)?;
     let mut meta = load_meta(store)?;
     let files = scan_directory(game_path, parallel, progress)?;
     let root_hash = compute_root_hash(&files);
@@ -1411,7 +1553,7 @@ pub fn create_full_snapshot(
         return Ok(SnapshotOutcome {
             created: false,
             version: Some(latest.clone()),
-            message: format!("当前目录与「{}」完全一致，无需重复创建完整快照。", latest.label),
+            message: format!("当前文件和「{}」完全一样，不用再存一次。", latest.label),
         });
     }
 
@@ -1463,6 +1605,7 @@ pub fn create_full_snapshot(
         total_bytes,
         label: label.clone(),
         change_log: None,
+        mod_versions: Vec::new(),
     };
 
     if let Err(error) = save_manifest(store, &manifest) {
@@ -1484,7 +1627,7 @@ pub fn create_full_snapshot(
         created: true,
         version: Some(record.clone()),
         message: format!(
-            "已创建完整快照「{}」：{} 个文件，{}。",
+            "已完整保存为「{}」：{} 个文件，{}。",
             label,
             manifest.files.len(),
             format_bytes(total_bytes)
@@ -1501,7 +1644,7 @@ pub fn capture_version(
     parallel: bool,
     progress: Progress<'_>,
 ) -> Result<CaptureOutcome, String> {
-    ensure_store_outside_game(store, game_path)?;
+    ensure_store_outside_root(store, game_path)?;
     let mut meta = load_meta(store)?;
     let latest = meta
         .versions
@@ -1510,7 +1653,31 @@ pub fn capture_version(
         .ok_or_else(|| "还没有基准版本，请先创建一个完整快照。".to_string())?;
     let latest_manifest = load_manifest(store, &latest.id)?;
 
-    let files = scan_directory(game_path, parallel, progress)?;
+    // 大小和修改时间都没变的文件直接沿用上次的 SHA-256，不打开文件：
+    // Steam 更新通常只重写少量文件，增量捕获因此能快很多。
+    let entries = collect_walk_entries(game_path)?;
+    if entries.is_empty() {
+        return Err(format!(
+            "目录里没有可扫描的文件：{}，请确认路径是否正确。",
+            game_path.display()
+        ));
+    }
+    let latest_by_path: HashMap<String, &ManifestFile> = latest_manifest
+        .files
+        .iter()
+        .map(|file| (normalize_key(&file.path), file))
+        .collect();
+    let cached: Vec<Option<String>> = entries
+        .iter()
+        .map(|entry| {
+            latest_by_path
+                .get(&normalize_key(&display_relative(&entry.relative)))
+                .filter(|old| old.size == entry.size && old.mtime == entry.mtime)
+                .map(|old| old.sha256.clone())
+        })
+        .collect();
+    let workers = worker_count(entries.len(), parallel);
+    let files = scan_entries(game_path, &entries, &cached, workers, progress)?;
     let root_hash = compute_root_hash(&files);
     if root_hash == latest.root_hash {
         if let Some(build) = steam_build_id {
@@ -1522,7 +1689,7 @@ pub fn capture_version(
         return Ok(CaptureOutcome {
             created: false,
             version: Some(latest.clone()),
-            message: format!("当前目录与最新版本「{}」完全一致，没有需要捕获的变化。", latest.label),
+            message: format!("当前文件和「{}」完全一样，没有需要保存的变化。", latest.label),
         });
     }
 
@@ -1562,7 +1729,7 @@ pub fn capture_version(
         return Ok(CaptureOutcome {
             created: false,
             version: Some(latest.clone()),
-            message: format!("当前目录与最新版本「{}」没有文件级差异。", latest.label),
+            message: format!("当前文件和「{}」没有区别。", latest.label),
         });
     }
 
@@ -1697,6 +1864,7 @@ pub fn capture_version(
         total_bytes,
         label: label.clone(),
         change_log: Some(change_log.clone()),
+        mod_versions: Vec::new(),
     };
 
     // 额外落一份独立的 changelog 到增量目录，便于离线查看/排障；
@@ -1732,7 +1900,7 @@ pub fn capture_version(
         created: true,
         version: Some(record),
         message: format!(
-            "已捕获新版本「{}」：新增 {}，删除 {}，修改 {}；增量包共 {}。",
+            "已保存「{}」：新增 {}，删除 {}，修改 {}，变化部分共 {}。",
             label,
             added_count,
             removed_count,
@@ -1946,7 +2114,7 @@ pub fn restore_version(
     parallel: bool,
     progress: Progress<'_>,
 ) -> Result<RestoreOutcome, String> {
-    ensure_store_outside_game(store, game_path)?;
+    ensure_store_outside_root(store, game_path)?;
     let mut meta = load_meta(store)?;
     let record = meta
         .versions
@@ -1972,7 +2140,7 @@ pub fn restore_version(
         .any(|version| version.root_hash == current_root);
     if !known && !force {
         return Err(
-            "当前游戏目录不是任何已记录版本（可能被 Steam 更新或手动修改）。请先「捕获新版本」，或确认强制还原。"
+            "当前文件和保存过的版本都对不上（可能被 Steam 更新或手动改过）。请先「保存变化」，或者确认强制还原。"
                 .to_string(),
         );
     }
@@ -2038,7 +2206,7 @@ pub fn restore_version(
 
     let trash_path = trash_root.map(|path| path.to_string_lossy().into_owned());
     let mut message = format!(
-        "已还原到「{}」：替换 {} 个文件，保留 {} 个未变化文件，移出 {} 个多余文件（写入 {}）。",
+        "已还原到「{}」：替换 {} 个文件，{} 个保持不变，{} 个多余文件移到了回收区（写入 {}）。",
         record.label,
         replaced,
         kept,
@@ -2046,7 +2214,7 @@ pub fn restore_version(
         format_bytes(bytes_written)
     );
     if let Some(path) = &trash_path {
-        message.push_str(&format!(" 多余文件已移到回收区：{path}"));
+        message.push_str(&format!(" 多余文件在：{path}"));
     }
 
     Ok(RestoreOutcome {
@@ -2076,11 +2244,8 @@ pub fn verify_current_version(
         .cloned();
 
     let message = match &matched {
-        Some(record) => format!("当前游戏目录与「{}」完全一致（根哈希已校验）。", record.label),
-        None => format!(
-            "当前游戏目录不是任何已记录版本，根哈希为 {}。",
-            root_hash
-        ),
+        Some(record) => format!("当前文件和「{}」完全一致。", record.label),
+        None => "当前文件和保存过的版本都不一样。".to_string(),
     };
 
     Ok(VerifyOutcome {
@@ -2122,7 +2287,7 @@ pub fn get_status(
         version_id: None,
         candidates: Vec::new(),
         checked_hashes: false,
-        message: "还没有版本记录，先创建一个基准版本。".to_string(),
+        message: "还没保存过版本。".to_string(),
     };
     let mut pending_changes = None;
 
@@ -2133,7 +2298,7 @@ pub fn get_status(
                 version_id: None,
                 candidates: Vec::new(),
                 checked_hashes: false,
-                message: "未检测到 Project Zomboid 安装目录。".to_string(),
+                message: "没找到 Project Zomboid 的安装目录。".to_string(),
             };
         }
         Some(game) if !game.is_dir() => {
@@ -2142,7 +2307,7 @@ pub fn get_status(
                 version_id: None,
                 candidates: Vec::new(),
                 checked_hashes: false,
-                message: "Project Zomboid 安装目录不存在。".to_string(),
+                message: "Project Zomboid 的安装目录不存在。".to_string(),
             };
         }
         // 还没有任何版本时不用扫游戏目录：页面只需要显示“先创建基准版本”。
@@ -2168,7 +2333,7 @@ pub fn get_status(
                         candidates,
                         checked_hashes: false,
                         message: format!(
-                            "当前目录的文件路径和大小与「{label}」一致（未校验内容哈希，可点「校验当前目录」确认）。"
+                            "文件和「{label}」的路径、大小都一样，可能就是这个版本；点「检查当前版本」可以再确认。"
                         ),
                     };
                 } else {
@@ -2178,7 +2343,7 @@ pub fn get_status(
                         candidates: Vec::new(),
                         checked_hashes: false,
                         message:
-                            "当前目录与所有已记录版本的路径/大小都不一致，可能被 Steam 更新或手动修改过。"
+                            "当前文件和保存过的版本都对不上，可能被 Steam 更新或手动改过。"
                                 .to_string(),
                     };
                 }
@@ -2244,7 +2409,7 @@ pub fn delete_version(store: &Path, version_id: &str) -> Result<String, String> 
         return Err(format!("版本不存在：{version_id}"));
     };
     if index + 1 != meta.versions.len() {
-        return Err("只能删除最新的版本；旧版本仍被后续版本的增量链引用。".to_string());
+        return Err("只能删除最新的版本；旧版本还被后面的版本用着。".to_string());
     }
 
     let record = meta.versions.pop().expect("index checked above");
@@ -2389,20 +2554,88 @@ mod tests {
         assert_eq!(sequential, parallel);
         assert_eq!(compute_root_hash(&sequential), compute_root_hash(&parallel));
 
-        let relatives = collect_relative_files(&game).unwrap();
-        let total_bytes: u64 = relatives
+        let entries = collect_walk_entries(&game).unwrap();
+        // 强制 4 个 worker：结果必须和串行完全一致。
+        let cached = vec![None; entries.len()];
+        let forced = scan_entries(&game, &entries, &cached, 4, &mut ignore_progress).unwrap();
+        assert_eq!(sequential, forced);
+    }
+
+    #[test]
+    fn cached_scan_reuses_hashes_without_reading_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        write_file(&root, "a.bin", &pseudo_random(4096, 1));
+        write_file(&root, "b.bin", &pseudo_random(4096, 2));
+
+        let entries = collect_walk_entries(&root).unwrap();
+        assert_eq!(entries.len(), 2);
+        let uncached = vec![None; entries.len()];
+        let first = scan_entries(&root, &entries, &uncached, 2, &mut ignore_progress).unwrap();
+
+        // 全部命中缓存：一个文件都不用打开，进度回调也不会触发。
+        let all_cached: Vec<Option<String>> = first
             .iter()
-            .map(|relative| fs::metadata(game.join(relative)).unwrap().len())
-            .sum();
-        let forced = scan_directory_with_workers(
-            &game,
-            &relatives,
-            total_bytes,
-            4,
-            &mut ignore_progress,
+            .map(|file| Some(file.sha256.clone()))
+            .collect();
+        let mut progress_calls = 0usize;
+        let mut counting = |_: ProgressEvent| {
+            progress_calls += 1;
+            Ok(())
+        };
+        let reused = scan_entries(&root, &entries, &all_cached, 2, &mut counting).unwrap();
+        assert_eq!(first, reused);
+        assert_eq!(progress_calls, 0, "no file should be hashed when every entry is cached");
+
+        // 只缓存第二个文件：第一个必须重算，第二个直接沿用缓存值（不读文件）。
+        let partial: Vec<Option<String>> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, _)| (index == 1).then(|| "stale-hash".to_string()))
+            .collect();
+        let mixed = scan_entries(&root, &entries, &partial, 2, &mut ignore_progress).unwrap();
+        assert_eq!(mixed[0].sha256, first[0].sha256);
+        assert_eq!(mixed[1].sha256, "stale-hash");
+    }
+
+    #[test]
+    fn streaming_copy_verifies_size_and_honours_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.bin");
+        let destination = directory.path().join("copy.bin");
+        let data = pseudo_random(300 * 1024, 7);
+        fs::write(&source, &data).unwrap();
+
+        let mut buffer = vec![0u8; 64 * 1024];
+        let active = AtomicBool::new(false);
+        copy_file_streaming(
+            &mut buffer,
+            &source,
+            &destination,
+            data.len() as u64,
+            &active,
         )
         .unwrap();
-        assert_eq!(sequential, forced);
+        assert_eq!(fs::read(&destination).unwrap(), data);
+
+        // 期望大小对不上时不能当成复制成功。
+        let mismatch = copy_file_streaming(
+            &mut buffer,
+            &source,
+            &destination,
+            data.len() as u64 + 1,
+            &active,
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("大小不一致"));
+
+        // 已经取消时直接返回，不再读文件。
+        let cancelled = AtomicBool::new(true);
+        let error =
+            copy_file_streaming(&mut buffer, &source, &destination, data.len() as u64, &cancelled)
+                .unwrap_err();
+        assert_eq!(error, "操作已取消");
     }
 
     #[test]
@@ -2576,7 +2809,7 @@ mod tests {
             &mut ignore_progress,
         )
         .unwrap_err();
-        assert!(error.contains("不是任何已记录版本"));
+        assert!(error.contains("都对不上"));
 
         restore_version(
             &game,
@@ -2613,5 +2846,37 @@ mod tests {
         let mut renamed = files.clone();
         renamed[0].path = "A.TXT".to_string();
         assert_eq!(first, compute_metadata_hash(&renamed));
+    }
+
+    #[test]
+    fn attaches_mod_version_references_to_a_game_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+        write_file(&game, "a.txt", b"a");
+
+        let outcome = snapshot(&game, &store);
+        let version_id = outcome.version.unwrap().id;
+        let reference = ModVersionRef {
+            key: "local-alpha".to_string(),
+            mod_id: "Alpha".to_string(),
+            name: "Alpha".to_string(),
+            source: "local".to_string(),
+            workshop_id: None,
+            version_id: "v1".to_string(),
+            root_path: "C:\\mods\\Alpha".to_string(),
+        };
+        attach_mod_versions(&store, &version_id, vec![reference.clone()]).unwrap();
+
+        let versions = read_versions(&store).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].mod_versions, vec![reference]);
+        // 旧版本记录没有该字段时按空列表反序列化（向后兼容）。
+        let empty = serde_json::from_str::<VersionRecord>(
+            r#"{"id":"v0","parentId":null,"steamBuildId":null,"branch":"stable","baseType":"full","createdAt":1,"rootHash":"sha256:0","fileCount":0,"totalBytes":0,"label":"旧版本"}"#,
+        )
+        .unwrap();
+        assert!(empty.mod_versions.is_empty());
     }
 }

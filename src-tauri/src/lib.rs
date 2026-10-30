@@ -17,6 +17,7 @@ mod downloader;
 mod feedback;
 mod launcher_log;
 mod memclean;
+mod mod_versioning;
 mod news;
 mod news_translation;
 mod overlay;
@@ -2041,6 +2042,12 @@ struct AppSettings {
     /// 「设置 › 版本」：哈希/复制是否使用多线程；缺失 = 默认开启。
     #[serde(default = "default_version_parallel_enabled")]
     version_parallel: bool,
+    /// 「设置 › 版本 › 游戏版本」：创建/捕获大版本时是否同时记录已启用模组的版本。
+    #[serde(default = "default_version_parallel_enabled")]
+    version_include_mods: bool,
+    /// 「设置 › 版本」：备份位置在 C 盘时，每次操作前的换盘提醒是否已被「不再弹出」关闭。
+    #[serde(default)]
+    version_system_drive_notice_dismissed: bool,
 }
 
 fn default_version_parallel_enabled() -> bool {
@@ -2920,6 +2927,9 @@ struct ScannedJarMod {
     /// The `id` field of the mod's `mod.info`, used to locate the matching Lua mod.
     info_id: String,
     mod_info_path: String,
+    /// 整个模组目录（`mod.info` 在 `common/` 或 `42.20/` 时向上找回模组根），
+    /// 供「版本记录」直接按目录做版本隔离。
+    mod_root: String,
     disabled: bool,
     workshop_id: Option<u64>,
     jar_path: String,
@@ -3285,6 +3295,9 @@ fn scan_java_mod_jar(
         id: info.name.clone(),
         info_id: info.id.clone(),
         mod_info_path: info_path.to_string_lossy().into_owned(),
+        mod_root: mod_root_for_info_path(info_path)
+            .to_string_lossy()
+            .into_owned(),
         disabled,
         workshop_id,
         jar_path: jar_path.to_string_lossy().into_owned(),
@@ -4429,6 +4442,14 @@ struct VersionProgressUpdate {
     current_path: Option<String>,
     message: Option<String>,
     error: Option<String>,
+    /// 只有模组版本事件会带；游戏大版本事件里为 null。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root_path: Option<String>,
+    /// 当前是第几个步骤（1 起）与总步骤数；前端在百分比后显示 `2/3`。
+    step: u32,
+    steps: u32,
 }
 
 struct VersionContext {
@@ -4520,7 +4541,7 @@ fn version_context() -> Result<VersionContext, String> {
         "未检测到 Project Zomboid 安装目录，请先确认 Steam 已安装游戏。".to_string()
     })?;
     let (store_path, parallel) = configured_version_options()?;
-    versioning::ensure_store_outside_game(&store_path, &game_path)?;
+    versioning::ensure_store_outside_root(&store_path, &game_path)?;
     let steam_build_id = steam_manifest_value_for_game(&game_path, "buildid");
     let branch = steam_manifest_value_for_game(&game_path, "betakey")
         .unwrap_or_else(|| "stable".to_string());
@@ -4562,8 +4583,498 @@ fn ensure_game_closed() -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 模组版本隔离（设置 › 版本 › 模组版本 + 模组管理右键「版本记录」）
+// ---------------------------------------------------------------------------
+
+/// `mod.info` 可能在 `<mod>/common/` 或 `<mod>/42.20/`；版本隔离要的是整个
+/// 模组目录，所以向上找到父目录名为 `mods` 的那一层。
+fn mod_root_for_info_path(info_path: &Path) -> PathBuf {
+    let mut current = info_path.parent().unwrap_or(info_path).to_path_buf();
+    loop {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        let is_mods = parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("mods"));
+        if is_mods {
+            return current;
+        }
+        if parent.parent().is_none() {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    info_path.parent().unwrap_or(info_path).to_path_buf()
+}
+
+fn push_mod_root(
+    roots: &mut Vec<mod_versioning::ModRoot>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+    source: &str,
+    workshop_id: Option<String>,
+) {
+    if !seen.insert(version_path_key(&path)) {
+        return;
+    }
+    let (mod_id, name, _, _) = lua_mod_metadata(&path);
+    roots.push(mod_versioning::ModRoot {
+        path,
+        source: source.to_string(),
+        workshop_id,
+        mod_id,
+        name,
+    });
+}
+
+/// 所有物理模组根目录（本地 + 创意工坊）。刻意**不按模组 ID 合并**：
+/// 同一个模组的本地副本和工坊副本各自有一条版本链。
+fn collect_mod_roots() -> Vec<mod_versioning::ModRoot> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(zomboid) = user_zomboid_directory() {
+        if let Ok(items) = fs::read_dir(zomboid.join("mods")) {
+            for entry in items
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            {
+                push_mod_root(&mut roots, &mut seen, entry.path(), "local", None);
+            }
+        }
+    }
+    for workshop_root in workshop_background_roots() {
+        let Ok(items) = fs::read_dir(&workshop_root) else {
+            continue;
+        };
+        for item in items
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        {
+            let workshop_id = item.file_name().to_string_lossy().into_owned();
+            if workshop_id.parse::<u64>().is_err() {
+                continue;
+            }
+            for mod_root in discover_mod_roots(&item.path()) {
+                push_mod_root(
+                    &mut roots,
+                    &mut seen,
+                    mod_root,
+                    "workshop",
+                    Some(workshop_id.clone()),
+                );
+            }
+        }
+    }
+    roots
+}
+
+/// 大版本里要跟着记录的模组：Lua 在 `default.txt` 里启用，或 JAR 已批准启用。
+fn enabled_mod_roots() -> Vec<mod_versioning::ModRoot> {
+    let mut lua_enabled: HashSet<String> = HashSet::new();
+    if let Ok(zomboid) = user_zomboid_directory() {
+        if let Ok(ids) = read_default_mod_ids(&zomboid.join("mods").join("default.txt")) {
+            lua_enabled.extend(ids.into_iter().map(|id| id.to_lowercase()));
+        }
+    }
+    let jar_state = jar_mod_state_path()
+        .and_then(|path| read_jar_mod_state(&path))
+        .unwrap_or_default();
+
+    collect_mod_roots()
+        .into_iter()
+        .filter(|root| {
+            if lua_enabled.contains(&root.mod_id.to_lowercase()) {
+                return true;
+            }
+            let root_key = version_path_key(&root.path);
+            jar_state.mods.iter().any(|entry| {
+                !entry.disabled
+                    && (version_path_key(Path::new(&entry.mod_dir)) == root_key
+                        || (entry.mod_id.eq_ignore_ascii_case(&root.mod_id)
+                            && entry.workshop_id.map(|id| id.to_string()) == root.workshop_id))
+            })
+        })
+        .collect()
+}
+
+fn workshop_id_for_mod_root(root: &Path) -> Option<String> {
+    workshop_id_from_info_path(&root.join("mod.info")).map(|id| id.to_string())
+}
+
+/// 前端只传一个目录：能匹配到已知模组就用那条记录，否则按目录现读 `mod.info`。
+fn resolve_mod_root(root_path: &str) -> Result<mod_versioning::ModRoot, String> {
+    let path = PathBuf::from(root_path.trim());
+    if !path.is_dir() {
+        return Err("模组目录不存在，可能已被删除或移动。".to_string());
+    }
+    let wanted = version_path_key(&path);
+    if let Some(root) = collect_mod_roots()
+        .into_iter()
+        .find(|root| version_path_key(&root.path) == wanted)
+    {
+        return Ok(root);
+    }
+    let (mod_id, name, _, _) = lua_mod_metadata(&path);
+    let workshop_id = workshop_id_for_mod_root(&path);
+    Ok(mod_versioning::ModRoot {
+        path,
+        source: if workshop_id.is_some() {
+            "workshop".to_string()
+        } else {
+            "local".to_string()
+        },
+        workshop_id,
+        mod_id,
+        name,
+    })
+}
+
+fn configured_include_mods() -> Result<bool, String> {
+    Ok(load_app_settings_at(&app_settings_path()?)?.version_include_mods)
+}
+
+fn mod_version_store(
+    root: &mod_versioning::ModRoot,
+    store_base: &Path,
+) -> Result<PathBuf, String> {
+    let store = mod_versioning::store_path(store_base, root);
+    versioning::ensure_store_outside_root(&store, &root.path)?;
+    Ok(store)
+}
+
+/// 还原模组文件后把 `jar-mod-state.json` 的启用标记对齐到磁盘实际状态，
+/// 否则下次打开模组页时 `apply_jar_mod_file_state` 会把 `mod.info` 又改回去。
+fn reconcile_jar_state_for_root(root: &Path) -> Result<(), String> {
+    let state_path = jar_mod_state_path()?;
+    let mut state = read_jar_mod_state(&state_path)?;
+    if state.mods.is_empty() {
+        return Ok(());
+    }
+    let root_key = version_path_key(root);
+    let (mod_id, _, _, _) = lua_mod_metadata(root);
+    let disabled_on_disk = !root.join("mod.info").is_file();
+    let mut changed = false;
+    for entry in state.mods.iter_mut() {
+        let same_dir = version_path_key(Path::new(&entry.mod_dir)) == root_key;
+        let same_mod = !mod_id.is_empty() && entry.mod_id.eq_ignore_ascii_case(&mod_id);
+        if (same_dir || same_mod) && entry.disabled != disabled_on_disk {
+            entry.disabled = disabled_on_disk;
+            changed = true;
+        }
+    }
+    if changed {
+        write_jar_mod_state(&state_path, &state)?;
+    }
+    Ok(())
+}
+
+/// 模组步骤的进度单位：每个模组占整条进度条的 1/N，模组内部再按 0–1 插值。
+/// 直接把内层的文件数/字节数透出去，会让百分比在「第几个模组」和「这个模组里的
+/// 第几个文件」之间来回跳，看起来像每个文件的进度。
+const MOD_PROGRESS_UNITS: f64 = 1000.0;
+
+fn mod_progress_units(index: usize, fraction: f64, total: usize) -> (u64, u64) {
+    let total_units = (total.max(1) as f64) * MOD_PROGRESS_UNITS;
+    let done = ((index as f64 + fraction.clamp(0.0, 1.0)) * MOD_PROGRESS_UNITS).min(total_units);
+    (done.round() as u64, total_units.round() as u64)
+}
+
+/// 开始处理第 index+1 个模组时的进度（占整条进度条的 index/total）。
+fn mod_marker_event(index: usize, total: usize, name: &str) -> versioning::ProgressEvent {
+    let (processed_bytes, total_bytes) = mod_progress_units(index, 0.0, total);
+    versioning::ProgressEvent {
+        phase: "mods".to_string(),
+        processed_files: index as u64,
+        total_files: total as u64,
+        processed_bytes,
+        total_bytes,
+        current_path: Some(format!("{name}（{}/{}）", index + 1, total)),
+    }
+}
+
+/// 把某个模组内部的扫描/复制进度折算成「这个模组自己占的那一小格」。
+fn mod_inner_event(
+    index: usize,
+    total: usize,
+    name: &str,
+    event: versioning::ProgressEvent,
+) -> versioning::ProgressEvent {
+    let fraction = if event.total_bytes > 0 {
+        event.processed_bytes as f64 / event.total_bytes as f64
+    } else if event.total_files > 0 {
+        event.processed_files as f64 / event.total_files as f64
+    } else {
+        0.0
+    };
+    let (processed_bytes, total_bytes) = mod_progress_units(index, fraction, total);
+    versioning::ProgressEvent {
+        phase: "mods".to_string(),
+        processed_files: index as u64,
+        total_files: total as u64,
+        processed_bytes,
+        total_bytes,
+        current_path: Some(format!("{name}（{}/{}）", index + 1, total)),
+    }
+}
+
+/// 给一组模组各记录一个版本（没有历史时建基准，否则记增量），返回引用和失败数。
+/// 进度按模组等分；调用方负责把引用写进游戏版本或整合包。
+fn capture_mod_versions(
+    roots: &[mod_versioning::ModRoot],
+    label: &str,
+    parallel: bool,
+    progress: &mut dyn FnMut(versioning::ProgressEvent) -> Result<(), String>,
+) -> Result<(Vec<versioning::ModVersionRef>, usize), String> {
+    let (store_base, _) = configured_version_options()?;
+    let total = roots.len();
+    let mut references = Vec::new();
+    let mut failures = 0usize;
+
+    for (index, root) in roots.iter().enumerate() {
+        progress(mod_marker_event(index, total, &root.name))?;
+
+        let Ok(store) = mod_version_store(root, &store_base) else {
+            failures += 1;
+            continue;
+        };
+        let existing = versioning::read_versions(&store).unwrap_or_default();
+        // 两种 outcome 结构相同但类型不同，这里只关心「是否新建了版本 + 新版本 ID」。
+        // 内层进度折算到当前模组占的那一小格（phase 统一写成 "mods"）。
+        let outcome: Result<Option<String>, String> = {
+            let mut inner = |event: versioning::ProgressEvent| {
+                progress(mod_inner_event(index, total, &root.name, event))
+            };
+            if existing.is_empty() {
+                versioning::create_full_snapshot(
+                    &root.path,
+                    &store,
+                    None,
+                    "mods",
+                    Some(label),
+                    parallel,
+                    &mut inner,
+                )
+                .map(|outcome| outcome.version.map(|version| version.id))
+            } else {
+                versioning::capture_version(
+                    &root.path,
+                    &store,
+                    None,
+                    "mods",
+                    Some(label),
+                    parallel,
+                    &mut inner,
+                )
+                .map(|outcome| outcome.version.map(|version| version.id))
+            }
+        };
+        match outcome {
+            Ok(created_version_id) => {
+                // 内容没变化时 capture 不会再建版本，直接引用当前链头。
+                let version_id = created_version_id.or_else(|| {
+                    versioning::read_versions(&store)
+                        .ok()
+                        .and_then(|versions| versions.last().map(|record| record.id.clone()))
+                });
+                if let Some(version_id) = version_id {
+                    references.push(versioning::ModVersionRef {
+                        key: mod_versioning::store_key(root),
+                        mod_id: root.mod_id.clone(),
+                        name: root.name.clone(),
+                        source: root.source.clone(),
+                        workshop_id: root.workshop_id.clone(),
+                        version_id,
+                        root_path: root.path.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+            Err(error) => {
+                failures += 1;
+                launcher_log::error(&format!("模组「{}」记录版本失败：{error}", root.name));
+            }
+        }
+    }
+
+    let (processed_bytes, total_bytes) = mod_progress_units(total, 0.0, total);
+    let _ = progress(versioning::ProgressEvent {
+        phase: "mods".to_string(),
+        processed_files: total as u64,
+        total_files: total as u64,
+        processed_bytes,
+        total_bytes,
+        current_path: None,
+    });
+
+    Ok((references, failures))
+}
+
+/// 为当前已启用的每个模组记录一个版本（没有历史时建基准，否则记增量），
+/// 然后把「模组键 → 版本 ID」回填到游戏大版本的记录里。
+fn record_mod_versions_for_game_version(
+    game_store: &Path,
+    game_version_id: &str,
+    version_label: &str,
+    parallel: bool,
+    progress: &mut dyn FnMut(versioning::ProgressEvent) -> Result<(), String>,
+) -> Result<String, String> {
+    let roots = enabled_mod_roots();
+    if roots.is_empty() {
+        versioning::attach_mod_versions(game_store, game_version_id, Vec::new())?;
+        return Ok("没有启用中的模组".to_string());
+    }
+
+    let label = format!("随游戏版本 {version_label}");
+    let (references, failures) = capture_mod_versions(&roots, &label, parallel, progress)?;
+    versioning::attach_mod_versions(game_store, game_version_id, references.clone())?;
+
+    Ok(if failures > 0 {
+        format!("已同时保存 {} 个模组版本（{failures} 个失败）", references.len())
+    } else {
+        format!("已同时保存 {} 个模组版本", references.len())
+    })
+}
+
+/// 按「模组键 → 版本 ID」的引用表还原一组模组版本，返回（成功数, 跳过数）。
+/// 游戏大版本和整合包共用这一条。
+fn restore_mod_refs(
+    references: &[versioning::ModVersionRef],
+    parallel: bool,
+    progress: &mut dyn FnMut(versioning::ProgressEvent) -> Result<(), String>,
+) -> Result<(usize, usize), String> {
+    let (store_base, _) = configured_version_options()?;
+    let roots = collect_mod_roots();
+    let total = references.len();
+    let mut restored = 0usize;
+    let mut skipped = 0usize;
+
+    for (index, reference) in references.iter().enumerate() {
+        let _ = progress(mod_marker_event(index, total, &reference.name));
+        // 优先按模组键找当前目录（Steam 库搬家后路径会变），找不到再用记录的路径。
+        let root = roots
+            .iter()
+            .find(|root| mod_versioning::store_key(root) == reference.key)
+            .cloned()
+            .or_else(|| {
+                let stored = PathBuf::from(&reference.root_path);
+                stored.is_dir().then(|| mod_versioning::ModRoot {
+                    path: stored,
+                    source: reference.source.clone(),
+                    workshop_id: reference.workshop_id.clone(),
+                    mod_id: reference.mod_id.clone(),
+                    name: reference.name.clone(),
+                })
+            });
+        let Some(root) = root else {
+            skipped += 1;
+            continue;
+        };
+        let Ok(store) = mod_version_store(&root, &store_base) else {
+            skipped += 1;
+            continue;
+        };
+        // 内层还原进度折算到当前模组占的那一小格（phase 统一写成 "mods"）。
+        let restored_result = {
+            let mut inner = |event: versioning::ProgressEvent| {
+                progress(mod_inner_event(index, total, &root.name, event))
+            };
+            versioning::restore_version(
+                &root.path,
+                &store,
+                &reference.version_id,
+                true,
+                parallel,
+                &mut inner,
+            )
+        };
+        match restored_result {
+            Ok(_) => {
+                restored += 1;
+                if let Err(error) = reconcile_jar_state_for_root(&root.path) {
+                    launcher_log::error(&format!("同步「{}」的 JAR 状态失败：{error}", root.name));
+                }
+            }
+            Err(error) => {
+                skipped += 1;
+                launcher_log::error(&format!("还原模组「{}」失败：{error}", root.name));
+            }
+        }
+    }
+
+    Ok((restored, skipped))
+}
+
+/// 还原游戏大版本后，把它当时关联的模组版本一并还原。
+fn restore_associated_mod_versions(
+    record: &versioning::VersionRecord,
+    parallel: bool,
+    progress: &mut dyn FnMut(versioning::ProgressEvent) -> Result<(), String>,
+) -> Result<String, String> {
+    if record.mod_versions.is_empty() {
+        return Ok(String::new());
+    }
+    let (restored, skipped) = restore_mod_refs(&record.mod_versions, parallel, progress)?;
+    Ok(if skipped > 0 {
+        format!("已还原 {restored} 个模组版本（{skipped} 个找不到，已跳过）")
+    } else {
+        format!("已还原 {restored} 个模组版本")
+    })
+}
+
+/// 一次版本操作被拆成若干「步骤」（计算文件哈希 → 复制/保存变化 → 保存模组版本…）。
+/// 引擎的 phase 比步骤细，这里归并成步骤序号，前端在百分比后面显示 `2/3`。
+/// 返回 0 表示这个 phase 不该推进步骤（例如 done/error）。
+fn version_step_for(operation: &str, phase: &str) -> u32 {
+    match operation {
+        "snapshot" | "capture" => match phase {
+            "preparing" | "scanning" | "hashing" => 1,
+            "copying" | "delta" => 2,
+            "mods" => 3,
+            _ => 0,
+        },
+        "restore" => match phase {
+            "preparing" | "scanning" | "hashing" => 1,
+            // PZ Optimization 的卸载/重装算进「还原文件」这一步，不单独占一格。
+            "pzopt" | "restoring" => 2,
+            "cleaning" => 3,
+            "mods" => 4,
+            _ => 0,
+        },
+        "modSnapshot" => match phase {
+            "preparing" | "scanning" | "hashing" => 1,
+            "copying" => 2,
+            _ => 0,
+        },
+        "modCapture" => match phase {
+            "preparing" | "scanning" | "hashing" => 1,
+            "delta" => 2,
+            _ => 0,
+        },
+        "modRestore" => match phase {
+            "preparing" | "scanning" | "hashing" => 1,
+            "restoring" => 2,
+            "cleaning" => 3,
+            _ => 0,
+        },
+        "verify" | "modVerify" => 1,
+        // 一键保存 / 还原整套模组：只有一步（进度按模组等分）。
+        "modSaveAll" | "modRestorePack" => match phase {
+            "preparing" | "scanning" | "hashing" | "mods" => 1,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// 游戏大版本走 `version-progress`，单个模组走 `mod-version-progress`；
+/// 模组事件额外带上 `rootKey` / `rootPath`，前端据此只更新对应那一行/对话框。
 fn emit_version_progress(
     app: &tauri::AppHandle,
+    event: &str,
+    root: Option<(&str, &str)>,
     operation_id: u64,
     operation: &str,
     status: &str,
@@ -4575,9 +5086,11 @@ fn emit_version_progress(
     current_path: Option<String>,
     message: Option<String>,
     error: Option<String>,
+    step: u32,
+    steps: u32,
 ) {
     let _ = app.emit(
-        "version-progress",
+        event,
         VersionProgressUpdate {
             operation_id,
             operation: operation.to_string(),
@@ -4590,6 +5103,10 @@ fn emit_version_progress(
             current_path,
             message,
             error,
+            root_key: root.map(|(key, _)| key.to_string()),
+            root_path: root.map(|(_, path)| path.to_string()),
+            step,
+            steps,
         },
     );
 }
@@ -4599,6 +5116,23 @@ fn emit_version_progress(
 fn spawn_version_operation<F>(
     app: tauri::AppHandle,
     operation: &str,
+    steps: u32,
+    runner: F,
+) -> Result<u64, String>
+where
+    F: FnOnce(&mut dyn FnMut(versioning::ProgressEvent) -> Result<(), String>) -> Result<String, String>
+        + Send
+        + 'static,
+{
+    spawn_version_operation_with(app, "version-progress", operation, None, steps, runner)
+}
+
+fn spawn_version_operation_with<F>(
+    app: tauri::AppHandle,
+    event: &'static str,
+    operation: &str,
+    root: Option<(String, String)>,
+    steps: u32,
     runner: F,
 ) -> Result<u64, String>
 where
@@ -4615,11 +5149,17 @@ where
     VERSION_OPERATION_CANCELLED.store(false, Ordering::SeqCst);
     let operation_id = NEXT_VERSION_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
     let operation_name = operation.to_string();
+    let event_name = event.to_string();
+    let root_key = root.as_ref().map(|(key, _)| key.clone());
+    let root_path = root.as_ref().map(|(_, path)| path.clone());
 
     thread::spawn(move || {
+        let target = root_key.as_deref().zip(root_path.as_deref());
         launcher_log::info(&format!("版本操作开始：{operation_name}"));
         emit_version_progress(
             &app,
+            &event_name,
+            target,
             operation_id,
             &operation_name,
             "started",
@@ -4631,6 +5171,8 @@ where
             None,
             None,
             None,
+            if steps > 0 { 1 } else { 0 },
+            steps,
         );
 
         let mut last_emit: Option<Instant> = None;
@@ -4640,6 +5182,7 @@ where
         let mut last_processed_bytes = 0u64;
         let mut last_total_bytes = 0u64;
         let mut last_path: Option<String> = None;
+        let mut last_step = 1u32;
 
         let mut progress = |event: versioning::ProgressEvent| -> Result<(), String> {
             if VERSION_OPERATION_CANCELLED.load(Ordering::SeqCst) {
@@ -4650,6 +5193,10 @@ where
             last_processed_bytes = event.processed_bytes;
             last_total_bytes = event.total_bytes;
             last_path = event.current_path.clone();
+            let step = version_step_for(&operation_name, &event.phase);
+            if step > 0 {
+                last_step = step.min(steps.max(1));
+            }
 
             let finished = event.total_files > 0 && event.processed_files >= event.total_files;
             let should_emit = event.phase != last_phase
@@ -4660,6 +5207,8 @@ where
                 last_phase = event.phase.clone();
                 emit_version_progress(
                     &app,
+                    &event_name,
+                    target,
                     operation_id,
                     &operation_name,
                     "progress",
@@ -4671,6 +5220,8 @@ where
                     event.current_path,
                     None,
                     None,
+                    last_step,
+                    steps,
                 );
             }
             Ok(())
@@ -4694,6 +5245,8 @@ where
         match result {
             Ok(message) => emit_version_progress(
                 &app,
+                &event_name,
+                target,
                 operation_id,
                 &operation_name,
                 "completed",
@@ -4705,9 +5258,13 @@ where
                 last_path,
                 Some(message),
                 None,
+                steps,
+                steps,
             ),
             Err(error) => emit_version_progress(
                 &app,
+                &event_name,
+                target,
                 operation_id,
                 &operation_name,
                 "error",
@@ -4719,6 +5276,8 @@ where
                 last_path,
                 None,
                 Some(error),
+                last_step,
+                steps,
             ),
         }
     });
@@ -4746,9 +5305,24 @@ fn get_version_status() -> Result<versioning::VersionStatus, String> {
 }
 
 #[tauri::command(async)]
+fn get_version_store_path() -> Result<String, String> {
+    Ok(configured_version_store_path()?
+        .to_string_lossy()
+        .into_owned())
+}
+
+#[tauri::command(async)]
+fn save_version_system_drive_notice_dismissed(dismissed: bool) -> Result<(), String> {
+    let settings_path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&settings_path)?;
+    settings.version_system_drive_notice_dismissed = dismissed;
+    save_app_settings_at(&settings_path, &settings)
+}
+
+#[tauri::command(async)]
 fn save_version_store_path(path: String) -> Result<(), String> {
     if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
-        return Err("请等待当前版本操作完成后再修改存储目录。".to_string());
+        return Err("请等当前操作完成后再改备份位置。".to_string());
     }
     let trimmed = path.trim();
     let game_path = detected_game_path();
@@ -4757,13 +5331,13 @@ fn save_version_store_path(path: String) -> Result<(), String> {
     } else {
         let candidate = PathBuf::from(trimmed);
         if !candidate.is_absolute() {
-            return Err("版本存储目录必须是绝对路径。".to_string());
+            return Err("备份位置要填完整路径（例如 D:\\PZ备份）。".to_string());
         }
         if let Some(game) = game_path.as_deref() {
-            versioning::ensure_store_outside_game(&candidate, game)?;
+            versioning::ensure_store_outside_root(&candidate, game)?;
         }
         fs::create_dir_all(&candidate).map_err(|error| {
-            format!("创建版本存储目录失败（{}）：{error}", candidate.display())
+            format!("创建备份文件夹失败（{}）：{error}", candidate.display())
         })?;
         Some(candidate)
     };
@@ -4786,10 +5360,21 @@ fn save_version_parallel(enabled: bool) -> Result<(), String> {
 fn start_version_snapshot(
     app: tauri::AppHandle,
     label: Option<String>,
+    include_mods: Option<bool>,
 ) -> Result<u64, String> {
     ensure_game_closed()?;
     let context = version_context()?;
-    spawn_version_operation(app, "snapshot", move |progress| {
+    let include_mods = match include_mods {
+        Some(value) => value,
+        None => configured_include_mods()?,
+    };
+    // 步骤：1 计算哈希 → 2 复制文件 →（有启用模组时）3 保存模组版本。
+    let steps = if include_mods && !enabled_mod_roots().is_empty() {
+        3
+    } else {
+        2
+    };
+    spawn_version_operation(app, "snapshot", steps, move |progress| {
         let outcome = versioning::create_full_snapshot(
             &context.game_path,
             &context.store_path,
@@ -4797,9 +5382,22 @@ fn start_version_snapshot(
             &context.branch,
             label.as_deref(),
             context.parallel,
-            progress,
+            &mut *progress,
         )?;
-        Ok(outcome.message)
+        let mut message = outcome.message;
+        if include_mods {
+            if let Some(version) = outcome.version.as_ref() {
+                let summary = record_mod_versions_for_game_version(
+                    &context.store_path,
+                    &version.id,
+                    &version.label,
+                    context.parallel,
+                    &mut *progress,
+                )?;
+                message.push_str(&format!("；{summary}"));
+            }
+        }
+        Ok(message)
     })
 }
 
@@ -4807,10 +5405,21 @@ fn start_version_snapshot(
 fn start_version_capture(
     app: tauri::AppHandle,
     label: Option<String>,
+    include_mods: Option<bool>,
 ) -> Result<u64, String> {
     ensure_game_closed()?;
     let context = version_context()?;
-    spawn_version_operation(app, "capture", move |progress| {
+    let include_mods = match include_mods {
+        Some(value) => value,
+        None => configured_include_mods()?,
+    };
+    // 步骤：1 计算哈希 → 2 保存变化 →（有启用模组时）3 保存模组版本。
+    let steps = if include_mods && !enabled_mod_roots().is_empty() {
+        3
+    } else {
+        2
+    };
+    spawn_version_operation(app, "capture", steps, move |progress| {
         let outcome = versioning::capture_version(
             &context.game_path,
             &context.store_path,
@@ -4818,9 +5427,22 @@ fn start_version_capture(
             &context.branch,
             label.as_deref(),
             context.parallel,
-            progress,
+            &mut *progress,
         )?;
-        Ok(outcome.message)
+        let mut message = outcome.message;
+        if include_mods {
+            if let Some(version) = outcome.version.as_ref() {
+                let summary = record_mod_versions_for_game_version(
+                    &context.store_path,
+                    &version.id,
+                    &version.label,
+                    context.parallel,
+                    &mut *progress,
+                )?;
+                message.push_str(&format!("；{summary}"));
+            }
+        }
+        Ok(message)
     })
 }
 
@@ -4845,10 +5467,22 @@ fn start_version_restore(
     app: tauri::AppHandle,
     version_id: String,
     force: bool,
+    restore_mods: Option<bool>,
 ) -> Result<u64, String> {
     ensure_game_closed()?;
     let context = version_context()?;
-    spawn_version_operation(app, "restore", move |progress| {
+    let restore_mods = restore_mods.unwrap_or(true);
+    // 步骤：1 检查当前文件 → 2 还原文件 → 3 清理多余文件；大版本带模组时 +1。
+    let has_mod_versions = versioning::read_versions(&context.store_path)
+        .ok()
+        .and_then(|versions| {
+            versions
+                .into_iter()
+                .find(|record| record.id == version_id)
+        })
+        .is_some_and(|record| !record.mod_versions.is_empty());
+    let steps = if restore_mods && has_mod_versions { 4 } else { 3 };
+    spawn_version_operation(app, "restore", steps, move |progress| {
         // PZ Optimization 会替换游戏类文件。还原前先让它把自己的改动撤回原版，
         // 还原成功后再按“还原后的游戏版本”重新安装；否则切换版本后模组状态会残留/失效。
         let pz_was_installed = pz_optimization_installed_for_game(&context.game_path);
@@ -4866,7 +5500,7 @@ fn start_version_restore(
             &version_id,
             force,
             context.parallel,
-            progress,
+            &mut *progress,
         );
 
         let outcome = match restore_result {
@@ -4904,6 +5538,28 @@ fn start_version_restore(
             }
         }
 
+        // 游戏大版本里记录了当时的模组版本时，一并还原（模组已卸载的跳过）。
+        if restore_mods {
+            let record = versioning::read_versions(&context.store_path)
+                .ok()
+                .and_then(|versions| {
+                    versions
+                        .into_iter()
+                        .find(|record| record.id == version_id)
+                });
+            if let Some(record) = record {
+                match restore_associated_mod_versions(&record, context.parallel, &mut *progress) {
+                    Ok(summary) if !summary.is_empty() => {
+                        message.push_str(&format!("\n{summary}。"));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        message.push_str(&format!("\n关联的模组版本未能还原：{error}"));
+                    }
+                }
+            }
+        }
+
         Ok(message)
     })
 }
@@ -4912,7 +5568,7 @@ fn start_version_restore(
 fn start_version_verify(app: tauri::AppHandle) -> Result<u64, String> {
     let context = version_context()?;
     let verify_app = app.clone();
-    spawn_version_operation(app, "verify", move |progress| {
+    spawn_version_operation(app, "verify", 1, move |progress| {
         let outcome = versioning::verify_current_version(
             &context.game_path,
             &context.store_path,
@@ -4940,6 +5596,288 @@ fn delete_version(version_id: String) -> Result<String, String> {
     }
     let store_path = configured_version_store_path()?;
     versioning::delete_version(&store_path, &version_id)
+}
+
+#[tauri::command(async)]
+fn save_version_include_mods(enabled: bool) -> Result<(), String> {
+    let settings_path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&settings_path)?;
+    settings.version_include_mods = enabled;
+    save_app_settings_at(&settings_path, &settings)
+}
+
+#[tauri::command(async)]
+fn list_mod_version_targets() -> Result<Vec<mod_versioning::ModVersionTarget>, String> {
+    let store_base = configured_version_store_path()?;
+    Ok(mod_versioning::list_targets(&store_base, &collect_mod_roots()))
+}
+
+#[tauri::command(async)]
+fn get_mod_version_status(root_path: String) -> Result<mod_versioning::ModVersionStatus, String> {
+    let root = resolve_mod_root(&root_path)?;
+    let store_base = configured_version_store_path()?;
+    mod_versioning::status(
+        &store_base,
+        &root,
+        VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst),
+    )
+}
+
+fn mod_operation_root(root: &mod_versioning::ModRoot) -> Option<(String, String)> {
+    Some((
+        mod_versioning::store_key(root),
+        root.path.to_string_lossy().into_owned(),
+    ))
+}
+
+#[tauri::command(async)]
+fn start_mod_version_snapshot(
+    app: tauri::AppHandle,
+    root_path: String,
+    label: Option<String>,
+) -> Result<u64, String> {
+    let root = resolve_mod_root(&root_path)?;
+    let (store_base, parallel) = configured_version_options()?;
+    let store = mod_version_store(&root, &store_base)?;
+    let target = mod_operation_root(&root);
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modSnapshot",
+        target,
+        2,
+        move |progress| {
+            let outcome = versioning::create_full_snapshot(
+                &root.path,
+                &store,
+                None,
+                "mods",
+                label.as_deref(),
+                parallel,
+                progress,
+            )?;
+            Ok(outcome.message)
+        },
+    )
+}
+
+#[tauri::command(async)]
+fn start_mod_version_capture(
+    app: tauri::AppHandle,
+    root_path: String,
+    label: Option<String>,
+) -> Result<u64, String> {
+    let root = resolve_mod_root(&root_path)?;
+    let (store_base, parallel) = configured_version_options()?;
+    let store = mod_version_store(&root, &store_base)?;
+    let target = mod_operation_root(&root);
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modCapture",
+        target,
+        2,
+        move |progress| {
+            let outcome = versioning::capture_version(
+                &root.path,
+                &store,
+                None,
+                "mods",
+                label.as_deref(),
+                parallel,
+                progress,
+            )?;
+            Ok(outcome.message)
+        },
+    )
+}
+
+#[tauri::command(async)]
+fn start_mod_version_restore(
+    app: tauri::AppHandle,
+    root_path: String,
+    version_id: String,
+    force: bool,
+) -> Result<u64, String> {
+    // 还原会直接改写模组目录，游戏运行时文件可能被占用。
+    ensure_game_closed()?;
+    let root = resolve_mod_root(&root_path)?;
+    let (store_base, parallel) = configured_version_options()?;
+    let store = mod_version_store(&root, &store_base)?;
+    let target = mod_operation_root(&root);
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modRestore",
+        target,
+        3,
+        move |progress| {
+            let outcome = versioning::restore_version(
+                &root.path,
+                &store,
+                &version_id,
+                force,
+                parallel,
+                progress,
+            )?;
+            let message = outcome.message;
+            if let Err(error) = reconcile_jar_state_for_root(&root.path) {
+                launcher_log::error(&format!("同步「{}」的 JAR 状态失败：{error}", root.name));
+            }
+            Ok(message)
+        },
+    )
+}
+
+#[tauri::command(async)]
+fn start_mod_version_verify(
+    app: tauri::AppHandle,
+    root_path: String,
+) -> Result<u64, String> {
+    let root = resolve_mod_root(&root_path)?;
+    let (store_base, parallel) = configured_version_options()?;
+    let store = mod_version_store(&root, &store_base)?;
+    let target = mod_operation_root(&root);
+    let verify_app = app.clone();
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modVerify",
+        target,
+        1,
+        move |progress| {
+            let outcome =
+                versioning::verify_current_version(&root.path, &store, parallel, progress)?;
+            let _ = verify_app.emit("mod-version-verified", &outcome);
+            Ok(outcome.message)
+        },
+    )
+}
+
+#[tauri::command(async)]
+fn delete_mod_version(root_path: String, version_id: String) -> Result<String, String> {
+    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
+        return Err("请等待当前版本操作完成后再删除版本。".to_string());
+    }
+    let root = resolve_mod_root(&root_path)?;
+    let store_base = configured_version_store_path()?;
+    let store = mod_version_store(&root, &store_base)?;
+    versioning::delete_version(&store, &version_id)
+}
+
+#[tauri::command(async)]
+fn list_mod_version_packs() -> Result<Vec<mod_versioning::ModPackRecord>, String> {
+    let store_base = configured_version_store_path()?;
+    mod_versioning::read_packs(&store_base)
+}
+
+#[tauri::command(async)]
+fn delete_mod_version_pack(pack_id: String) -> Result<String, String> {
+    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
+        return Err("请等当前版本操作完成后再删除整合包。".to_string());
+    }
+    let store_base = configured_version_store_path()?;
+    let mut packs = mod_versioning::read_packs(&store_base)?;
+    let label = packs
+        .iter()
+        .find(|pack| pack.id == pack_id)
+        .map(|pack| pack.label.clone());
+    let before = packs.len();
+    packs.retain(|pack| pack.id != pack_id);
+    if packs.len() == before {
+        return Err("找不到这个整合包。".to_string());
+    }
+    mod_versioning::write_packs(&store_base, &packs)?;
+    Ok(format!("已删除整合包「{}」。", label.unwrap_or_default()))
+}
+
+/// 一键把当前所有模组各存一个版本，并记成一条整合包。
+#[tauri::command(async)]
+fn start_mod_version_save_all(
+    app: tauri::AppHandle,
+    label: Option<String>,
+) -> Result<u64, String> {
+    let (store_base, parallel) = configured_version_options()?;
+    let roots = collect_mod_roots();
+    if roots.is_empty() {
+        return Err("没有可保存的模组。".to_string());
+    }
+    let packs = mod_versioning::read_packs(&store_base)?;
+    let pack_label = label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("整合包 {}", packs.len() + 1));
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modSaveAll",
+        None,
+        1,
+        move |progress| {
+            let (references, failures) =
+                capture_mod_versions(&roots, &pack_label, parallel, progress)?;
+            if references.is_empty() {
+                return Err("没有成功保存任何模组版本。".to_string());
+            }
+            let mut packs = mod_versioning::read_packs(&store_base)?;
+            let record = mod_versioning::ModPackRecord {
+                id: format!("pack-{created_at}-{}", packs.len() + 1),
+                label: pack_label.clone(),
+                created_at,
+                mods: references.clone(),
+            };
+            packs.push(record);
+            mod_versioning::write_packs(&store_base, &packs)?;
+            Ok(if failures > 0 {
+                format!(
+                    "已保存整合包「{pack_label}」：{} 个模组（{failures} 个失败）",
+                    references.len()
+                )
+            } else {
+                format!("已保存整合包「{pack_label}」：{} 个模组", references.len())
+            })
+        },
+    )
+}
+
+/// 还原一条整合包：把它记录的所有模组版本一起还原。
+#[tauri::command(async)]
+fn start_mod_version_restore_pack(
+    app: tauri::AppHandle,
+    pack_id: String,
+) -> Result<u64, String> {
+    // 还原会直接改写模组目录，游戏运行时文件可能被占用。
+    ensure_game_closed()?;
+    let (store_base, parallel) = configured_version_options()?;
+    let pack = mod_versioning::read_packs(&store_base)?
+        .into_iter()
+        .find(|pack| pack.id == pack_id)
+        .ok_or_else(|| "找不到这个整合包。".to_string())?;
+    if pack.mods.is_empty() {
+        return Err("这个整合包里没有模组。".to_string());
+    }
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modRestorePack",
+        None,
+        1,
+        move |progress| {
+            let (restored, skipped) = restore_mod_refs(&pack.mods, parallel, progress)?;
+            Ok(if skipped > 0 {
+                format!(
+                    "已还原整合包「{}」：{restored} 个模组（{skipped} 个找不到，已跳过）",
+                    pack.label
+                )
+            } else {
+                format!("已还原整合包「{}」：{restored} 个模组", pack.label)
+            })
+        },
+    )
 }
 
 #[tauri::command(async)]
@@ -6584,6 +7522,8 @@ pub fn run() {
             save_steam_proxy,
             detect_steam_proxy,
             get_version_status,
+            get_version_store_path,
+            save_version_system_drive_notice_dismissed,
             save_version_store_path,
             save_version_parallel,
             start_version_snapshot,
@@ -6592,6 +7532,18 @@ pub fn run() {
             start_version_verify,
             cancel_version_operation,
             delete_version,
+            save_version_include_mods,
+            list_mod_version_targets,
+            get_mod_version_status,
+            start_mod_version_snapshot,
+            start_mod_version_capture,
+            start_mod_version_restore,
+            start_mod_version_verify,
+            delete_mod_version,
+            list_mod_version_packs,
+            delete_mod_version_pack,
+            start_mod_version_save_all,
+            start_mod_version_restore_pack,
             submit_feedback,
             ping_steam_relay,
             get_memory_status,
@@ -6661,8 +7613,9 @@ mod tests {
         install_locations_from_libraries, install_zombie_buddy_at_paths,
         is_builtin_background_path, jar_scan_candidates, jar_scan_inputs,
         library_paths_from_config, list_viewpoint_shaderpacks_at, list_viewpoint_shots_at,
-        load_app_settings_at, merge_lua_mod_entry, mod_jar_path, mod_loader_policy_agent,
-        mod_poster_path, normalize_blur_strength, normalize_font_contrast, normalize_font_family,
+        load_app_settings_at, merge_lua_mod_entry, mod_inner_event, mod_jar_path,
+        mod_loader_policy_agent, mod_marker_event, mod_poster_path, mod_progress_units,
+        normalize_blur_strength, normalize_font_contrast, normalize_font_family,
         normalize_font_scale, normalize_mod_loader_scheme, normalize_translation_language,
         normalize_window_height, normalize_window_width, order_mod_ids_by_requires,
         normalize_overlay_background_color,
@@ -6676,7 +7629,8 @@ mod tests {
         save_app_settings_at, scan_jar_mods_at_with_callback, set_jar_mod_info_enabled,
         should_write_fast_launch_cache, steam_config_paths, steam_executable_from_roots,
         steam_profile_from_loginusers, steam_user_data_id, strip_loader_agent_tokens,
-        validate_memory_limit_mb, vdf_value, viewpoint_three_d_status, workshop_path_from_library,
+        validate_memory_limit_mb, vdf_value, version_step_for, viewpoint_three_d_status,
+        workshop_path_from_library,
         write_default_mod_ids, write_fast_launch_cache_at, write_jar_mod_state,
         zombie_buddy_source_from_libraries, zombie_buddy_status, AppSettings, FastLaunchCache,
         JarModStateEntry, JarModStateFile, JavaPatchMethod, LuaModEntry, ScannedJarMod,
@@ -6825,11 +7779,80 @@ mod tests {
             steam_proxy: Some("socks5://127.0.0.1:1080".to_string()),
             version_store_path: None,
             version_parallel: true,
+            version_include_mods: true,
         };
 
         save_app_settings_at(&path, &settings).unwrap();
 
         assert_eq!(load_app_settings_at(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn mod_step_progress_is_weighted_per_mod() {
+        // 第 2 个模组（index 1）、共 3 个：起点是整条进度的 1/3。
+        let marker = mod_marker_event(1, 3, "Beta");
+        assert_eq!(marker.phase, "mods");
+        assert_eq!((marker.processed_bytes, marker.total_bytes), (1000, 3000));
+        assert_eq!(marker.current_path.as_deref(), Some("Beta（2/3）"));
+
+        // 模组内部 50% → 整条进度的 1.5/3，而不是 50%。
+        let inner = mod_inner_event(
+            1,
+            3,
+            "Beta",
+            crate::versioning::ProgressEvent {
+                phase: "copying".to_string(),
+                processed_files: 5,
+                total_files: 10,
+                processed_bytes: 50,
+                total_bytes: 100,
+                current_path: Some("file.bin".to_string()),
+            },
+        );
+        assert_eq!(inner.phase, "mods");
+        assert_eq!((inner.processed_bytes, inner.total_bytes), (1500, 3000));
+        assert_eq!(inner.current_path.as_deref(), Some("Beta（2/3）"));
+
+        // 内层进度被夹在 0–1，不会跳回上一个模组、也不会越过下一个。
+        let overshoot = mod_inner_event(
+            1,
+            3,
+            "Beta",
+            crate::versioning::ProgressEvent {
+                phase: "copying".to_string(),
+                processed_files: 99,
+                total_files: 10,
+                processed_bytes: 999,
+                total_bytes: 100,
+                current_path: None,
+            },
+        );
+        assert_eq!(overshoot.processed_bytes, 2000);
+        assert_eq!(mod_progress_units(3, 0.0, 3), (3000, 3000));
+    }
+
+    #[test]
+    fn maps_version_phases_to_operation_steps() {
+        // 游戏大版本：计算哈希 → 复制/保存变化 → 保存模组版本
+        assert_eq!(version_step_for("snapshot", "preparing"), 1);
+        assert_eq!(version_step_for("snapshot", "hashing"), 1);
+        assert_eq!(version_step_for("snapshot", "copying"), 2);
+        assert_eq!(version_step_for("snapshot", "mods"), 3);
+        assert_eq!(version_step_for("capture", "delta"), 2);
+        // 还原：检查 → 还原（含 PZ Optimization）→ 清理 → 还原模组版本
+        assert_eq!(version_step_for("restore", "hashing"), 1);
+        assert_eq!(version_step_for("restore", "pzopt"), 2);
+        assert_eq!(version_step_for("restore", "restoring"), 2);
+        assert_eq!(version_step_for("restore", "cleaning"), 3);
+        assert_eq!(version_step_for("restore", "mods"), 4);
+        // 单个模组
+        assert_eq!(version_step_for("modSnapshot", "copying"), 2);
+        assert_eq!(version_step_for("modCapture", "delta"), 2);
+        assert_eq!(version_step_for("modRestore", "cleaning"), 3);
+        assert_eq!(version_step_for("verify", "hashing"), 1);
+        // 结束态不推进步骤
+        assert_eq!(version_step_for("capture", "done"), 0);
+        assert_eq!(version_step_for("capture", "error"), 0);
     }
 
     #[test]
@@ -6907,6 +7930,7 @@ mod tests {
             id: id.to_string(),
             info_id: id.to_string(),
             mod_info_path: format!("H:/mods/{id}/mod.info"),
+            mod_root: format!("H:/mods/{id}"),
             disabled,
             workshop_id: None,
             jar_path: format!("H:/mods/{id}/{id}.jar"),

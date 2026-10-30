@@ -57,6 +57,11 @@
      仍是 §2.3 的 0.38–0.96 区间内的值。 */
   --pz-surface-acrylic-light: rgba(255, 255, 255, 0.6);
   --pz-surface-acrylic-dark: rgba(32, 20, 28, 0.5);
+  /* 按钮亚克力：ghost / outline 两种透明底按钮统一用这一层（见 src/theme.ts），
+     模糊参数复用 --pz-menu-blur / --pz-menu-saturate，所以模糊度设置仍然全局生效。 */
+  --pz-btn-tint: rgba(255, 255, 255, 0.44);
+  --pz-btn-tint-hover: rgba(255, 255, 255, 0.68);
+  --pz-btn-highlight: rgba(255, 255, 255, 0.72);
   /* 启动页亚克力的克隆壁纸层：模糊半径与提饱和系数（原 backdrop-filter 是
      blur(28px) saturate(160%) / blur(14–18px) 不等，这里统一一档）。
      半径同样吃 --pz-blur-scale，所以「模糊度」调到 0 时这层退化成无模糊的壁纸副本。 */
@@ -259,6 +264,16 @@ body,
   padding-block: 0 !important;
 }
 
+/* 与输入框 / 下拉同一行的操作按钮也统一到控件高度（26px）：Chakra size="sm" 按钮
+   默认 36px，留在一行里会比输入框高出一圈。只匹配「直接包含 input 或下拉触发器」
+   的容器，独立工具栏按钮（刷新、保存版本等）仍是 36px。 */
+.pz-app-shell :has(> input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="color"])) > .chakra-button,
+.pz-app-shell :has(> .chakra-menu__trigger) > .chakra-button {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-block: 0 !important;
+}
+
 body {
   min-width: 320px;
   background: transparent;
@@ -295,6 +310,14 @@ body {
 *::-webkit-scrollbar-thumb:active {
   background: var(--pz-scroll-thumb-active);
   background-clip: padding-box;
+}
+
+/* 纵向滚动条完全贴住容器右缘：去掉左右各 2px 的透明边，滑块铺满 8px 轨道；
+   右侧不做圆角，左侧保留胶囊形。横向滚动条维持原来的内缩样式。 */
+*::-webkit-scrollbar-thumb:vertical {
+  border: 0;
+  border-radius: var(--pz-radius-pill) 0 0 var(--pz-radius-pill);
+  background-clip: border-box;
 }
 
 *::-webkit-scrollbar-button {
@@ -525,7 +548,20 @@ body {
   overflow: visible;
 }
 
-.pz-window-titlebar .pz-side-nav-item {
+.pz-window-titlebar /* 导航类按钮保持平铺：亚克力底只给「操作按钮」，否则顶栏和侧栏会变成一排白胶囊，
+   当前分类的蓝色高亮也会被削弱。这些类自己的 hover / -active 规则同样带 !important
+   且排在后面，所以悬停和选中态照常生效。 */
+.pz-side-nav-item:not(.pz-side-nav-item-active),
+.pz-resource-center-sidebar-item:not(.pz-resource-center-sidebar-item-active),
+.pz-version-tab:not(.pz-version-tab-active),
+.pz-version-filter:not(.is-active) {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+.pz-side-nav-item {
   width: auto;
   min-width: 0;
   height: 2rem !important;
@@ -2075,6 +2111,9 @@ body {
    上面那条 `.pz-resource-center-main > .pz-panel { padding: 0 }` 是给资源中心自己用的，
    不应该作用到设置页的内容上，否则会出现"边距失效"。 */
 .pz-settings-center > .pz-resource-center-main > .pz-panel {
+  /* 面板作为纵向 flex 项时必须按内容高度撑开；允许收缩的话会被压到窗口高度，
+     内边距底边跟着上移，滚到最底部时最后一项就贴住滚动区，底边距等于消失。 */
+  flex: 0 0 auto;
   height: auto;
   min-height: 0;
   overflow: visible;
@@ -2092,6 +2131,49 @@ body {
   max-width: 52rem;
 }
 
+/* 「百宝箱」（设置 › 百宝箱）：翻译器 / 下载器 / 控制台三张卡片。
+   单列全宽，不做瀑布流：三件工具的内容长度差异大，并排时一列会被另一列拖着留白；
+   每张卡片占满设置正文可用宽度，标题→说明→内容的阅读顺序也更稳定。 */
+.pz-toolbox-page {
+  max-width: none;
+}
+
+.pz-toolbox-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-top: 1.1rem;
+}
+
+.pz-toolbox-card {
+  padding: 0.9rem 1rem;
+  margin: 0;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-card);
+  box-shadow: var(--pz-shadow-sm);
+}
+
+/* 卡片里原有的设置面板不再自带卡面与内边距，避免「卡片套卡片」。 */
+.pz-toolbox-card .pz-panel {
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* 控制台卡片里的两块内容（加载状态 / 通知记录）用一条细线分隔。 */
+.pz-toolbox-stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.pz-toolbox-separator {
+  margin: 0.9rem 0;
+  border-top: 1px solid var(--pz-line);
+}
+
 /* 「设置 › 版本」：版本列表比较宽，留出比通用页更大的阅读宽度。
    和其它设置子页一样平铺在页面上——不再给整页套浮层卡面（底色 / 圆角 /
    阴影 / 背景模糊 / 噪点都去掉），内容由分区标题和细分割线组织。 */
@@ -2105,6 +2187,52 @@ body {
   margin-top: 1.15rem;
   padding-top: 0.95rem;
   border-top: 1px solid var(--pz-line);
+}
+
+/* 超过 30 字的说明收进圆圈问号：1rem 圆形、问号居中，悬停/聚焦变成强调色。 */
+.pz-hint-dot {
+  display: inline-flex;
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--pz-line-emphasis);
+  border-radius: var(--pz-radius-pill);
+  color: var(--pz-text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+
+.pz-hint-dot:hover,
+.pz-hint-dot:focus-visible {
+  border-color: var(--pz-accent-line);
+  color: var(--pz-accent-strong);
+  outline: none;
+}
+
+/* 问号提示沿用菜单亚克力（浅底深字），可换行；`max-width` 夹在窗口内，
+   位置由 zag 的 flip + shift + overflowPadding 保证不出界（见 App.tsx 的 HintDot）。 */
+.pz-hint-tooltip {
+  max-width: min(22rem, calc(100vw - 2rem)) !important;
+  padding: 0.5rem 0.65rem !important;
+  border: 1px solid var(--pz-line) !important;
+  border-radius: var(--pz-radius-sm) !important;
+  background-color: var(--pz-menu-tint) !important;
+  background-image: var(--pz-menu-noise-image) !important;
+  color: var(--pz-text) !important;
+  font-size: var(--pz-font-sm) !important;
+  font-weight: 500 !important;
+  line-height: 1.55 !important;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  box-shadow:
+    var(--pz-shadow-menu),
+    inset 0 1px 0 var(--pz-menu-highlight) !important;
+  backdrop-filter: blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate));
 }
 
 .pz-version-facts {
@@ -2159,11 +2287,231 @@ body {
   border-top: 0;
 }
 
+/* 版本条目的 git 风格改动统计按钮（右下角）：绿色新增 / 红色删除 / 橙色修改，
+   点击展开或收起文件清单。 */
+.pz-version-diff-button {
+  gap: 0.4rem !important;
+  min-width: 0;
+  padding-inline: 0.5rem;
+  border-radius: var(--pz-radius-xs);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--pz-font-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.pz-version-diff-button.is-expanded {
+  border-color: var(--pz-accent-line-strong);
+}
+
+.pz-version-diff-add {
+  color: var(--pz-success);
+}
+
+.pz-version-diff-remove {
+  color: var(--pz-danger);
+}
+
+.pz-version-diff-modify {
+  color: var(--pz-warning);
+}
+
+.pz-version-diff-chevron {
+  color: var(--pz-text-subtle);
+  font-size: 0.62rem;
+}
+
 .pz-version-entry-diff {
   max-height: 220px;
   margin-top: 0.7rem;
   padding-top: 0.6rem;
   border-top: 1px solid var(--pz-line);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 版本页的展开区域（游戏版本「查看改动」、模组版本「详情」共用）：
+   和模组详情 .pz-jar-mod-details-shell 同一套 grid 0fr→1fr 过渡 + 内层淡入/上移。
+   外观（外边距、上边框、限高滚动）留在内层内容上，网格直接子项保持零外尺寸，
+   收起态才不会留下幽灵高度、也不会吞掉行尾点击。 */
+.pz-version-expand-shell {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--pz-dur-slower) var(--pz-ease-out);
+}
+
+.pz-version-expand-shell.is-expanded {
+  grid-template-rows: 1fr;
+}
+
+.pz-version-expand {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-0.3rem);
+  transition:
+    opacity var(--pz-dur-slow) ease,
+    transform var(--pz-dur-slower) var(--pz-ease-out);
+}
+
+.pz-version-expand-shell.is-expanded .pz-version-expand {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 版本页的二级分页（游戏版本 / 模组版本）：胶囊分段，选中态和侧栏分类同色。
+   不要换成带底色的分段容器——设置子页要求平铺，这里只用一条下划线收尾。 */
+.pz-version-tabs {
+  margin-bottom: 1rem;
+  padding-bottom: 0.7rem;
+  border-bottom: 1px solid var(--pz-line);
+}
+
+.pz-version-tab {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-inline: 0.8rem !important;
+  border-radius: var(--pz-radius-pill) !important;
+  color: var(--pz-text-label) !important;
+  font-size: var(--pz-font-sm) !important;
+}
+
+.pz-version-tab:hover {
+  background: var(--pz-fill-accent) !important;
+  color: var(--pz-accent-strong) !important;
+}
+
+.pz-version-tab-active {
+  background: var(--pz-fill-accent-active) !important;
+  color: var(--pz-accent-deep) !important;
+  font-weight: 700 !important;
+}
+
+/* 模组列表的来源 / 已记录筛选按钮，和分页签同款胶囊。 */
+.pz-version-filter {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-inline: 0.55rem !important;
+  border-radius: var(--pz-radius-sm) !important;
+  color: var(--pz-text-label) !important;
+  font-size: var(--pz-font-sm) !important;
+}
+
+.pz-version-filter.is-active {
+  background: var(--pz-fill-accent-active) !important;
+  color: var(--pz-accent-deep) !important;
+  font-weight: 700 !important;
+}
+
+.pz-version-mod-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.pz-version-mod-row {
+  padding-block: 0.7rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+.pz-version-mod-row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.pz-version-mod-detail {
+  margin-top: 0.55rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--pz-line);
+}
+
+/* 模组版本时间线：最新在上；左侧圆形胶囊（越新越大）+ 竖线，右侧是日期矩形和说明。
+   行高由内容撑开，圆形之间的线用 flex 自动填满，改字号或行距都不会断开。 */
+.pz-version-timeline {
+  display: flex;
+  flex-direction: column;
+  margin-top: 0.65rem;
+}
+
+.pz-version-timeline-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 0.7rem;
+}
+
+.pz-version-timeline-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.pz-version-timeline-dot {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-fill);
+  color: var(--pz-text-label);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.pz-version-timeline-dot.is-latest {
+  background: var(--pz-fill-accent-active);
+  color: var(--pz-accent-deep);
+}
+
+.pz-version-timeline-line {
+  width: 2px;
+  flex: 1 1 auto;
+  min-height: 0.4rem;
+  margin-top: 2px;
+  border-radius: 1px;
+  background: var(--pz-line-strong);
+}
+
+.pz-version-timeline-body {
+  min-width: 0;
+  padding-bottom: 0.85rem;
+}
+
+.pz-version-timeline-date {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-xs);
+  color: var(--pz-text-label);
+  font-size: var(--pz-font-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 「版本记录」模态框：宽度够放时间线，正文自己滚动，不把弹窗撑到屏幕外。 */
+.pz-mod-version-dialog {
+  max-width: min(46rem, calc(100vw - 2rem));
+}
+
+/* 换盘提醒：只有一段说明和复选框，比通用弹窗窄。 */
+.pz-version-drive-dialog {
+  width: min(30rem, 100%);
+}
+
+/* 极速启动警告：两段说明 + 取消/仍要开启，和换盘提醒同宽度档。 */
+.pz-fast-launch-dialog {
+  width: min(32rem, 100%);
+}
+
+.pz-version-drive-dont-ask {
+  font-size: var(--pz-font-xs);
+  color: var(--pz-text-label);
+}
+
+.pz-mod-version-dialog-body {
+  max-height: min(58vh, 32rem);
+  margin-top: 0.5rem;
+  padding-right: 0.25rem;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
@@ -2180,14 +2528,8 @@ body {
   word-break: break-word;
 }
 
-/* 「Steam 网络加速」行的两个操作按钮与同行的输入框 / 下拉触发器对齐到
-   26px 设计高度：Chakra size="sm" 按钮默认 36px，不在全站控件高度规则的
-   覆盖范围里（那条只管输入框 / 原生下拉 / 菜单触发器）。 */
-.pz-general-settings-panel .pz-steam-relay-action {
-  height: var(--pz-control-height) !important;
-  min-height: var(--pz-control-height) !important;
-  padding-block: 0 !important;
-}
+/* 「Steam 网络加速」行的按钮由顶部「与输入框/下拉同排」的全局规则统一到 26px，
+   这里不再单独覆盖。 */
 
 .pz-translator-settings-panel {
   max-width: 60rem;
@@ -2217,8 +2559,9 @@ body {
   padding: 0.7rem 1rem !important;
 }
 
-/* 创意工坊页头不画分隔横线（分隔交给下方筛选行自身的间距）。 */
-.pz-resource-center-main > .pz-panel > .pz-panel-header {
+/* 创意工坊 / 光影包下载的页头都不画分隔横线（分隔交给下方筛选行自身的间距）。 */
+.pz-resource-center-main > .pz-panel > .pz-panel-header,
+.pz-resource-center-main > .pz-resource-browser > .pz-panel-header {
   border-bottom: 0;
 }
 
@@ -2815,6 +3158,33 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 创意工坊列表项右侧的方形分享按钮：26px 见方、垂直居中。
+   整行左键默认在窗口内打开详情，想用 Steam 客户端就点这个按钮。 */
+.pz-workshop-share-button {
+  flex: 0 0 auto;
+  align-self: center;
+  width: var(--pz-control-height) !important;
+  min-width: var(--pz-control-height) !important;
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding: 0 !important;
+  border-radius: var(--pz-radius-sm) !important;
+  color: var(--pz-text-label) !important;
+}
+
+.pz-workshop-share-button:hover {
+  border-color: var(--pz-accent-line) !important;
+  color: var(--pz-accent-strong) !important;
+}
+
+/* 按钮里的自绘箭头：向上再向右折（↱），15px 见方，随按钮文字颜色。 */
+.pz-workshop-share-icon {
+  display: block;
+  width: 0.95rem;
+  height: 0.95rem;
+  flex: 0 0 auto;
 }
 
 .pz-workshop-list-meta {
@@ -3967,6 +4337,35 @@ body {
   background: var(--pz-surface-card);
 }
 
+/* 移除任务：复用通知的隐藏动画（pz-toast-exit）。行本身淡出缩小，
+   外层 grid 轨道 1fr → 0fr 同时收拢高度，下面的行平滑上移而不是瞬间跳位。 */
+.pz-task-slot {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--pz-dur-base) ease-in;
+}
+
+.pz-task-slot > .pz-task-row {
+  min-height: 0;
+  /* 行自身的上下内边距/描边会把 0fr 轨道顶到约 20px，退场时一起收到 0，
+     行才能真正压扁、下面的行平滑上移。 */
+  transition:
+    padding-block var(--pz-dur-base) ease-in,
+    border-block-width var(--pz-dur-base) ease-in;
+}
+
+.pz-task-slot.is-closing {
+  grid-template-rows: 0fr;
+}
+
+.pz-task-slot.is-closing > .pz-task-row {
+  overflow: hidden;
+  padding-block: 0;
+  border-block-width: 0;
+  animation: pz-toast-exit var(--pz-dur-base) ease-in both;
+  pointer-events: none;
+}
+
 .pz-task-running {
   border-left: 3px solid var(--pz-accent);
 }
@@ -3981,6 +4380,29 @@ body {
 
 .pz-task-progress {
   height: 5px;
+}
+
+/* 内存清理没有可预期的总量，进度条用来回扫动的形式表示“正在进行”。 */
+.pz-task-progress-indeterminate > span {
+  width: 35%;
+  animation: pz-task-progress-sweep 1.2s var(--pz-ease-out) infinite;
+}
+
+@keyframes pz-task-progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(385%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-task-progress-indeterminate > span {
+    animation: none;
+    transform: none;
+  }
 }
 
 @keyframes pz-task-panel-in {

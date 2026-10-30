@@ -9,6 +9,7 @@ import {
   versionMatchLabel,
   versionPhaseLabel,
   versionProgressPercent,
+  versionStepLabel,
   versionLabelById,
   type VersionChangeLog,
   type VersionOperationUpdate,
@@ -75,9 +76,10 @@ test("formats version sizes in binary units", () => {
 test("shortens root hashes and labels snapshot types", () => {
   assert.equal(shortVersionHash("sha256:abcdef0123456789"), "sha256:abcdef012345…");
   assert.equal(shortVersionHash(""), "无根哈希");
-  assert.equal(versionBaseTypeLabel("full", null), "基准");
-  assert.equal(versionBaseTypeLabel("full", "v1"), "检查点");
-  assert.equal(versionBaseTypeLabel("delta", "v1"), "增量");
+  // 用户视角只区分“完整保存”和“只存了变化”，不再区分基准/检查点。
+  assert.equal(versionBaseTypeLabel("full", null), "完整备份");
+  assert.equal(versionBaseTypeLabel("full", "v1"), "完整备份");
+  assert.equal(versionBaseTypeLabel("delta", "v1"), "只存变化");
 });
 
 test("labels the current match using the version list", () => {
@@ -91,27 +93,27 @@ test("labels the current match using the version list", () => {
       { kind: "metadata", versionId: "v2", candidates: ["v2"], checkedHashes: false, message: "" },
       versions,
     ),
-    "疑似：新版",
+    "可能是「新版」",
   );
   assert.equal(
     versionMatchLabel(
       { kind: "hash", versionId: "v1", candidates: ["v1"], checkedHashes: true, message: "" },
       versions,
     ),
-    "已确认：旧版",
+    "与「旧版」一致",
   );
   assert.equal(
     versionMatchLabel(
       { kind: "unknown", versionId: null, candidates: [], checkedHashes: false, message: "" },
       versions,
     ),
-    "未知 / 已修改",
+    "和保存过的版本都不一样",
   );
-  assert.equal(versionMatchLabel(null, versions), "尚未读取");
+  assert.equal(versionMatchLabel(null, versions), "正在读取…");
 });
 
 test("summarizes change logs", () => {
-  assert.equal(versionChangeSummary(null), "完整快照");
+  assert.equal(versionChangeSummary(null), "完整备份");
   assert.equal(versionChangeSummary(changeLog()), "无文件变化");
   assert.equal(
     versionChangeSummary(
@@ -144,10 +146,28 @@ test("computes progress from bytes first, then file counts", () => {
   assert.equal(versionProgressPercent(progress({ totalBytes: 0, totalFiles: 0 })), 0);
 });
 
+test("shows the operation counter after the percentage", () => {
+  // 例：`10% 1/3`——百分比是当前这一步的进度，后面跟「第几步 / 共几步」。
+  assert.equal(versionStepLabel(progress({ step: 1, steps: 3 })), " 1/3");
+  assert.equal(versionStepLabel(progress({ step: 2, steps: 3 })), " 2/3");
+  assert.equal(
+    versionStepLabel(progress({ step: 3, steps: 3, status: "completed" })),
+    " 3/3",
+  );
+  // 只有一步（校验）不显示计数
+  assert.equal(versionStepLabel(progress({ step: 1, steps: 1 })), "");
+  assert.equal(versionStepLabel(progress()), "");
+  assert.equal(versionStepLabel(null), "");
+  // 异常值收敛到 [1, steps]
+  assert.equal(versionStepLabel(progress({ step: 0, steps: 3 })), "");
+  assert.equal(versionStepLabel(progress({ step: 9, steps: 3 })), " 3/3");
+});
+
 test("maps backend phases to Chinese labels", () => {
-  assert.equal(versionPhaseLabel("hashing"), "计算文件哈希");
-  assert.equal(versionPhaseLabel("copying"), "复制文件");
-  assert.equal(versionPhaseLabel("restoring"), "还原文件");
+  assert.equal(versionPhaseLabel("hashing"), "正在核对文件");
+  assert.equal(versionPhaseLabel("copying"), "正在复制文件");
+  assert.equal(versionPhaseLabel("restoring"), "正在还原文件");
+  assert.equal(versionPhaseLabel("mods"), "正在保存模组版本");
   assert.equal(versionPhaseLabel("custom"), "custom");
 });
 

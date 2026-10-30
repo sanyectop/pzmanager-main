@@ -97,3 +97,17 @@ test("applies the relay fallback to workshop preview images in the app", () => {
   assert.match(appSource, /previewImageFallbackUrl\(\s*item\.previewUrl/);
   assert.match(appSource, /fallbackSrc=\{previewImageFallbackUrl/);
 });
+
+test("general settings › network section collapses its explanation into a hint", () => {
+  assert.match(appSource, /<Text color="gray\.800" fontSize="sm" fontWeight="700">网络<\/Text>/);
+  assert.match(appSource, /label="网络中转说明"/);
+  assert.match(appSource, /大陆网络直连 Steam 创意工坊会失败/);
+  // 说明只留在问号提示里，不再作为可见段落占位。
+  assert.doesNotMatch(
+    appSource,
+    /<Text color="gray\.500" fontSize="xs" mt="1">\s*大陆网络直连 Steam 创意工坊会失败/,
+  );
+  // 中转模式和地址控件保持可见。
+  assert.match(appSource, /ariaLabel="Steam 网络加速模式"/);
+  assert.match(appSource, /aria-label="Steam 中转服务器地址"/);
+});

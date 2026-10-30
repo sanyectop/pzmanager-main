@@ -4,6 +4,9 @@
 首个版本是完整快照（母文件），之后每次捕获只保存变化文件的内容定义分块增量；
 任意历史版本都能从最近的完整快照开始，按父链应用增量重建。
 
+页面分为三个分页：「游戏版本」保存/设置与当前状态，「模组版本」按模组隔离，
+「历史版本」只展示游戏版本链（改动统计、还原、删除，以及还原时的后台进度）。
+
 ## 存储布局
 
 存储目录默认是 `<用户 Zomboid>/.pzmanager/versions`，可在页面里修改。目录**不能**
@@ -42,7 +45,9 @@ versions/
 
 1. **创建基准版本 / 检查点**：扫描并哈希整个游戏目录，完整复制到 `base/` 或
    `checkpoints/`，写入清单。最新版本已经是同内容完整快照时会跳过重复复制。
-2. **捕获新版本（增量）**：扫描当前目录，与最新版本清单比对；只对新增/修改文件
+2. **捕获新版本（增量）**：遍历当前目录，与最新版本清单比对；**大小和修改时间（毫秒）
+   都没变的文件直接沿用上次的 SHA-256，不打开文件**（只记录变化时主要省在这里，
+   也避开杀毒软件对每个被打开文件的实时扫描）；其余文件重新哈希，只对新增/修改文件
    生成增量包，删除文件只记路径。随后写清单、changelog，追加到版本链。
 3. **校验当前目录**：重新哈希所有文件，用根哈希确认当前目录对应哪个版本。
 4. **还原到此版本**：先完整校验当前目录是否属于某个已记录版本（不属于时要求用户
@@ -56,11 +61,21 @@ versions/
 ## 多线程与单线程
 
 - 设置 › 版本 ›「多线程扫描与复制」默认开启；关闭后扫描、快照复制和还原都回到原来的单线程路径。
-- 多线程用 `std::thread::scope` + work-stealing 文件队列，并行度默认 `min(逻辑核心数, 6)`。
+- 并行度默认 `min(逻辑核心数, 16)`。哈希用 `std::thread::scope` + work-stealing 文件队列；
+  完整快照复制用 **rayon 有界线程池**（`ThreadPoolBuilder::num_threads(workers)` +
+  `par_iter().for_each_init`），每个线程复用一份 1 MiB 复制缓冲，避免逐文件分配。
+- 复制是流式的：大文件每读一块都检查取消，能在块边界中断（不再等整个文件拷完），
+  结束按清单里的 size 校验；进度由调用线程每 120ms 读原子计数上报，不会跨线程碰 `progress`。
 - 并行范围：`scan_directory` 的 SHA-256 计算、完整快照复制、还原时目标文件的物化与写入。
+- 扫描的元数据只遍历一次：`collect_walk_entries` 用 `DirEntry::metadata()` 顺手取大小和 mtime
+  （Windows 的目录枚举自带这些字段，不再逐个 `symlink_metadata`），哈希阶段直接用这份结果；
+  每个 worker 复用同一个 1 MiB 读缓冲，不再每文件 `vec![0u8; 1 MiB]`。
 - 捕获阶段的增量包生成仍按文件串行（每个文件的 CDC 索引内存不小）；扫描阶段本身已并行。
 - 进度只由主线程回调，worker 通过通道回传结果；取消在文件边界生效，还原写入阶段不中断。
 - 机械硬盘上并行随机读写可能更慢，建议关闭开关改用单线程。
+- 增量捕获的缓存只信任「大小 + 修改时间」：如果某个工具改了文件内容却把这两个值
+  原样保留，这次改动会被漏掉。Steam 更新、正常复制/编辑都会刷新 mtime，不受影响；
+  需要强制全量重算时，用「检查当前版本」或重新做一次完整保存。
 
 ## 与 PZ Optimization 协同
 
@@ -96,6 +111,22 @@ PZ Optimization 通过 `install.ps1` 替换游戏类文件；切换游戏版本�
 扫描/复制/差分都在后台线程执行；同一时间只允许一个版本操作。开启多线程后，
 单个操作内部再按文件并行。
 
+进度事件（`version-progress` / `mod-version-progress`）除百分比外还带 `step` / `steps`：
+一次操作被拆成「计算文件哈希 → 复制/保存变化 → 保存模组版本」这样的步骤，前端显示成
+`10% 1/3`。映射表在 `lib.rs::version_step_for`：
+
+| 操作 | 步骤 |
+| --- | --- |
+| 游戏完整保存 / 保存变化 | 1 计算哈希 → 2 复制文件 / 保存变化 → 3 保存模组版本（仅当开启「保存时同时备份模组」且有启用模组） |
+| 游戏还原 | 1 检查当前文件 → 2 还原文件（含 PZ Optimization 卸载/重装）→ 3 清理多余文件 → 4 还原关联模组版本（有大版本关联时） |
+| 模组完整保存 / 保存变化 | 1 计算哈希 → 2 复制文件 / 保存变化 |
+| 模组还原 | 1 检查 → 2 还原 → 3 清理 |
+| 校验 | 1 步，前端不显示计数 |
+
+每一步的百分比各自从 0 走到 100。模组步骤按**模组**等分：处理第 i 个模组时是 `(i-1)/N` 到 `i/N`，
+模组内部的扫描/复制只在这一小格里平滑插值（phase 统一写成 `mods`），所以进度条不会因为
+单个模组里的文件数忽高忽低，也不会退回第 1 步。
+
 ## 当前实现边界
 
 * 检查点是手动创建的；页面在增量链达到 5 层时会提示创建检查点。
@@ -115,3 +146,112 @@ node --test tests/versioningUi.test.ts tests/versionParallel.test.ts
 Rust 测试覆盖：根哈希稳定性、CDC 增量往返、完整快照 → 增量 → 检查点 → 还原、
 未知目录的强制还原门控、元数据指纹、并行扫描结果与串行一致、并行取消。
 前端测试覆盖版本展示、进度计算，以及多线程开关的默认值/持久化契约。
+
+---
+
+# 模组版本隔离（复用同一套引擎）
+
+模组版本隔离和游戏大版本共用 `versioning.rs` 的扫描 / CDC 增量 / 清单 / 还原 / 校验引擎，
+区别只在「目标根目录」和「存储分区」：每个模组目录是一条独立版本链。
+
+## 存储布局
+
+版本存储目录（设置 › 版本 › 版本存储目录）下多出一个 `mods/` 分区：
+
+```text
+<store>/
+├── base/ checkpoints/ deltas/ manifests/ trash/ tmp/ meta.json   ← 游戏大版本
+└── mods/
+    └── <key>/                                                    ← 每个模组一条链
+        ├── base/<id>/ checkpoints/<id>/ deltas/<from>__<to>/
+        ├── manifests/<id>.json  trash/  tmp/
+        └── meta.json
+```
+
+`<key>` 由 `mod_versioning::store_key` 生成：
+
+* 创意工坊模组：`workshop-<workshopId>-<modId>`；
+* 本地模组：`local-<modId>`；
+* `modId` 统一小写、只保留 `[a-z0-9._-]`，其余折成 `_` 并截断到 48 字符；
+* 拿不到可用 ID（例如目录名是中文、`mod.info` 缺失）时退化为 `<source>-<路径 SHA-256 前 8 位>`。
+
+模组 ID 稳定，Steam 库搬家后仍能找回原链；用路径哈希兜底的情况在目录改名后会变成「未记录」。
+
+## 命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `list_mod_version_targets` | 列出所有物理模组根目录 + 各自版本数/最新记录（只读 `meta.json`，不扫描文件） |
+| `get_mod_version_status` | 单个模组的完整状态：版本链、当前目录匹配情况、待捕获变化 |
+| `start_mod_version_snapshot` | 为该模组创建完整快照（没有历史时用） |
+| `start_mod_version_capture` | 记录增量版本 |
+| `start_mod_version_restore` | 还原到指定版本（先要求游戏关闭） |
+| `start_mod_version_verify` | 根哈希校验，额外推送 `mod-version-verified` |
+| `delete_mod_version` | 删除该模组的最新版本 |
+
+进度走独立事件 `mod-version-progress`，payload 在游戏事件基础上多 `rootKey` / `rootPath`；
+互斥仍共用 `VERSION_OPERATION_ACTIVE`，所以游戏大版本与模组版本操作不会并发。
+
+## 整合包（一键保存全部模组）
+
+设置 › 版本 › 模组版本 的「一键保存全部模组」把**当前所有物理模组根目录**各记一个版本
+（第一次是完整备份，之后是增量），再把「模组键 → 版本 ID」的引用表写成一条**整合包**。
+它不是新的快照格式：每条模组版本仍在自己的链里，整合包只是某一时刻所有模组版本的集合。
+
+- 记录文件：`<版本存储目录>/modpacks.json`（`format` + `packs[]`，camelCase），
+  每条包含 `id`、`label`、`createdAt`、`mods[]`（`ModVersionRef`）。
+- 默认标签是「整合包 N」；保存时不需要关闭游戏（只读模组目录 + 写版本库）。
+- 「还原整套」要求游戏已关闭：按 `key` 找当前模组目录（找不到再退回记录的路径），
+  逐个 `restore_version(..., force = true)`，随后同步 `jar-mod-state.json`；已卸载的模组跳过。
+- 「删除」只删这条整合包记录，各模组自己的版本历史保留。
+- 进度走 `mod-version-progress`，`operation` 为 `modSaveAll` / `modRestorePack`，
+  只有一步；任务中心会显示「整合包 · 保存全部模组」或整合包标签本身。
+- 注意：第一次保存会把**所有已安装模组**（包括未启用的）各复制一份，占用空间可能很大；
+  只想保存当前在用的模组，用游戏版本的「保存时同时备份模组」即可。
+
+命令：`start_mod_version_save_all`、`start_mod_version_restore_pack`、
+`list_mod_version_packs`、`delete_mod_version_pack`。
+
+## 游戏大版本关联模组
+
+* 设置 › 版本 › 游戏版本里「捕获时包含模组」默认开启（`version_include_mods`）。
+* 创建/捕获游戏大版本成功后，对**当前已启用**的模组（`default.txt` 里的 Lua ID +
+  `jar-mod-state.json` 里未禁用的 JAR 模组）逐个记录版本：没有历史时建基准，否则记增量；
+  内容没变化时直接引用当前链头。进度阶段为 `mods`。
+* 结果以 `ModVersionRef`（`key/modId/name/source/workshopId/versionId/rootPath`）写进该游戏版本的
+  `VersionRecord.modVersions`；模组自己的链里该字段为空。
+* 还原游戏大版本时，`restore_associated_mod_versions` 按 `key` 找当前模组目录（找不到再用记录路径），
+  `force = true` 逐个还原并同步 `jar-mod-state.json`；模组已卸载的跳过并在结果里注明。
+* 删除游戏版本不会删除模组链；两条链各自独立。
+
+## 还原模组后的 `jar-mod-state.json`
+
+模组目录里存在 `mod.info` ⇔ 启用。还原后 `reconcile_jar_state_for_root` 会把状态文件里的
+`disabled` 对齐到磁盘实际状态，否则下次打开模组页时 `apply_jar_mod_file_state` 会把
+`mod.info` 又改名回 `mod.info.disabled`，看起来像还原没生效。
+
+## C 盘备份提醒
+
+设置 › 版本的所有操作（游戏版本 / 单个模组 / 整合包）在开始前都会检查实际使用的版本
+存储目录（`get_version_store_path`）。目录在 C 盘时弹出换盘提醒：
+
+* 弹窗提供「去换盘」「仍要继续」两个出口，以及「不再弹出该提示」复选框。
+* 勾选后写进应用设置 `version_system_drive_notice_dismissed`，之后不再拦截操作。
+* 「备份保存位置」分区在 C 盘时仍保留一条常驻警告，并提供「重新开启换盘提示」。
+* 只有 `C:` 开头（不区分大小写）算系统盘；其它盘符和 UNC 路径都不触发。
+
+## 边界
+
+* 只记录文件内容；启用顺序/开关仍由「模组预设」负责。
+* 记录/校验是只读操作，可以在游戏运行时进行；还原要求游戏已关闭。
+* 创意工坊目录可能被 Steam 校验或更新再次覆盖，这是「回滚被更新换掉的模组」的预期行为。
+* 删除模组/退订不会删除对应版本库；暂不提供孤立版本库清理。
+* 模组列表按物理目录去重（本地副本与工坊副本各有一条链），而模组管理页按模组 ID 合并显示。
+
+## 测试
+
+```powershell
+cd src-tauri; cargo test --lib mod_versioning::
+cd src-tauri; cargo test --lib versioning::tests::attaches_mod_version_references_to_a_game_version
+node --test tests/modVersionUi.test.ts tests/versioningUi.test.ts
+```

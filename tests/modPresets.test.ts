@@ -56,6 +56,11 @@ test("settings sub-pages scroll inside their own content area", () => {
   assert.match(cssSource, /\.pz-settings-center > \.pz-resource-center-main\s*\{[^}]*overflow-y:\s*auto;/s);
   assert.match(cssSource, /\.pz-settings-center > \.pz-resource-center-main\s*\{\s*overflow-y:\s*visible;\s*\}/);
   assert.match(appSource, /<Box className="pz-resource-center pz-settings-center">/);
+  // 面板不能被 flex 压到窗口高度，否则滚到底时底边距会消失。
+  assert.match(
+    cssSource,
+    /\.pz-settings-center > \.pz-resource-center-main > \.pz-panel\s*\{[^}]*flex:\s*0 0 auto;/s,
+  );
 });
 
 test("mod management sidebar scrolls its filter and preset list on desktop", () => {

@@ -9,6 +9,15 @@ const css = readFileSync(
   "utf8",
 ).replace(/\/\*[\s\S]*?\*\//g, "");
 
+test("vertical scrollbar hugs the container edge", () => {
+  const block = css.match(/\*::\-webkit\-scrollbar\-thumb:vertical\s*\{([^}]*)\}/);
+  assert.ok(block, "缺少纵向滚动条滑块规则");
+  // 不再留左右透明边，铺满轨道并贴住右缘；右侧不做圆角。
+  assert.match(block[1], /border:\s*0;/);
+  assert.match(block[1], /border-radius:\s*var\(--pz-radius-pill\) 0 0 var\(--pz-radius-pill\);/);
+  assert.match(block[1], /background-clip:\s*border-box;/);
+});
+
 test("defines a shared custom scrollbar theme", () => {
   // 不能设 scrollbar-width / scrollbar-color：Chromium 一旦看到这两个标准属性，
   // 就会忽略 ::-webkit-scrollbar*、改用原生主题滚动条，而原生滚动条两端带上下箭头。
