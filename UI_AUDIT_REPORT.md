@@ -1,5 +1,9 @@
 # PZManager 前端 UI 缺陷审查报告
 
+> **历史文档**：审查时间为 2026-10-21，部分条目已修复，部分规范数值已调整。
+> 当前设计语言的唯一规范来源是 [docs/ui-style-guide.md](docs/ui-style-guide.md)；
+> 本文只作为问题线索保留，不作为验收或新代码的设计依据。
+
 - **审查日期**：2026-10-21
 - **审查对象**：`src/App.tsx`（7,826 行）、`src/App.css`（3,662 行）、`index.html`、`src-tauri/tauri.conf.json`、`public/`
 - **判定基准**：`docs/ui-style-guide.md`（项目自有界面规范）、`PROJECT_OVERVIEW.md`、WCAG 2.1 AA

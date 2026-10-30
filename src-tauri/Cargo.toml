@@ -47,6 +47,8 @@ tokio = { version = "1", features = ["time"] }
 java-class-rs = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 sha2 = "0.10"
+# 版本隔离的文件复制用 rayon 的有界线程池（按磁盘/核心数开 1–16 个 worker）。
+rayon = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [features]

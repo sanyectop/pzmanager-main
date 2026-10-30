@@ -38,9 +38,9 @@ test("restore uninstalls PZ Optimization before switching and reinstalls after",
 });
 
 test("version page documents PZ Optimization handling and refreshes detection", () => {
-  assert.match(appSource, /PZ Optimization：还原前会先卸载/);
-  assert.match(appSource, /已安装 PZ Optimization 时，还原会先卸载/);
+  assert.match(appSource, /PZ Optimization 的话，还原前会自动卸载/);
+  assert.match(appSource, /装了 PZ Optimization 时，还原前会自动卸载/);
   assert.match(appSource, /update\.operation === "restore"/);
   assert.match(appSource, /refreshDetection\(\)/);
-  assert.match(versioningTsSource, /pzopt: "处理 PZ Optimization"/);
+  assert.match(versioningTsSource, /pzopt: "正在处理 PZ Optimization"/);
 });

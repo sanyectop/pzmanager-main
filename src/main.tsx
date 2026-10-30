@@ -1,7 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { ChakraProvider, defaultSystem } from "@chakra-ui/react";
+import { ChakraProvider } from "@chakra-ui/react";
 import App from "./App";
+import { system } from "./theme";
 
 // Keep the splash up long enough for its 200ms reveal to finish, then fade it
 // out once the first app frame is on screen.
@@ -23,7 +24,7 @@ function dismissSplash() {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <ChakraProvider value={defaultSystem}>
+    <ChakraProvider value={system}>
       <App />
     </ChakraProvider>
   </React.StrictMode>,
