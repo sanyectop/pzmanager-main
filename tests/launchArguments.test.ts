@@ -4,14 +4,8 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { joinLaunchArguments } from "../src/launchArgs.ts";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
-const rustSource = readFileSync(
-  fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
+import { rustSource } from "./sourceText.ts";
 
 test("joins non-empty launch arguments with a single space", () => {
   assert.equal(

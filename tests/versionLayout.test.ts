@@ -3,10 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
 const cssSource = readFileSync(
   fileURLToPath(new URL("../src/App.css", import.meta.url)),
   "utf8",

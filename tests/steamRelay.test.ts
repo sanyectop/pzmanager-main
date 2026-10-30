@@ -8,10 +8,7 @@ import {
   previewImageFallbackUrl,
 } from "../src/steamRelay.ts";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
 
 test("rewrites whitelisted steam image hosts through the relay", () => {
   assert.equal(

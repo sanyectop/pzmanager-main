@@ -3,14 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
-const rustSource = readFileSync(
-  fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
+import { rustSource } from "./sourceText.ts";
 
 test("backend exposes force install when only install.ps1 is present", () => {
   assert.match(rustSource, /force_install_available: bool/);

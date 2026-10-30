@@ -4,10 +4,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { MIN_MEMORY_MB, defaultMemoryLimitMb } from "../src/memorySettings.ts";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
 
 test("defaults to half of physical memory rounded to whole GB", () => {
   // 用户给的实际例子:23.8 GB 物理 → 12 GB 默认。

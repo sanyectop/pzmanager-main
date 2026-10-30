@@ -3,14 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
-const backendSource = readFileSync(
-  fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
+import { rustSource as backendSource } from "./sourceText.ts";
 const modVersioningSource = readFileSync(
   fileURLToPath(new URL("../src-tauri/src/mod_versioning.rs", import.meta.url)),
   "utf8",

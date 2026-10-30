@@ -3,18 +3,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const appSource = readFileSync(
-  fileURLToPath(new URL("../src/App.tsx", import.meta.url)),
-  "utf8",
-);
+import { appSource } from "./sourceText.ts";
 const cssSource = readFileSync(
   fileURLToPath(new URL("../src/App.css", import.meta.url)),
   "utf8",
 );
-const rustSource = readFileSync(
-  fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)),
-  "utf8",
-);
+import { rustSource } from "./sourceText.ts";
 
 /** 注释里会写历史值，比较前先去掉。 */
 const cssCode = cssSource.replace(/\/\*[\s\S]*?\*\//g, "");
