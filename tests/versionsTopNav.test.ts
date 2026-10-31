@@ -25,7 +25,7 @@ test("版本 is a top-level nav page with a cube icon", () => {
   // 顶栏导航项：标签「版本」、图标 cube。
   assert.match(
     appSource,
-    /\{ value: "versions", label: "版本", icon: "cube", description: "游戏与模组版本隔离、历史版本与备份设置" \}/,
+    /\{ value: "versions", label: "游戏管理", icon: "cube", description: "游戏版本、支持库、光影包与截图管理" \}/,
   );
   assert.match(cssSource, /\.pz-side-nav-icon-cube\s*\{[\s\S]*?url\("\/icons\/cube\.svg"\)/);
   assert.ok(existsSync(cubeIconPath), "缺少 public/icons/cube.svg");

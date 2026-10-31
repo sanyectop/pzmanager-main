@@ -257,6 +257,9 @@ struct AppSettings {
     /// 「设置 › 版本」：备份位置在 C 盘时，每次操作前的换盘提醒是否已被「不再弹出」关闭。
     #[serde(default)]
     version_system_drive_notice_dismissed: bool,
+    /// 隐私协议：用户最后同意的版本号。缺失 = 从未同意过（首次启动会弹同意框）。
+    #[serde(default)]
+    privacy_consented_version: Option<String>,
 }
 
 fn default_version_parallel_enabled() -> bool {
@@ -1655,12 +1658,17 @@ fn cancel_version_operation() -> Result<(), String> {
 }
 
 #[tauri::command(async)]
-fn delete_version(version_id: String) -> Result<String, String> {
-    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
-        return Err("请等待当前版本操作完成后再删除版本。".to_string());
-    }
+fn delete_version(app: tauri::AppHandle, version_id: String) -> Result<u64, String> {
     let store_path = configured_version_store_path()?;
-    versioning::delete_version(&store_path, &version_id)
+    // 删除量可能上 GB：走后台操作上报进度（进度回调吞掉取消请求——
+    // meta 已先落盘，中途停止只会留下孤儿文件，删完为止反而更可控）。
+    spawn_version_operation(app, "delete", 1, move |progress| {
+        let mut non_cancellable = |event: versioning::ProgressEvent| {
+            let _ = progress(event);
+            Ok(())
+        };
+        versioning::delete_version_progress(&store_path, &version_id, &mut non_cancellable)
+    })
 }
 
 #[tauri::command(async)]
@@ -1820,14 +1828,22 @@ fn start_mod_version_verify(
 }
 
 #[tauri::command(async)]
-fn delete_mod_version(root_path: String, version_id: String) -> Result<String, String> {
-    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
-        return Err("请等待当前版本操作完成后再删除版本。".to_string());
-    }
+fn delete_mod_version(
+    app: tauri::AppHandle,
+    root_path: String,
+    version_id: String,
+) -> Result<u64, String> {
     let root = resolve_mod_root(&root_path)?;
     let store_base = configured_version_store_path()?;
     let store = mod_version_store(&root, &store_base)?;
-    versioning::delete_version(&store, &version_id)
+    let target = mod_operation_root(&root);
+    spawn_version_operation_with(app, "mod-version-progress", "modDelete", target, 1, move |progress| {
+        let mut non_cancellable = |event: versioning::ProgressEvent| {
+            let _ = progress(event);
+            Ok(())
+        };
+        versioning::delete_version_progress(&store, &version_id, &mut non_cancellable)
+    })
 }
 
 #[tauri::command(async)]
@@ -2715,6 +2731,8 @@ pub fn run() {
             apply_jar_mod_file_state,
             list_mod_presets,
             auto_sort_lua_mods,
+            save_privacy_consent,
+            clear_privacy_consent,
             save_mod_preset,
             apply_mod_preset,
             delete_mod_preset,

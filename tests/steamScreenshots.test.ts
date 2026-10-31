@@ -27,15 +27,21 @@ test("backend resolves the Steam screenshots directory from the logged-in user",
   assert.match(rustSource, /fn read_steam_screenshot\(name: String\)/);
 });
 
-test("update check labels a self-newer build as unknown version with a BETA tag", () => {
-  // 后端在自身版本 > 更新源版本时返回 unknownVersion（开发自编译构建）。
+test("update check labels this build as an internal DevBuild", () => {
+  // 内测构建不与公开版本号对比：界面一律标注「内测版本 DevBuild <构建号>」。
   assert.match(rustSource, /unknown_version: bool/);
   assert.match(
     rustSource,
     /unknown_version: version_is_newer\(&current_version, &latest_version\)/,
   );
-  // 前端把「已是最新版本」替换为「未知版本 + BETA 徽标」，toast 同步提示。
-  assert.match(appSource, /\{launcherUpdate\.unknownVersion \? "未知版本" : "已是最新版本"\}/);
-  assert.match(appSource, /\{launcherUpdate\.unknownVersion \? \(\s*<Badge colorPalette="purple" size="sm">BETA<\/Badge>/);
-  assert.match(appSource, /当前是未知版本（v\$\{status\.currentVersion\}），比更新源发布的还新。/);
+  assert.match(appSource, /const DEV_BUILD_INFO = \{/);
+  assert.match(appSource, /buildId: "1793461756"/);
+  assert.match(appSource, /distributor: "PZManager官方交流群"/);
+  // 检查更新结果与 toast 都使用内测标注。
+  assert.match(appSource, /内测版本 DevBuild \{DEV_BUILD_INFO\.buildId\}。/);
+  assert.match(appSource, /<Badge colorPalette="purple" size="sm">\{DEV_BUILD_INFO\.channel\}<\/Badge>/);
+  assert.match(appSource, /发行:\{DEV_BUILD_INFO\.distributor\}/);
+  assert.match(appSource, /当前是内测版本 DevBuild \$\{DEV_BUILD_INFO\.buildId\}。/);
+  // 关于页徽标同步。
+  assert.match(appSource, /<Badge colorPalette="purple" size="sm">DevBuild \{DEV_BUILD_INFO\.buildId\}<\/Badge>/);
 });

@@ -124,7 +124,7 @@ export const PZ_OPTIMIZATION_WORKSHOP_ID = "3805285544";
 
 export const navigationItems = [
   { value: "launch", label: "启动", icon: "play", description: "选择账户、调整内存并启动 Project Zomboid" },
-  { value: "versions", label: "版本", icon: "cube", description: "游戏与模组版本隔离、历史版本与备份设置" },
+  { value: "versions", label: "游戏管理", icon: "cube", description: "游戏版本、支持库、光影包与截图管理" },
   { value: "workshop", label: "资源中心", icon: "package-open", description: "浏览创意工坊与光影包下载资源" },
   { value: "mods", label: "模组管理", icon: "file-cog", description: "管理 Lua 与 JAR 模组" },
   { value: "settings", label: "设置", icon: "sliders-horizontal", description: "关于、通用、百宝箱与模组加载器等设置" },
@@ -141,3 +141,11 @@ export const newsEngineLabels: Record<string, string> = {
   mymemory: "MyMemory",
   none: "未翻译",
 };
+
+/// 内测构建身份：构建号手动指定（DevBuild <构建号>），发行渠道为官方交流群。
+/// 内测构建的检查更新不与公开版本号比较，界面一律标注「内测版本」。
+export const DEV_BUILD_INFO = {
+  buildId: "1793461756",
+  channel: "内测版本",
+  distributor: "PZManager官方交流群",
+} as const;

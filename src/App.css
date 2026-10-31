@@ -4910,3 +4910,43 @@ body {
   overflow: auto;
   border-radius: var(--pz-radius-sm);
 }
+
+/* 隐私协议同意框：启动 / 更新后强制展示，不可点遮罩关闭。 */
+.pz-privacy-overlay {
+  align-items: center;
+  background: rgba(6, 8, 12, 0.72);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 1rem;
+  position: fixed;
+}
+
+.pz-privacy-dialog {
+  width: min(640px, 100%);
+}
+
+.pz-privacy-frame-wrap {
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-sm);
+  height: 40vh;
+  overflow: hidden;
+}
+
+.pz-privacy-open-browser {
+  margin-top: 0.4rem;
+  padding-inline: 0.35rem !important;
+}
+
+.pz-privacy-frame {
+  /* 75% 缩放：用 transform 而不是 zoom——zoom 只缩放 iframe 内部内容，
+     元素自身布局盒仍是 133.34%，会被 wrap 裁掉右侧，内容看起来偏左不居中。
+     transform 从左上角缩放，视觉盒 = 布局盒 × 0.75，正好铺满 wrap。 */
+  background: #ffffff;
+  border: 0;
+  display: block;
+  height: 133.34%;
+  transform: scale(0.75);
+  transform-origin: 0 0;
+  width: 133.34%;
+}

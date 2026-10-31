@@ -412,6 +412,8 @@ export type AppSettings = {
   versionParallel: boolean;
   /** 「设置 › 版本 › 游戏版本」：保存游戏版本时是否同时保存已启用的模组。 */
   versionIncludeMods: boolean;
+  /** 隐私协议：用户最后同意的版本号；null = 从未同意过（首次启动弹同意框）。 */
+  privacyConsentedVersion: string | null;
   /** 「设置 › 版本」：备份在 C 盘时，操作前的换盘提示是否已勾选「不再弹出」。 */
   versionSystemDriveNoticeDismissed: boolean;
 };

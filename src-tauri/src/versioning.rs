@@ -1329,6 +1329,11 @@ fn copy_snapshot_files(
 ) -> Result<(), String> {
     let total_files = files.len() as u64;
 
+    // 快照根目录始终先建好：全部文件都在根层级（parent 为空）时，
+    // 下面的父目录收集循环不会创建它，File::create 会报「找不到路径」。
+    fs::create_dir_all(snapshot_root)
+        .map_err(|error| io_error("创建快照目录", snapshot_root, error))?;
+
     // 单线程路径：保留原来的逐文件复制行为。
     if workers <= 1 {
         let mut processed_bytes = 0u64;
@@ -2400,6 +2405,17 @@ pub fn get_status(
 }
 
 pub fn delete_version(store: &Path, version_id: &str) -> Result<String, String> {
+    delete_version_progress(store, version_id, &mut |_| Ok(()))
+}
+
+/// 删除最新的版本并按文件粒度上报进度（phase = "deleting"）。
+/// 先落盘新的 meta 再删文件：即使删文件中途失败，也只是留下孤儿文件，
+/// 不会出现「meta 里还有版本、manifest 已经被删掉」的不可还原状态。
+pub fn delete_version_progress(
+    store: &Path,
+    version_id: &str,
+    progress: Progress,
+) -> Result<String, String> {
     let mut meta = load_meta(store)?;
     let Some(index) = meta
         .versions
@@ -2413,8 +2429,6 @@ pub fn delete_version(store: &Path, version_id: &str) -> Result<String, String> 
     }
 
     let record = meta.versions.pop().expect("index checked above");
-    // 先落盘新的 meta，再删文件：即使删文件中途失败，也只是留下孤儿文件，
-    // 不会出现「meta 里还有版本、manifest 已经被删掉」的不可还原状态。
     meta.active_version_id = meta.versions.last().map(|record| record.id.clone());
     meta.last_seen_build_id = meta
         .versions
@@ -2422,16 +2436,73 @@ pub fn delete_version(store: &Path, version_id: &str) -> Result<String, String> 
         .and_then(|record| record.steam_build_id.clone());
     save_meta(store, &meta)?;
 
-    remove_if_exists(&manifest_path(store, &record.id));
+    // 收集要删的文件（含大小），按文件粒度删除并上报进度。
+    let mut targets: Vec<PathBuf> = vec![manifest_path(store, &record.id)];
     if record.is_full() {
-        remove_if_exists(&full_snapshot_root(store, &record));
+        targets.push(full_snapshot_root(store, &record));
     }
     if let Some(parent_id) = &record.parent_id {
-        remove_if_exists(&store.join(DELTA_DIR).join(format!("{parent_id}__{}", record.id)));
+        targets.push(store.join(DELTA_DIR).join(format!("{parent_id}__{}", record.id)));
     }
-    remove_if_exists(&store.join(TMP_DIR).join(&record.id));
+    targets.push(store.join(TMP_DIR).join(&record.id));
+
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    for target in &targets {
+        collect_deletion_files(target, &mut files, &mut total_bytes);
+    }
+    let total = files.len() as u64;
+    let mut processed: u64 = 0;
+    let mut processed_bytes: u64 = 0;
+    // 文件很多时逐个发事件太密：按 1% 或 64 个文件至少发一次。
+    let report_every = (total / 100).clamp(1, 64);
+    for (file, size) in &files {
+        let _ = fs::remove_file(file);
+        processed += 1;
+        processed_bytes += size;
+        if processed % report_every == 0 || processed == total {
+            progress(ProgressEvent {
+                phase: "deleting".to_string(),
+                processed_files: processed,
+                total_files: total,
+                processed_bytes,
+                total_bytes,
+                current_path: Some(file.to_string_lossy().into_owned()),
+            })?;
+        }
+    }
+    // 剩下的空目录自顶向下删掉。
+    for target in &targets {
+        remove_if_exists(target);
+    }
 
     Ok(format!("已删除版本「{}」。", record.label))
+}
+
+/// 递归收集目录下的普通文件与总大小；文件直接删除时按路径列出。
+fn collect_deletion_files(path: &Path, files: &mut Vec<(PathBuf, u64)>, total_bytes: &mut u64) {
+    if !path.exists() {
+        return;
+    }
+    if path.is_file() {
+        let size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        files.push((path.to_path_buf(), size));
+        *total_bytes += size;
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            collect_deletion_files(&child, files, total_bytes);
+        } else if child.is_file() {
+            let size = fs::metadata(&child).map(|meta| meta.len()).unwrap_or(0);
+            files.push((child, size));
+            *total_bytes += size;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2878,5 +2949,48 @@ mod tests {
         )
         .unwrap();
         assert!(empty.mod_versions.is_empty());
+    }
+
+    #[test]
+    fn delete_version_progress_reports_and_removes_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+        // 多写几个文件让删除有真实的文件数与字节量
+        write_file(&game, "ProjectZomboid64.exe", b"exe-v1");
+        for index in 0..5 {
+            write_file(&game, &format!("data{index}.bin"), &[index as u8; 512]);
+        }
+        let outcome = snapshot(&game, &store);
+        let version_id = outcome.version.as_ref().unwrap().id.clone();
+
+        let mut events: Vec<ProgressEvent> = Vec::new();
+        let message = delete_version_progress(&store, &version_id, &mut |event: ProgressEvent| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(message.contains("已删除版本"));
+        assert!(events.len() >= 2, "进度事件太少：{:?}", events.len());
+        let last = events.last().unwrap();
+        assert_eq!(last.phase, "deleting");
+        assert_eq!(last.processed_files, last.total_files);
+        assert_eq!(last.processed_bytes, last.total_bytes);
+        assert!(last.total_files >= 6, "manifest + 6 个数据文件");
+        // store 里不再有任何版本文件（meta 索引除外）
+        let mut leftovers: Vec<(PathBuf, u64)> = Vec::new();
+        let mut leftover_bytes: u64 = 0;
+        collect_deletion_files(&store, &mut leftovers, &mut leftover_bytes);
+        let leftovers: Vec<_> = leftovers
+            .into_iter()
+            .filter(|(path, _)| !path.to_string_lossy().contains("meta"))
+            .collect();
+        assert!(leftovers.is_empty(), "还有残留文件：{:?}", leftovers);
+
+        // 删除后再删同一个版本：报「版本不存在」
+        let error = delete_version_progress(&store, &version_id, &mut ignore_progress).unwrap_err();
+        assert!(error.contains("版本不存在"));
     }
 }
