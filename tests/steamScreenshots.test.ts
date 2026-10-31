@@ -45,3 +45,11 @@ test("update check labels this build as an internal DevBuild", () => {
   // 关于页徽标同步。
   assert.match(appSource, /<Badge colorPalette="purple" size="sm">DevBuild \{DEV_BUILD_INFO\.buildId\}<\/Badge>/);
 });
+
+test("about page lists the Afdian link below the project repository", () => {
+  const repoAt = appSource.indexOf("项目仓库");
+  const afdianAt = appSource.indexOf("https://ifdian.net/a/sanyee");
+  assert.ok(repoAt > 0 && afdianAt > repoAt, "爱发电应在项目仓库之后");
+  assert.match(appSource, /<Text color="gray\.800" fontSize="sm" fontWeight="700">爱发电<\/Text>/);
+  assert.match(appSource, /openUrl\("https:\/\/ifdian\.net\/a\/sanyee"\)/);
+});

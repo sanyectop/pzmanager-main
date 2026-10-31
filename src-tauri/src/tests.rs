@@ -12,7 +12,7 @@ use super::{
     mod_loader_policy_agent, mod_marker_event, mod_poster_path, mod_progress_units,
     normalize_blur_strength, normalize_font_contrast, normalize_font_family,
     normalize_font_scale, normalize_mod_loader_scheme, normalize_translation_language,
-    normalize_window_height, normalize_window_width, order_mod_ids_by_requires,
+    clamp_window_height, clamp_window_width, order_mod_ids_by_requires,
     normalize_overlay_background_color,
     parse_default_mod_ids, parse_java_mod_info, parse_lua_mod_info, parse_lua_sorting_rules,
     patch_batch_content, patch_batch_content_with_memory, patch_batch_with_agent,
@@ -176,6 +176,7 @@ fn persists_background_and_memory_settings() {
         version_parallel: true,
         version_include_mods: true,
         version_system_drive_notice_dismissed: false,
+        privacy_consented_version: None,
     };
 
     save_app_settings_at(&path, &settings).unwrap();
@@ -313,12 +314,13 @@ fn clamps_font_scale_and_validates_window_size() {
         normalize_font_family("  Consolas, monospace "),
         Some("Consolas, monospace".to_string())
     );
-    // 窗口尺寸低于下限 / 超过防御上限都不落盘。
-    assert_eq!(normalize_window_width(WINDOW_WIDTH_MIN - 1), None);
-    assert_eq!(normalize_window_width(WINDOW_WIDTH_MIN), Some(WINDOW_WIDTH_MIN));
-    assert_eq!(normalize_window_height(560), Some(560));
-    assert_eq!(normalize_window_height(559), None);
-    assert_eq!(normalize_window_width(10001), None);
+    // 窗口尺寸低于下限 / 超过防御上限时钳位保存（DPI 缩放下拖到最小尺寸附近
+    // 的逻辑尺寸可能略低于 840×560，直接拒绝会让这次调整「不被记住」）。
+    assert_eq!(clamp_window_width(WINDOW_WIDTH_MIN - 1), WINDOW_WIDTH_MIN);
+    assert_eq!(clamp_window_width(WINDOW_WIDTH_MIN), WINDOW_WIDTH_MIN);
+    assert_eq!(clamp_window_height(559), 560);
+    assert_eq!(clamp_window_height(560), 560);
+    assert_eq!(clamp_window_width(10001), 10000);
 }
 
 fn scanned_jar(id: &str, decision: Option<bool>, disabled: bool) -> ScannedJarMod {

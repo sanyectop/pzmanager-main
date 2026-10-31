@@ -2638,19 +2638,19 @@ pub fn run() {
             // 恢复上一次记住的窗口尺寸（拖动窗口边缘调整后会自动记住）。
             // 默认 840×560 由 tauri.conf.json 提供，这里只在有有效记录时覆盖。
             if let Some(settings) = loaded_settings.as_ref() {
-                let remembered_size = match (settings.window_width, settings.window_height) {
-                    (Some(width), Some(height)) => {
-                        match (normalize_window_width(width), normalize_window_height(height)) {
-                            (Some(width), Some(height)) => Some((width, height)),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some((width, height)) = remembered_size {
+                if let (Some(width), Some(height)) = (settings.window_width, settings.window_height) {
+                    let width = clamp_window_width(width);
+                    let height = clamp_window_height(height);
                     use tauri::Manager;
                     if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+                        // 恢复失败要留痕：静默的 set_size 失败会让「记住窗口尺寸」看起来完全失效。
+                        if let Err(error) = window.set_size(tauri::LogicalSize::new(width, height)) {
+                            launcher_log::error(&format!(
+                                "恢复窗口尺寸失败（{width}×{height}）：{error}"
+                            ));
+                        } else {
+                            launcher_log::info(&format!("已恢复窗口尺寸 {width}×{height}。"));
+                        }
                     }
                 }
             }

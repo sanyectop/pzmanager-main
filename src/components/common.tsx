@@ -322,7 +322,10 @@ export function HintDot({ label, text }: { label: string; text: string }) {
         </Box>
       </Tooltip.Trigger>
       <Portal>
-        <Tooltip.Positioner className="pz-menu-positioner">
+        {/* 独立定位器类：提示是纯文本，pointer-events 直接关掉——
+            顶部空间不足时 flip 会让提示压住问号，指针被提示层截走会陷入
+            「显示→隐藏→再显示」循环（问号左上角最易复现）。 */}
+        <Tooltip.Positioner className="pz-hint-positioner">
           <Tooltip.Content className="pz-hint-tooltip">{text}</Tooltip.Content>
         </Tooltip.Positioner>
       </Portal>

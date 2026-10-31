@@ -51,3 +51,18 @@ test("hint dots are 1rem circles and tooltips stay inside the window", () => {
   assert.match(tooltip, /white-space:\s*pre-line/);
   assert.match(tooltip, /overflow-wrap:\s*anywhere/);
 });
+
+test("hint tooltip never intercepts the pointer (no show/hide loop)", () => {
+  // 顶部空间不足时 flip 会让提示压住问号；提示层若截走指针会陷入显示/隐藏循环。
+  // 纯文本提示直接关闭指针事件。
+  assert.match(
+    cssSource,
+    /\.pz-hint-positioner,\s*\.pz-hint-tooltip \{\s*pointer-events: none !important;/,
+  );
+  // HintDot 的定位器不再复用下拉菜单的共享类（那个类需要响应指针）。
+  assert.match(appSource, /className="pz-hint-positioner"/);
+  assert.doesNotMatch(
+    appSource,
+    /<Tooltip\.Positioner className="pz-menu-positioner">\s*<Tooltip\.Content className="pz-hint-tooltip">/,
+  );
+});
