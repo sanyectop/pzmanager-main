@@ -7,6 +7,7 @@ use super::{
     install_locations_from_libraries, install_zombie_buddy_at_paths,
     is_builtin_background_path, jar_scan_candidates, jar_scan_inputs,
     library_paths_from_config, list_viewpoint_shaderpacks_at, list_viewpoint_shots_at,
+    steam_screenshots_directory_at,
     load_app_settings_at, merge_lua_mod_entry, mod_inner_event, mod_jar_path,
     mod_loader_policy_agent, mod_marker_event, mod_poster_path, mod_progress_units,
     normalize_blur_strength, normalize_font_contrast, normalize_font_family,
@@ -926,6 +927,19 @@ fn lists_only_supported_screenshot_files() {
 
     assert_eq!(shots.len(), 1);
     assert_eq!(shots[0].name, "first.PNG");
+}
+
+#[test]
+fn steam_screenshots_path_is_userdata_accountid_760_remote_108600() {
+    let path = steam_screenshots_directory_at(Path::new("C:/Program Files (x86)/Steam"), "1222587902");
+    let expected = Path::new("C:/Program Files (x86)/Steam")
+        .join("userdata")
+        .join("1222587902")
+        .join("760")
+        .join("remote")
+        .join("108600")
+        .join("screenshots");
+    assert_eq!(path, expected);
 }
 
 /// 诊断（默认忽略）：用启动器自己的 class 注解解析器扫描本机 workshop，

@@ -2729,6 +2729,8 @@ pub fn run() {
             overlay_session::stop_game_process,
             list_viewpoint_shots,
             read_viewpoint_shot,
+            list_steam_screenshots,
+            read_steam_screenshot,
             list_viewpoint_shaderpacks,
             import_viewpoint_shaderpack,
             delete_viewpoint_shaderpack,

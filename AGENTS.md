@@ -16,3 +16,15 @@ location outside `F:\pzm` and clean it up afterward.
 
 The project directory must contain only source, tests, documentation, build
 configuration, and intentional project outputs.
+
+## Official website (官网)
+
+The public website (https://pzm.sanyec.top) lives in this repo at `docs/promo/release-page/`:
+
+- `index.html` — landing page: top nav, hero with download buttons (GitHub Releases / 123 云盘), feature grid, footer. Shows the current release version in `.dl-note` — bump it together with `package.json` / `tauri.conf.json` on every release.
+- `docs.html` — user documentation page.
+- `pzm-logo.png` — site logo; `shots/` — launcher screenshots used by the hero.
+- `developer.png` — the author avatar (叁葉), same file as the launcher's `public/avatars/developer.png`; keep both in sync when the avatar changes.
+- Author support link: 爱发电 https://ifdian.net/a/sanyee (username 叁葉). Present in the top nav, as a `.support-strip` banner under the hero downloads, and in the footer — keep it prominent but out of the body content.
+- The Steam API relay (`steam-relay(服务端请勿上传)/server.js`, deployed separately) links back to this site and mimics its aurora style; the relay is NOT part of the website.
+- Deployment is manual (static files). Local preview: open `index.html` directly in a browser.

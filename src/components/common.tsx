@@ -246,7 +246,15 @@ export function MediaPanel({
   );
 }
 
-export function ShotThumbnail({ name }: { name: string }) {
+/** 截图来源：Viewpoint 启动器截图，或 Steam 云端截图（userdata/<账号>/760/remote/108600）。 */
+export type ShotsSource = "viewpoint" | "steam";
+
+const SHOTS_READ_COMMAND: Record<ShotsSource, string> = {
+  viewpoint: "read_viewpoint_shot",
+  steam: "read_steam_screenshot",
+};
+
+export function ShotThumbnail({ name, source = "viewpoint" }: { name: string; source?: ShotsSource }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -254,7 +262,7 @@ export function ShotThumbnail({ name }: { name: string }) {
     let active = true;
     let objectUrl: string | null = null;
 
-    invoke<ArrayBuffer>("read_viewpoint_shot", { name })
+    invoke<ArrayBuffer>(SHOTS_READ_COMMAND[source], { name })
       .then((bytes) => {
         if (!active) {
           return;
@@ -274,7 +282,7 @@ export function ShotThumbnail({ name }: { name: string }) {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [name]);
+  }, [name, source]);
 
   return (
     <Box

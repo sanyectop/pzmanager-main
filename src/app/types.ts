@@ -198,6 +198,8 @@ export type LauncherUpdateStatus = {
   currentVersion: string;
   latestVersion: string;
   updateAvailable: boolean;
+  /** 自身版本比更新源还新（未发布的开发构建）：标注为「未知版本 + BETA」。 */
+  unknownVersion: boolean;
   pubDate: string | null;
   notes: string | null;
   /** 「下载更新」按钮地址:后端已做 123 云盘 → GitHub 安装包 → 便携版回落。 */

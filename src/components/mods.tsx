@@ -223,25 +223,28 @@ export function ModBatchBar({
   return (
     <HStack className="pz-mod-batch-bar" gap="1" wrap="wrap">
       <Text className="pz-mod-batch-count">已选 {selectedCount} / {totalCount}</Text>
-      <Menu.Root>
-        <Menu.Trigger asChild>
-          <Button disabled={busy || totalCount === 0} size="xs" variant="ghost">
-            选择操作
-          </Button>
-        </Menu.Trigger>
-        <Menu.Positioner className="pz-menu-positioner">
-          <Menu.Content className="pz-workshop-tag-menu-content" minW="150px">
-            {onAutoSort ? (
-              <Menu.Item disabled={busyAction === "sort"} onSelect={onAutoSort} value="auto-sort">
-                自动排序加载顺序
-              </Menu.Item>
-            ) : null}
-            <Menu.Item onSelect={onSelectAll} value="select-all">全选当前列表</Menu.Item>
-            <Menu.Item onSelect={onInvert} value="invert">反选当前列表</Menu.Item>
-            <Menu.Item disabled={selectedCount === 0} onSelect={onClear} value="clear">取消选择</Menu.Item>
-          </Menu.Content>
-        </Menu.Positioner>
-      </Menu.Root>
+      {/* 选择操作平铺到栏内：不再收进下拉菜单。 */}
+      <Button disabled={busy || totalCount === 0} onClick={onSelectAll} size="xs" variant="ghost">
+        全选
+      </Button>
+      <Button disabled={busy || totalCount === 0} onClick={onInvert} size="xs" variant="ghost">
+        反选
+      </Button>
+      <Button disabled={busy || selectedCount === 0} onClick={onClear} size="xs" variant="ghost">
+        取消选择
+      </Button>
+      {onAutoSort ? (
+        <Button
+          disabled={busyAction === "sort"}
+          loading={busyAction === "sort"}
+          onClick={onAutoSort}
+          size="xs"
+          variant="ghost"
+          title="按依赖与分类重排所有已启用模组的加载顺序"
+        >
+          自动排序
+        </Button>
+      ) : null}
       <Box className="pz-mod-batch-spacer" />
       <Button
         colorPalette="green"

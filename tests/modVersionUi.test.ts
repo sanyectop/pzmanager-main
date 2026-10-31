@@ -262,10 +262,10 @@ test("support / shaderpacks / shots are folded into the versions page", () => {
   assert.doesNotMatch(appSource, /value: "overview", label: "支持库"/);
   assert.doesNotMatch(appSource, /value: "shots", label: "截图管理"/);
   assert.doesNotMatch(appSource, /value: "shaderpacks", label: "光影管理"/);
-  // 旧入口统一重定向到版本页对应分区。
+  // 旧入口统一重定向到版本页对应分区（走 switchVersionTab，顺带记录切换方向）。
   assert.match(
     appSource,
-    /if \(nextPage === "overview" \|\| nextPage === "shots" \|\| nextPage === "shaderpacks"\) \{\s*setVersionTab\(nextPage === "overview" \? "support" : nextPage\);\s*nextPage = "versions";/,
+    /if \(nextPage === "overview" \|\| nextPage === "shots" \|\| nextPage === "shaderpacks"\) \{\s*switchVersionTab\(nextPage === "overview" \? "support" : nextPage\);\s*nextPage = "versions";/,
   );
   // 光影包拖放同时接受「版本 › 光影包」视图。
   assert.match(appSource, /activePage === "versions" && versionTab === "shaderpacks"/);
@@ -273,5 +273,54 @@ test("support / shaderpacks / shots are folded into the versions page", () => {
   assert.match(
     appSource,
     /if \(versionTab === "support" \|\| versionTab === "shaderpacks" \|\| versionTab === "shots"\) \{\s*return;\s*\}/,
+  );
+});
+
+test("version sections replay a directional slide when switching", () => {
+  // 侧栏点击走 switchVersionTab：按分区顺序判断前进/后退。
+  assert.match(appSource, /function switchVersionTab\(nextTab: VersionTab\)/);
+  assert.match(
+    appSource,
+    /const order: VersionTab\[\] = \["game", "mods", "history", "support", "shaderpacks", "shots"\];/,
+  );
+  assert.match(appSource, /onClick=\{\(\) => switchVersionTab\(section\.value\)\}/);
+  assert.match(appSource, /const \[versionTransitionDirection, setVersionTransitionDirection\]/);
+  // 内容容器重挂 + 方向标记，CSS 据此播放滑入动画。
+  assert.match(appSource, /className="pz-version-hub-main"\s*\n\s*data-direction=\{versionTransitionDirection\}\s*\n\s*key=\{versionTab\}/);
+  assert.match(
+    cssSource,
+    /\.pz-version-hub-main > \* \{\s*animation: pz-page-content-in-from-right var\(--pz-dur-base\) var\(--pz-ease-page-slide\) both;/,
+  );
+  assert.match(
+    cssSource,
+    /\.pz-version-hub-main\[data-direction="backward"\] > \* \{\s*animation-name: pz-page-content-in-from-left;/,
+  );
+});
+
+test("当前状态 sits directly under the 游戏版本 title", () => {
+  const gameStart = appSource.indexOf("const gameVersionSettingsContent");
+  const statusCarrier = appSource.indexOf("const versionCurrentStatusContent");
+  assert.ok(statusCarrier > 0, "缺少抽出的当前状态块");
+  const statusUsage = appSource.indexOf("{versionCurrentStatusContent}");
+  const gameInfo = appSource.indexOf("游戏信息", gameStart);
+  assert.ok(statusUsage > gameStart && statusUsage < gameInfo, "当前状态应在标题后、游戏信息前");
+  assert.match(cssSource, /\.pz-version-status-block \{\s*margin-top: 0\.7rem;\s*padding-top: 0;\s*border-top: 0;/);
+});
+
+test("shot preview uses the acrylic dialog recipe at a compact size", () => {
+  // 不再用旧版 pz-modal 白底大弹窗：迁移到亚克力配方（Portal + 进出场动画）。
+  assert.doesNotMatch(appSource, /className="pz-modal-overlay"/);
+  assert.doesNotMatch(appSource, /className="pz-modal"/);
+  assert.match(appSource, /className=\{`pz-resource-file-overlay \$\{previewClosing \? "is-closing" : ""\}`\}/);
+  assert.match(appSource, /className="pz-resource-file-dialog pz-shot-preview-dialog"/);
+  // 预览图限高 52vh、弹窗宽度收窄到 560px。
+  assert.match(appSource, /maxHeight: "52vh"/);
+  assert.match(cssSource, /\.pz-shot-preview-dialog \{\s*width: min\(560px, 100%\);/);
+  // 关闭走退场动画：先置 closing，180ms 后才释放 URL 并卸载。
+  assert.match(appSource, /function closeShotPreview\(\) \{/);
+  assert.match(appSource, /setPreviewClosing\(true\)/);
+  assert.match(
+    appSource,
+    /previewCloseTimerRef\.current = window\.setTimeout\(\(\) => \{[\s\S]{0,400}?URL\.revokeObjectURL\(current\.url\);[\s\S]{0,200}?setPreviewClosing\(false\);/,
   );
 });
