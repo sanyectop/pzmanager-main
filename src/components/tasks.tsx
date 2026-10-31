@@ -81,16 +81,22 @@ export function NotificationConsole({
 export function TaskCenterPanel({
   tasks,
   closingTaskIds,
+  closing,
   onClose,
   onClearFinished,
+  onInterruptVersion,
   onRemove,
   onRetry,
 }: {
   tasks: TaskItem[];
   /** 正在播放移除动画的任务 id：动画结束前仍留在列表里。 */
   closingTaskIds: string[];
+  /** 整个面板正在播放关闭动画：结束后由上层卸载。 */
+  closing?: boolean;
   onClose: () => void;
   onClearFinished: () => void;
+  /** 版本操作（保存/还原/整合包等）进行中的中断入口；不传则不显示按钮。 */
+  onInterruptVersion?: () => void;
   onRemove: (id: string) => void;
   onRetry: (task: TaskItem) => void;
 }) {
@@ -103,7 +109,11 @@ export function TaskCenterPanel({
   });
 
   return (
-    <Box aria-label="任务中心" className="pz-task-panel" role="dialog">
+    <Box
+      aria-label="任务中心"
+      className={`pz-task-panel${closing ? " is-closing" : ""}`}
+      role="dialog"
+    >
       <HStack align="start" gap="3" justify="space-between" wrap="wrap">
         <Box flex="1" minW="180px">
           <Text color="gray.900" fontSize="md" fontWeight="700">任务中心</Text>
@@ -213,6 +223,9 @@ export function TaskCenterPanel({
                     <HStack gap="1">
                       {task.kind === "shader-download" && task.status === "error" && (
                         <Button onClick={() => onRetry(task)} size="xs" variant="outline">重试</Button>
+                      )}
+                      {task.kind === "version-operation" && task.status === "running" && onInterruptVersion && (
+                        <Button onClick={onInterruptVersion} size="xs" variant="outline">中断</Button>
                       )}
                       {task.status !== "running" && (
                         <Button disabled={closing} onClick={() => onRemove(task.id)} size="xs" variant="ghost">移除</Button>

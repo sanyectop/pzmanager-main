@@ -21,7 +21,7 @@ import {
   WorkshopMenuOption,
   WorkshopTagMode,
 } from "../app/types";
-import { EmptyState } from "./common";
+import { EmptyState, SkeletonGate, SkeletonList } from "./common";
 import { FallbackImage } from "../FallbackImage";
 import { RESOURCE_DIALOG_EXIT_MS, initialShaderDownloadFilters } from "../app/constants";
 import { invoke } from "@tauri-apps/api/core";
@@ -401,7 +401,7 @@ export function ResourceDownloadBrowser({
               onChange={(value) => updateFilters({ selectedTag: value })}
               options={tagOptions}
               value={filters.selectedTag}
-              width={{ base: "96px", md: "112px" }}
+              width={{ base: "92px", md: "100px" }}
             />
           </HStack>
           <HStack gap="2">
@@ -411,7 +411,7 @@ export function ResourceDownloadBrowser({
               onChange={(value) => updateFilters({ gameVersion: value })}
               options={versions.map((version) => ({ value: version.value, label: version.label }))}
               value={filters.gameVersion}
-              width={{ base: "104px", md: "128px" }}
+              width={{ base: "76px", md: "80px" }}
             />
           </HStack>
           <HStack gap="2">
@@ -427,7 +427,7 @@ export function ResourceDownloadBrowser({
               }
               options={sourceOptions}
               value={filters.downloadSource}
-              width={{ base: "120px", md: "145px" }}
+              width={{ base: "116px", md: "124px" }}
             />
           </HStack>
           <HStack gap="2">
@@ -437,7 +437,7 @@ export function ResourceDownloadBrowser({
               onChange={(value) => updateFilters({ sortBy: value })}
               options={sortOptions}
               value={filters.sortBy}
-              width={{ base: "100px", md: "124px" }}
+              width={{ base: "92px", md: "100px" }}
             />
           </HStack>
         </HStack>
@@ -468,9 +468,11 @@ export function ResourceDownloadBrowser({
         </HStack>
 
         <Box className="pz-resource-download-list">
-          {loading && !response ? (
-            <Text color="gray.500" py="6" textAlign="center">正在读取 Minecraft 光影源...</Text>
-          ) : response && response.items.length > 0 ? (
+          <SkeletonGate
+            loading={loading && !response}
+            skeleton={<SkeletonList rows={6} thumb="icon" />}
+          >
+          {response && response.items.length > 0 ? (
             response.items.map((resource) => (
               <Box
                 className="pz-resource-download-item"
@@ -511,6 +513,7 @@ export function ResourceDownloadBrowser({
           ) : (
             <EmptyState text="没有匹配的光影包。" />
           )}
+          </SkeletonGate>
         </Box>
 
         {response && Math.ceil(response.total / response.pageSize) > 1 && (
@@ -560,9 +563,8 @@ export function ResourceDownloadBrowser({
                 <Button aria-label="关闭文件列表" onClick={closeResourceDialog} size="sm" variant="ghost">×</Button>
               </HStack>
               <Box className="pz-resource-file-list">
-                {loadingFiles ? (
-                  <Text color="gray.500" py="5" textAlign="center">正在读取版本文件...</Text>
-                ) : versionPacks.length > 0 ? (
+                <SkeletonGate loading={loadingFiles} skeleton={<SkeletonList rows={4} />}>
+                {versionPacks.length > 0 ? (
                   versionPacks.flatMap((pack) => pack.items).map((file) => (
                     <HStack className="pz-resource-file-row" key={`${file.fileName}-${file.fileDate}`} justify="space-between" gap="3">
                       <Box minW="0">
@@ -587,6 +589,7 @@ export function ResourceDownloadBrowser({
                 ) : (
                   <Text color="gray.500" py="5" textAlign="center">没有可用下载文件。</Text>
                 )}
+                </SkeletonGate>
               </Box>
             </Box>
           </Box>

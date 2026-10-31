@@ -196,6 +196,7 @@ export function SleepingModRow({
 export function ModBatchBar({
   busyAction,
   negativeLabel,
+  onAutoSort,
   onClear,
   onInvert,
   onNegative,
@@ -205,8 +206,10 @@ export function ModBatchBar({
   selectedCount,
   totalCount,
 }: {
-  busyAction: "positive" | "negative" | null;
+  busyAction: "positive" | "negative" | "sort" | null;
   negativeLabel: string;
+  /** 自动排序（只对 Lua 模组页提供）：对全部已启用模组重排加载顺序。 */
+  onAutoSort?: () => void;
   onClear: () => void;
   onInvert: () => void;
   onNegative: () => void;
@@ -228,6 +231,11 @@ export function ModBatchBar({
         </Menu.Trigger>
         <Menu.Positioner className="pz-menu-positioner">
           <Menu.Content className="pz-workshop-tag-menu-content" minW="150px">
+            {onAutoSort ? (
+              <Menu.Item disabled={busyAction === "sort"} onSelect={onAutoSort} value="auto-sort">
+                自动排序加载顺序
+              </Menu.Item>
+            ) : null}
             <Menu.Item onSelect={onSelectAll} value="select-all">全选当前列表</Menu.Item>
             <Menu.Item onSelect={onInvert} value="invert">反选当前列表</Menu.Item>
             <Menu.Item disabled={selectedCount === 0} onSelect={onClear} value="clear">取消选择</Menu.Item>

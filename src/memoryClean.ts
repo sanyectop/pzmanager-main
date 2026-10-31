@@ -8,8 +8,8 @@
  * 最大下降量当成"已清理"多少 MB。
  */
 
-/** 采样间隔：够密，又不至于让 IPC 变成常态开销。 */
-export const MEMORY_CLEAN_POLL_MS = 200;
+/** 采样间隔：每秒检测一次内存占用；完成判定靠「先降后升」，回升即清理完成。 */
+export const MEMORY_CLEAN_POLL_MS = 1000;
 /** 一直没看到内存下降时的观察窗口：过了这段时间就认为这次没什么可清。 */
 export const MEMORY_CLEAN_NO_DECREASE_GRACE_MS = 2500;
 /** 内存停止下降后的观察窗口：等它回升；一直不回升（保持平稳）也按完成处理。 */

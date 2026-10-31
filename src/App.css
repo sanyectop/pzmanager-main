@@ -290,14 +290,13 @@ body {
 }
 
 *::-webkit-scrollbar-track {
-  border-radius: var(--pz-radius-pill);
   background: var(--pz-fill-glass-soft);
 }
 
 *::-webkit-scrollbar-thumb {
   min-height: 28px;
   border: 2px solid transparent;
-  border-radius: var(--pz-radius-pill);
+  border-radius: 0;
   background: var(--pz-scroll-thumb);
   background-clip: padding-box;
 }
@@ -313,10 +312,10 @@ body {
 }
 
 /* 纵向滚动条完全贴住容器右缘：去掉左右各 2px 的透明边，滑块铺满 8px 轨道；
-   右侧不做圆角，左侧保留胶囊形。横向滚动条维持原来的内缩样式。 */
+   纵横向都是矩形，不做圆角。 */
 *::-webkit-scrollbar-thumb:vertical {
   border: 0;
-  border-radius: var(--pz-radius-pill) 0 0 var(--pz-radius-pill);
+  border-radius: 0;
   background-clip: border-box;
 }
 
@@ -553,6 +552,7 @@ body {
    且排在后面，所以悬停和选中态照常生效。 */
 .pz-side-nav-item:not(.pz-side-nav-item-active),
 .pz-resource-center-sidebar-item:not(.pz-resource-center-sidebar-item-active),
+.pz-version-hub-item:not(.is-active),
 .pz-version-tab:not(.pz-version-tab-active),
 .pz-version-filter:not(.is-active) {
   background: transparent !important;
@@ -687,6 +687,9 @@ body {
 
 .pz-app-content-resource-center {
   overflow: hidden;
+  /* 资源中心由内部 .pz-resource-center-main 自己滚动；外层再留 stable gutter
+     会在滚动条和面板右缘之间空出 8px 条，所以这里不预留。 */
+  scrollbar-gutter: auto;
 }
 
 .pz-app-content-resource-center > .chakra-stack {
@@ -857,6 +860,11 @@ body {
 .pz-side-nav-icon-package-open {
   mask-image: url("/icons/package-open.svg");
   -webkit-mask-image: url("/icons/package-open.svg");
+}
+
+.pz-side-nav-icon-cube {
+  mask-image: url("/icons/cube.svg");
+  -webkit-mask-image: url("/icons/cube.svg");
 }
 
 .pz-side-nav-icon-file-cog {
@@ -1613,6 +1621,11 @@ body {
 
 .pz-memory-slider [data-part="range"] {
   background: var(--pz-accent);
+  /* 档位吸附不瞬移：zag 改的是 root 上的 --slider-range-start/end 变量，
+     过渡写在消费变量的 left/right 上才能产生动画。 */
+  transition:
+    left var(--pz-dur-fast) var(--pz-ease-out),
+    right var(--pz-dur-fast) var(--pz-ease-out);
 }
 
 .pz-memory-slider [data-part="thumb"] {
@@ -1622,6 +1635,15 @@ body {
   border-radius: var(--pz-radius-pill);
   background: var(--pz-accent-strong);
   box-shadow: var(--pz-shadow-thumb);
+  /* 同上：--slider-thumb-offset-0 变化时让 inset-inline-start 平滑跟随。 */
+  transition: inset-inline-start var(--pz-dur-fast) var(--pz-ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-memory-slider [data-part="range"],
+  .pz-memory-slider [data-part="thumb"] {
+    transition: none;
+  }
 }
 
 .pz-memory-recommendations {
@@ -2127,6 +2149,22 @@ body {
   overscroll-behavior: contain;
 }
 
+/* 设置内分页切换（App.tsx 里 key=settingsPage 强制重挂正文）：沿用主页面切换的
+   方向性滑入关键帧，方向由容器上的 data-direction 决定。 */
+.pz-settings-center > .pz-resource-center-main > .pz-panel {
+  animation: pz-page-content-in-from-right var(--pz-dur-base) var(--pz-ease-page-slide) both;
+}
+
+.pz-settings-center > .pz-resource-center-main[data-direction="backward"] > .pz-panel {
+  animation-name: pz-page-content-in-from-left;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-settings-center > .pz-resource-center-main > .pz-panel {
+    animation: none;
+  }
+}
+
 .pz-general-settings-panel {
   max-width: 52rem;
 }
@@ -2174,14 +2212,16 @@ body {
   border-top: 1px solid var(--pz-line);
 }
 
-/* 「设置 › 版本」：版本列表比较宽，留出比通用页更大的阅读宽度。
-   和其它设置子页一样平铺在页面上——不再给整页套浮层卡面（底色 / 圆角 /
-   阴影 / 背景模糊 / 噪点都去掉），内容由分区标题和细分割线组织。 */
+/* 顶栏「版本」页：版本列表比较宽，留出比通用设置更大的阅读宽度并居中。
+   沿用设置页的平铺排版——不套浮层卡面（底色 / 圆角 / 阴影 / 背景模糊 / 噪点
+   都去掉），内容由分区标题和细分割线组织。 */
 .pz-version-settings-panel {
+  width: 100%;
   max-width: 64rem;
+  margin-inline: auto;
 }
 
-/* 「设置 › 版本」正文不套卡片：分区之间只用一条细分割线，信息按行排列，
+/* 版本页正文不套卡片：分区之间只用一条细分割线，信息按行排列，
    和「设置 › 通用」那种纯设置页排版保持一致。 */
 .pz-version-section {
   margin-top: 1.15rem;
@@ -2621,9 +2661,12 @@ body {
   flex: 1 1 auto;
 }
 
-/* 光影下载列表自己滚动。 */
+/* 光影下载列表自己滚动。右侧抵消正文 1rem 内边距再用同宽内边距补回，
+   让 8px 滚动条贴住面板右缘，行内容位置不变。 */
 .pz-resource-download-list {
   margin-top: 0.5rem;
+  margin-right: -1rem;
+  padding-right: 1rem;
   border-top: 1px solid var(--pz-line);
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -2713,6 +2756,12 @@ body {
 .pz-resource-center-main .pz-resource-filter-row > .chakra-stack,
 .pz-resource-center-main .pz-workshop-filter-row > .chakra-stack {
   gap: 0.3rem !important;
+}
+
+/* 光影包下载筛选行有四个筛选块，块间距比其他筛选行再紧一点，
+   保证 840px 最小窗口下也能排成单行（下拉宽度见 ResourceDownloadBrowser）。 */
+.pz-resource-center-main .pz-resource-filter-row {
+  column-gap: 0.3rem !important;
 }
 
 .pz-resource-center-main .pz-resource-search-row,
@@ -3179,7 +3228,7 @@ body {
   color: var(--pz-accent-strong) !important;
 }
 
-/* 按钮里的自绘箭头：向上再向右折（↱），15px 见方，随按钮文字颜色。 */
+/* 按钮里的自绘箭头：斜向右上（↗），15px 见方，随按钮文字颜色。 */
 .pz-workshop-share-icon {
   display: block;
   width: 0.95rem;
@@ -3489,6 +3538,8 @@ body {
     height: auto;
     max-height: calc(100vh - var(--pz-titlebar-height));
     overflow-y: auto;
+    /* 这里外层自己滚动，恢复 gutter 避免滚动条出现时正文左右跳。 */
+    scrollbar-gutter: stable;
   }
 
   .pz-settings-center > .pz-resource-center-main {
@@ -3910,9 +3961,10 @@ body {
   border-bottom: 0;
 }
 
-/* 开发者新闻：条目内每个文字段落、标题、列表项、图片按顺序弹出。
+/* 开发者新闻：条目内每个文字段落、标题、列表项按顺序弹出。
    延迟由 App.tsx 的 DeveloperNewsItem 写入 --pz-reveal-index，只在条目挂载时执行一次，
-   翻译回填替换正文后新节点没有这个标记，因此不会重播。 */
+   翻译回填替换正文后新节点没有这个标记，因此不会重播。
+   图片不参与弹出：走 HtmlContentWithImageReveal 的加载门控渐显（与光影包下载页一致）。 */
 @keyframes pz-news-reveal-pop {
   from {
     opacity: 0;
@@ -4417,6 +4469,24 @@ body {
   }
 }
 
+/* 关闭任务中心：打开动画的反向（上滑淡出），播完由上层卸载；期间挡住指针。 */
+.pz-task-panel.is-closing {
+  pointer-events: none;
+  animation: pz-task-panel-out var(--pz-dur-exit) var(--pz-ease-out) both;
+}
+
+@keyframes pz-task-panel-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-0.3rem);
+  }
+}
+
 /* 设置 › 控制台：通知记录。 */
 .pz-notification-console {
   max-width: 60rem;
@@ -4452,6 +4522,34 @@ body {
    否则底色会盖住壁纸，外壳成为独立采样范围后，毛玻璃面板也看不到壁纸。 */
 .pz-app-shell.pz-app-shell-seasonal {
   background-color: transparent;
+}
+
+/* 图片加载完成才显示（FallbackImage）：加载中保持透明，露出容器底色；加载完成后淡入 + 由虚到实。
+   只用 opacity / filter，不用位移或缩放，避免大图预览时撑出滚动条或裁掉边缘。 */
+@keyframes pz-image-reveal-in {
+  from {
+    opacity: 0;
+    filter: blur(calc(6px * var(--pz-blur-scale, 1)));
+  }
+  to {
+    opacity: 1;
+    filter: blur(calc(0px * var(--pz-blur-scale, 1)));
+  }
+}
+
+.pz-image-reveal {
+  opacity: 0;
+}
+
+.pz-image-reveal.is-loaded {
+  animation: pz-image-reveal-in 1s var(--pz-ease-out) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-image-reveal.is-loaded {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 /* 图片加载失败时的替换占位（FallbackImage）：铺满父容器，图标按容器大小缩放。 */
@@ -4532,4 +4630,225 @@ body {
   inset: 0;
   mix-blend-mode: screen;
   transition: opacity 1s linear, background 1s linear;
+}
+
+/* ---- 骨架屏（SkeletonGate）：列表 / 新闻加载占位 ------------------------
+   loading 期间展示扫光骨架；数据就绪后骨架先播 .is-exiting 退场（淡出 + 下移），
+   播完才卸载并渲染正文。reduced-motion 下直接替换、扫光停住。 */
+.pz-skeleton-stage {
+  /* 只做退场过渡：入场如果再挂 animation，同一属性上 animation 会压住 transition，
+     加载很快时退场会被入场动画吞掉、结尾直接跳变。 */
+  transition:
+    opacity var(--pz-dur-exit) ease,
+    transform var(--pz-dur-exit) var(--pz-ease-out);
+}
+
+.pz-skeleton-stage.is-exiting {
+  opacity: 0;
+  transform: translateY(0.35rem);
+}
+
+/* 骨架屏不是列表行：排除列表容器的“逐条滑入”动画（那会让骨架先透明再淡入 260ms）。 */
+.pz-resource-download-list > .pz-skeleton-stage,
+.pz-workshop-list > .pz-skeleton-stage,
+.pz-developer-news-list > .pz-skeleton-stage,
+.pz-lua-mod-list > .pz-skeleton-stage,
+.pz-jar-mod-list > .pz-skeleton-stage {
+  animation: none;
+}
+
+.pz-skeleton-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.pz-skeleton-row {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.25rem;
+}
+
+.pz-skeleton-shine {
+  position: relative;
+  overflow: hidden;
+  background: var(--pz-fill-gray);
+}
+
+/* 扫光高光：细窄渐变条在占位块上来回扫过。 */
+.pz-skeleton-shine::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--pz-fill-row-hover), transparent);
+  animation: pz-skeleton-shine 1.4s ease-in-out infinite;
+  content: "";
+}
+
+@keyframes pz-skeleton-shine {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.pz-skeleton-thumb-poster {
+  width: 1.9rem;
+  height: 1.9rem;
+  flex: 0 0 1.9rem;
+  border-radius: var(--pz-radius-sm);
+}
+
+.pz-skeleton-thumb-icon {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: var(--pz-radius-xs);
+}
+
+.pz-skeleton-thumb-preview {
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+  border-radius: var(--pz-radius-sm);
+}
+
+.pz-skeleton-lines {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.pz-skeleton-line {
+  height: 0.75rem;
+  border-radius: var(--pz-radius-pill);
+}
+
+.pz-skeleton-line-short {
+  width: 40%;
+}
+
+.pz-skeleton-news-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.9rem 0.25rem 1.1rem;
+  border-bottom: 1px solid var(--pz-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-skeleton-stage {
+    transition: none;
+  }
+
+  .pz-skeleton-stage.is-exiting {
+    opacity: 1;
+    transform: none;
+  }
+
+  .pz-skeleton-shine::after {
+    animation: none;
+  }
+}
+
+/* 「版本」页：左侧分区列表 + 右侧内容（支持库 / 光影包 / 截图 已并入本页）。
+   布局参考实例管理器的两级结构：左栏列出全部区块，右栏只放当前区块的内容。 */
+.pz-version-hub {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  gap: 0.9rem;
+}
+
+.pz-version-hub-sidebar {
+  display: flex;
+  width: 11.5rem;
+  flex: 0 0 11.5rem;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-height: 0;
+  padding: 0.85rem 0.6rem;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-md);
+  background: var(--pz-surface-card);
+  overflow-y: auto;
+}
+
+.pz-version-hub-sidebar-title {
+  padding-inline: 0.5rem;
+  color: var(--pz-text-muted);
+  font-size: var(--pz-font-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.pz-version-hub-sidebar .chakra-stack {
+  gap: 0.15rem !important;
+}
+
+/* 分区按钮：图标 + 文字左对齐，选中态用浅强调色底（与参考图的实例选中一致）。 */
+.pz-version-hub-item {
+  width: 100%;
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  justify-content: flex-start !important;
+  padding-inline: 0.55rem !important;
+  border-radius: var(--pz-radius-sm) !important;
+  color: var(--pz-text-label) !important;
+  font-size: var(--pz-font-sm) !important;
+  gap: 0.5rem;
+}
+
+.pz-version-hub-item:hover {
+  background: var(--pz-fill-accent) !important;
+  color: var(--pz-accent-strong) !important;
+}
+
+.pz-version-hub-item.is-active {
+  background: var(--pz-fill-accent-active) !important;
+  color: var(--pz-accent-deep) !important;
+  font-weight: 700 !important;
+}
+
+.pz-version-hub-icon {
+  width: 0.85rem;
+  flex: 0 0 0.85rem;
+  opacity: 0.85;
+}
+
+.pz-version-hub-main {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 内容面板铺满右栏；媒体面板（支持库 / 光影 / 截图）同样撑高，内部自己滚动。 */
+.pz-version-hub-main > .pz-panel {
+  min-height: 0;
+}
+
+@media (max-width: 720px) {
+  .pz-version-hub {
+    flex-direction: column;
+  }
+
+  .pz-version-hub-sidebar {
+    width: 100%;
+    flex: 0 0 auto;
+  }
+
+  .pz-version-hub-sidebar .chakra-stack {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .pz-version-hub-item {
+    width: auto;
+  }
 }

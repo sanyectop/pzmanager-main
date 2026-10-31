@@ -5,6 +5,7 @@ import {
   Button,
   Checkbox,
   HStack,
+  Input,
   Portal,
   Text,
 } from "@chakra-ui/react";
@@ -26,7 +27,7 @@ import {
 } from "../versioning";
 import { HintDot } from "./common";
 import { useDialogAutoHeight } from "./shell";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export function ModVersionTimeline({
   busy,
@@ -187,6 +188,56 @@ export function VersionStoreDriveDialog({
   );
 }
 
+/** 还原完成后 PZ Optimization 未能自动重装的警告：还原本身已成功，只提示手动补救。 */
+export function PzOptRestoreWarningDialog({
+  error,
+  onClose,
+  onGoSupport,
+}: {
+  error: string;
+  onClose: () => void;
+  onGoSupport: () => void;
+}) {
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  return (
+    <Portal>
+      <Box className="pz-resource-file-overlay" onClick={onClose}>
+        <Box
+          aria-label="PZ Optimization 未能自动重装"
+          aria-modal="true"
+          className="pz-resource-file-dialog pz-version-drive-dialog"
+          onClick={(event) => event.stopPropagation()}
+          role="dialog"
+        >
+          <HStack align="flex-start" gap="3" justify="space-between">
+            <Text color="gray.900" fontSize="lg" fontWeight="700">PZ Optimization 未能自动重装</Text>
+            <Button aria-label="关闭重装警告" onClick={onClose} size="sm" variant="ghost">×</Button>
+          </HStack>
+          <Text color="gray.600" fontSize="sm" mt="3">
+            版本已还原完成，游戏文件不受影响；但 PZ Optimization 没能自动装回去，游戏内的模组功能可能失效。
+          </Text>
+          <Text color="red.600" fontSize="xs" mt="2" overflowWrap="anywhere">
+            原因：{error}
+          </Text>
+          <HStack justify="flex-end" gap="2" mt="4" wrap="wrap">
+            <Button onClick={onClose} size="sm" variant="ghost">知道了</Button>
+            <Button colorPalette="blue" onClick={onGoSupport} size="sm">去支持库安装</Button>
+          </HStack>
+        </Box>
+      </Box>
+    </Portal>
+  );
+}
+
 export function ModVersionDialog({
   closing,
   loading,
@@ -289,6 +340,103 @@ export function ModVersionDialog({
               </Box>
             </>
           ) : null}
+        </Box>
+      </Box>
+    </Portal>
+  );
+}
+
+/** 整合包命名 / 重命名弹窗：保存全部模组时可以起名，之后也能在列表里改名。
+    `mode = "save"` 时名称可留空（后端回落「整合包 N」）；`mode = "rename"` 必填。 */
+export function ModPackNameDialog({
+  closing,
+  busy,
+  initialLabel,
+  mode,
+  onCancel,
+  onConfirm,
+}: {
+  closing: boolean;
+  busy: boolean;
+  initialLabel: string;
+  mode: "save" | "rename";
+  onCancel: () => void;
+  onConfirm: (label: string) => void;
+}) {
+  const [draft, setDraft] = useState(initialLabel);
+  const trimmed = draft.trim();
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onCancel]);
+
+  const saving = mode === "save";
+  const confirmDisabled = busy || (!saving && !trimmed);
+
+  return (
+    <Portal>
+      <Box
+        className={`pz-resource-file-overlay ${closing ? "is-closing" : ""}`}
+        onClick={onCancel}
+      >
+        <Box
+          aria-label={saving ? "保存整合包" : "重命名整合包"}
+          aria-modal="true"
+          className="pz-resource-file-dialog pz-version-drive-dialog"
+          onClick={(event) => event.stopPropagation()}
+          role="dialog"
+        >
+          <HStack align="flex-start" gap="3" justify="space-between">
+            <Text color="gray.900" fontSize="lg" fontWeight="700">
+              {saving ? "保存整合包" : "重命名整合包"}
+            </Text>
+            <Button
+              aria-label={saving ? "关闭保存整合包" : "关闭重命名整合包"}
+              onClick={onCancel}
+              size="sm"
+              variant="ghost"
+            >
+              ×
+            </Button>
+          </HStack>
+          <Text color="gray.600" fontSize="sm" mt="3">
+            {saving
+              ? "会把当前所有模组各存一个版本（第一次是完整备份，占用空间较大），并记成一条整合包；以后可以一键整套还原。"
+              : "只改这条整合包的显示名，里面的模组版本和还原范围不变。"}
+          </Text>
+          <Input
+            aria-label="整合包名称"
+            autoFocus
+            disabled={busy}
+            maxLength={60}
+            mt="3"
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !confirmDisabled) {
+                onConfirm(trimmed);
+              }
+            }}
+            placeholder={saving ? "给整合包起个名字（可选，留空自动编号）" : "整合包名称"}
+            size="sm"
+            value={draft}
+          />
+          <HStack justify="flex-end" gap="2" mt="4" wrap="wrap">
+            <Button onClick={onCancel} size="sm" variant="ghost">取消</Button>
+            <Button
+              colorPalette="blue"
+              disabled={confirmDisabled}
+              onClick={() => onConfirm(trimmed)}
+              size="sm"
+            >
+              {saving ? "保存整合包" : "重命名"}
+            </Button>
+          </HStack>
         </Box>
       </Box>
     </Portal>

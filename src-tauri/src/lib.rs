@@ -1541,6 +1541,8 @@ fn start_version_restore(
         })
         .is_some_and(|record| !record.mod_versions.is_empty());
     let steps = if restore_mods && has_mod_versions { 4 } else { 3 };
+    // 重装失败不中止还原，但要在完成后弹模态框警告：单独发一条事件给前端。
+    let pzopt_warning_app = app.clone();
     spawn_version_operation(app, "restore", steps, move |progress| {
         // PZ Optimization 会替换游戏类文件。还原前先让它把自己的改动撤回原版，
         // 还原成功后再按“还原后的游戏版本”重新安装；否则切换版本后模组状态会残留/失效。
@@ -1593,6 +1595,10 @@ fn start_version_restore(
                     message.push_str(&format!(
                         "\nPZ Optimization 未能自动重装：{error}\n可以到「支持库」手动安装。"
                     ));
+                    let _ = pzopt_warning_app.emit(
+                        "version-restore-pzopt-warning",
+                        serde_json::json!({ "error": error }),
+                    );
                 }
             }
         }
@@ -1848,6 +1854,40 @@ fn delete_mod_version_pack(pack_id: String) -> Result<String, String> {
     }
     mod_versioning::write_packs(&store_base, &packs)?;
     Ok(format!("已删除整合包「{}」。", label.unwrap_or_default()))
+}
+
+/// 整合包名称上限：和输入框宽度匹配，防止把列表行撑到无法阅读。
+const MOD_PACK_LABEL_MAX_LEN: usize = 60;
+
+fn normalize_mod_pack_label(label: &str) -> Result<String, String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return Err("整合包名称不能为空。".to_string());
+    }
+    if trimmed.chars().count() > MOD_PACK_LABEL_MAX_LEN {
+        return Err(format!(
+            "整合包名称太长（最多 {MOD_PACK_LABEL_MAX_LEN} 个字）。"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// 重命名整合包：只改 `modpacks.json` 里的显示名，模组版本引用不动。
+#[tauri::command(async)]
+fn rename_mod_version_pack(pack_id: String, label: String) -> Result<String, String> {
+    if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
+        return Err("请等当前版本操作完成后再重命名整合包。".to_string());
+    }
+    let pack_label = normalize_mod_pack_label(&label)?;
+    let store_base = configured_version_store_path()?;
+    let mut packs = mod_versioning::read_packs(&store_base)?;
+    let Some(pack) = packs.iter_mut().find(|pack| pack.id == pack_id) else {
+        return Err("找不到这个整合包。".to_string());
+    };
+    let old_label = pack.label.clone();
+    pack.label = pack_label.clone();
+    mod_versioning::write_packs(&store_base, &packs)?;
+    Ok(format!("整合包「{old_label}」已重命名为「{pack_label}」。"))
 }
 
 /// 一键把当前所有模组各存一个版本，并记成一条整合包。
@@ -2647,6 +2687,7 @@ pub fn run() {
             delete_mod_version,
             list_mod_version_packs,
             delete_mod_version_pack,
+            rename_mod_version_pack,
             start_mod_version_save_all,
             start_mod_version_restore_pack,
             submit_feedback,
@@ -2673,6 +2714,7 @@ pub fn run() {
             set_zombie_buddy_mods_decisions,
             apply_jar_mod_file_state,
             list_mod_presets,
+            auto_sort_lua_mods,
             save_mod_preset,
             apply_mod_preset,
             delete_mod_preset,

@@ -85,6 +85,12 @@ export type ModPresetApplyResult = {
   jarChanged: number;
 };
 
+export type AutoSortLuaModsResult = {
+  backupPreset: string | null;
+  moved: number;
+  total: number;
+};
+
 export type LuaModBatchToggleResult = {
   enabled: boolean;
   changed: string[];
@@ -199,15 +205,16 @@ export type LauncherUpdateStatus = {
   releasePageUrl: string | null;
 };
 
-export type ActivePage = "launch" | "overview" | "shots" | "shaderpacks" | "workshop" | "mods" | "settings";
+export type ActivePage = "launch" | "overview" | "shots" | "shaderpacks" | "versions" | "workshop" | "mods" | "settings";
 
 export type ModManagementPage = "lua" | "jar";
 
 export type ResourceCenterPage = "workshop" | "shaderDownload" | "developerNews";
 
-export type SettingsPage = "about" | "general" | "versions" | "toolbox" | "logs" | "modLoader" | "startup";
+export type SettingsPage = "about" | "general" | "toolbox" | "logs" | "modLoader" | "startup";
 
-export type VersionTab = "game" | "mods" | "history";
+/** 「版本」页左侧分区：概览（游戏版本）/ 模组版本 / 历史版本，以及并入的支持库、光影包、截图。 */
+export type VersionTab = "game" | "mods" | "history" | "support" | "shaderpacks" | "shots";
 
 export type PreviewState = {
   name: string;

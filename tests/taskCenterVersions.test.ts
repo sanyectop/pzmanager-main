@@ -15,8 +15,8 @@ test("version operations are recorded in the task center", () => {
   assert.match(appSource, /startVersionTask\(`游戏版本 · \$\{label\}`, null\)/);
   assert.match(appSource, /startVersionTask\(`\$\{modName\} · \$\{label\}`, rootPath\)/);
 
-  // 两条进度通道都同步到任务行
-  const syncCalls = appSource.match(/applyVersionTaskProgress\(taskId, update\)/g) ?? [];
+  // 两条进度通道都同步到任务行（第三参是时间估算，可以省略）
+  const syncCalls = appSource.match(/applyVersionTaskProgress\(taskId, update(?:, etaSeconds)?\)/g) ?? [];
   assert.equal(syncCalls.length, 2, "game and mod listeners must both update their task");
 });
 

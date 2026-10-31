@@ -1,4 +1,4 @@
-import { useState, type ImgHTMLAttributes } from "react";
+import { useLayoutEffect, useRef, useState, type ImgHTMLAttributes } from "react";
 
 type FallbackImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src" | "onError"> & {
   src: string;
@@ -41,10 +41,34 @@ function BrokenImageIcon() {
  *
  * 状态按具体 src 记录：换了地址会从头开始，不会沿用上一张图的失败结果。
  */
-export function FallbackImage({ src, fallbackSrc, onFail, alt = "", className, ...rest }: FallbackImageProps) {
+export function FallbackImage({
+  src,
+  fallbackSrc,
+  onFail,
+  onLoad,
+  alt = "",
+  className,
+  ...rest
+}: FallbackImageProps) {
   const [loadStage, setLoadStage] = useState<LoadStage | null>(null);
   const stage = loadStage?.src === src ? loadStage.stage : null;
   const hasFallback = !!fallbackSrc && fallbackSrc !== src;
+  const usingFallback = stage === "fallback";
+  const displaySrc = usingFallback && fallbackSrc ? fallbackSrc : src;
+
+  // 已经真正加载完成的地址。换图（含退回备用源）时自然不相等，会重新等一次加载。
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const loaded = loadedSrc === displaySrc;
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  // 命中 HTTP/内存缓存的图片可能在 React 绑上 onLoad 之前就已经 complete，
+  // 补一次同步检查，否则它会一直停在透明状态。
+  useLayoutEffect(() => {
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth > 0) {
+      setLoadedSrc(displaySrc);
+    }
+  }, [displaySrc]);
 
   if (stage === "failed" || (stage === "fallback" && !hasFallback)) {
     return (
@@ -59,12 +83,15 @@ export function FallbackImage({ src, fallbackSrc, onFail, alt = "", className, .
     );
   }
 
-  const usingFallback = stage === "fallback";
   return (
     <img
       {...rest}
       alt={alt}
-      className={className}
+      className={
+        loaded
+          ? `pz-image-reveal is-loaded${className ? ` ${className}` : ""}`
+          : `pz-image-reveal${className ? ` ${className}` : ""}`
+      }
       onError={() => {
         if (!usingFallback && hasFallback) {
           setLoadStage({ src, stage: "fallback" });
@@ -73,7 +100,12 @@ export function FallbackImage({ src, fallbackSrc, onFail, alt = "", className, .
           onFail?.();
         }
       }}
-      src={usingFallback && fallbackSrc ? fallbackSrc : src}
+      onLoad={(event) => {
+        setLoadedSrc(displaySrc);
+        onLoad?.(event);
+      }}
+      ref={imgRef}
+      src={displaySrc}
     />
   );
 }

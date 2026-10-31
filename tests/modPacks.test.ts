@@ -22,14 +22,16 @@ test("整合包 records live next to the per-mod version stores", () => {
   assert.match(modVersioningSource, /store_base\.join\("modpacks\.json"\)/);
 });
 
-test("backend commands save, list, restore and delete packs", () => {
+test("backend commands save, list, rename, restore and delete packs", () => {
   assert.match(backendSource, /fn list_mod_version_packs\(\)/);
   assert.match(backendSource, /fn delete_mod_version_pack\(pack_id: String\)/);
+  assert.match(backendSource, /fn rename_mod_version_pack\(pack_id: String, label: String\)/);
   assert.match(backendSource, /fn start_mod_version_save_all\(\s*app: tauri::AppHandle,\s*label: Option<String>,/s);
   assert.match(backendSource, /fn start_mod_version_restore_pack\(/);
   for (const command of [
     "list_mod_version_packs",
     "delete_mod_version_pack",
+    "rename_mod_version_pack",
     "start_mod_version_save_all",
     "start_mod_version_restore_pack",
   ]) {
@@ -38,6 +40,14 @@ test("backend commands save, list, restore and delete packs", () => {
       `missing handler registration: ${command}`,
     );
   }
+  // 重命名：操作期间锁定、名称去空格且必填、超长拒绝。
+  assert.match(
+    backendSource,
+    /fn rename_mod_version_pack\(pack_id: String, label: String\) -> Result<String, String> \{\s*if VERSION_OPERATION_ACTIVE/s,
+  );
+  assert.match(backendSource, /fn normalize_mod_pack_label\(label: &str\) -> Result<String, String>/);
+  assert.match(backendSource, /整合包名称不能为空。/);
+  assert.match(backendSource, /const MOD_PACK_LABEL_MAX_LEN: usize = 60;/);
 });
 
 test("save-all reuses every mod's own chain and records the refs", () => {
@@ -70,4 +80,30 @@ test("mod version tab exposes the save-all button and the pack list", () => {
   // 完成后刷新整合包列表 + 模组列表。
   assert.match(appSource, /update\.operation === "modSaveAll" \|\| update\.operation === "modRestorePack"/);
   assert.match(versioningTsSource, /export type ModPackRecord = \{/);
+});
+
+test("saving a pack opens the naming dialog and rename edits the label in place", () => {
+  // 保存前先弹命名框，不再直接 window.confirm；留空时后端自动编号。
+  assert.match(appSource, /setModPackNameDialog\(\{ mode: "save", pack: null \}\)/);
+  const saveFnStart = appSource.indexOf("function saveAllModVersions()");
+  const saveFnEnd = appSource.indexOf("function renameModVersionPack(", saveFnStart);
+  assert.ok(saveFnStart >= 0 && saveFnEnd > saveFnStart);
+  assert.doesNotMatch(appSource.slice(saveFnStart, saveFnEnd), /window\.confirm/);
+  assert.match(
+    appSource,
+    /"start_mod_version_save_all",\s*\{ label: trimmed \|\| null \},/s,
+  );
+  // 命名后的任务标题带上整合包名。
+  assert.match(appSource, /trimmed \? `整合包 · \$\{trimmed\}` : "整合包 · 保存全部模组"/);
+  // 重命名：每条整合包有「重命名」按钮，确认后调用 rename_mod_version_pack。
+  assert.match(appSource, /function renameModVersionPack\(pack: ModPackRecord\)/);
+  assert.match(appSource, /setModPackNameDialog\(\{ mode: "rename", pack \}\)/);
+  assert.match(appSource, /invoke<string>\("rename_mod_version_pack"/);
+  assert.match(appSource, />\s*重命名\s*</s);
+  // 弹窗组件：save 可留空，rename 必填；Escape / 遮罩点击关闭。
+  assert.match(appSource, /<ModPackNameDialog/);
+  assert.match(
+    appSource,
+    /modPackNameDialog\.mode === "save"\s*\?\s*modVersionOperationRunning \|\| versionOperationRunning\s*:\s*modPackRenaming/s,
+  );
 });
