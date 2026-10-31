@@ -1,9 +1,10 @@
-import { Avatar, Badge, Box, Button, HStack, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea } from "@chakra-ui/react";
+import { Avatar, Badge, Box, Button, Checkbox, HStack, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea } from "@chakra-ui/react";
 import { faCircleInfo, faClockRotateLeft, faCubes, faGear, faHouse, faImages, faPlus, faScrewdriverWrench, faSun, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { exit } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Image as TauriImage } from "@tauri-apps/api/image";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -31,7 +32,7 @@ import {
   STEAM_RELAY_MODE_OPTIONS,
   previewImageFallbackUrl,
 } from "./steamRelay";
-import { filterModVersionTargets, formatVersionBytes, formatVersionElapsed, formatVersionEta, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionChangeSummary, versionDeltaChainDepth, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, createVersionEtaTracker, updateVersionEta, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
+import { filterModVersionTargets, formatVersionBytes, formatVersionElapsed, formatVersionEta, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionChangeSummary, versionDeltaChainDepth, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, compareVersionStrings, createVersionEtaTracker, updateVersionEta, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import { DEFAULT_SEASON_FEATURES, DEFAULT_WALLPAPER_EFFECT, normalizeWallpaperEffectSettings, wallpaperEffectAt, type SeasonFeatures, type WallpaperEffectSettings } from "./builtinWallpaper";
 import { SeasonalWallpaper, loadSeasonFeatures } from "./SeasonalWallpaper";
@@ -138,6 +139,7 @@ import {
   TASK_REMOVE_EXIT_MS,
   TRANSLATION_LANGUAGE_OPTIONS,
   VERSION_DIFF_EXIT_MS,
+  DEV_BUILD_INFO,
   ZOMBIE_BUDDY_WORKSHOP_ID,
   initialWorkshopFilters,
   navigationItems,
@@ -486,7 +488,15 @@ function App() {
   const jarModsScanStartedRef = useRef(false);
   const workshopBackgroundScanIdRef = useRef<number | null>(null);
   const [loadingMedia, setLoadingMedia] = useState(false);
-  const [preview, setPreview] = useState<PreviewState | null>(null);
+  // 隐私协议同意流程：首次启动 / 升级后 / 更新源出现新版本时弹出；不同意则退出应用。
+  const [privacyConsentedVersion, setPrivacyConsentedVersion] = useState<string | null>(null);
+  const [privacyBusy, setPrivacyBusy] = useState(false);
+  const [showPrivacyConsent, setShowPrivacyConsent] = useState(false);
+  const [privacyAgreeCollect, setPrivacyAgreeCollect] = useState(false);
+  const [privacyAgreeSend, setPrivacyAgreeSend] = useState(false);
+  const [privacyTrapChecked, setPrivacyTrapChecked] = useState(false);
+  // 隐私协议同意流程：首次启动 / 升级后 / 更新源出现新版本时弹出；不同意则退出应用。
+const [preview, setPreview] = useState<PreviewState | null>(null);
   const [previewClosing, setPreviewClosing] = useState(false);
   const previewCloseTimerRef = useRef<number | null>(null);
   const [copyingShot, setCopyingShot] = useState(false);
@@ -600,9 +610,7 @@ function App() {
         showToast(
           status.updateAvailable
             ? `发现新版本 v${status.latestVersion}，可在下方查看并下载。`
-            : status.unknownVersion
-              ? `当前是未知版本（v${status.currentVersion}），比更新源发布的还新。`
-              : `已是最新版本（v${status.currentVersion}）。`,
+            : `当前是内测版本 DevBuild ${DEV_BUILD_INFO.buildId}。`,
           status.updateAvailable ? "success" : "info",
         );
       }
@@ -1025,6 +1033,22 @@ function App() {
       }, PAGE_TRANSITION_MS);
     }, PAGE_TRANSITION_MS);
   }
+
+  // 隐私协议弹窗判定（派生状态，三个触发合一）：
+  // ① 从未同意；② 同意版本落后于当前运行版本（升级后首次启动）；
+  // ③ 更新源出现了新版本，且其对应的隐私政策还没同意过（更新前重新同意）。
+  // 同意后三条件同时不成立，弹窗自动收敛消失。
+  useEffect(() => {
+    const current = appManifest.version;
+    const needConsent =
+      !privacyConsentedVersion ||
+      compareVersionStrings(privacyConsentedVersion, current) < 0 ||
+      Boolean(
+        launcherUpdate?.updateAvailable &&
+          launcherUpdate.latestVersion !== privacyConsentedVersion,
+      );
+    setShowPrivacyConsent(needConsent);
+  }, [privacyConsentedVersion, launcherUpdate]);
 
   useEffect(() => {
     return () => {
@@ -2216,6 +2240,7 @@ function App() {
         }
         if (settingsResult.status === "fulfilled") {
           setDeveloperMode(Boolean(settingsResult.value.developerMode));
+          setPrivacyConsentedVersion(settingsResult.value.privacyConsentedVersion ?? null);
           developerModeRef.current = Boolean(settingsResult.value.developerMode);
           setSteamAccountHidden(Boolean(settingsResult.value.steamAccountHidden));
           const loadedTranslationLanguage = settingsResult.value.translationLanguage ?? DEFAULT_TRANSLATION_LANGUAGE;
@@ -3126,6 +3151,49 @@ function App() {
     }
   }
 
+  async function agreePrivacyPolicy() {
+    if (privacyBusy) return;
+    // 更新源出现新版本时，同意的是「新版本」的隐私政策；否则同意当前运行版本。
+    const version =
+      launcherUpdate?.updateAvailable && launcherUpdate.latestVersion
+        ? launcherUpdate.latestVersion
+        : appManifest.version;
+    setPrivacyBusy(true);
+    try {
+      await invoke("save_privacy_consent", { version });
+      setPrivacyConsentedVersion(version);
+      setShowPrivacyConsent(false);
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setPrivacyBusy(false);
+    }
+  }
+
+  async function disagreePrivacyPolicy() {
+    if (!window.confirm("确定不同意并退出 PZManager 吗？")) {
+      return;
+    }
+    await exit(0);
+  }
+
+  /** 撤销隐私协议同意：清空记录，重新弹出同意框（必须重新同意或退出）。 */
+  async function revokePrivacyConsent() {
+    const confirmed = window.confirm(
+      "确定撤销隐私协议同意吗？\n\n撤销后会立即重新弹出同意框，需要重新同意才能继续使用。",
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await invoke("clear_privacy_consent");
+      setPrivacyConsentedVersion(null);
+      showToast("已撤销隐私协议同意。", "info");
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }
+
   async function copyPreview() {
     if (!preview) {
       return;
@@ -3557,10 +3625,14 @@ function App() {
     const label = versionLabelDraft.trim();
     const existing = versionStatus?.versions.length ?? 0;
     const modNote = versionIncludeMods ? "\n\n当前启用的模组也会各存一份。" : "";
+    // 用最近一个版本的大小估算游戏目录体积，让「占用大量空间」有具体数字。
+    const versions = versionStatus?.versions ?? [];
+    const latestBytes = versions.length > 0 ? versions[versions.length - 1].totalBytes : 0;
+    const sizeNote = latestBytes > 0 ? `（约 ${formatVersionBytes(latestBytes)}）` : "";
     const confirmed = window.confirm(
       existing > 0
-        ? `会把当前游戏目录再完整复制一份，占空间但最稳。${modNote}\n\n确定继续吗？`
-        : `这是第一次保存：会把整个游戏目录完整复制一份。${modNote}\n\n确定继续吗？`,
+        ? `一般完整保存一份母版本就够了，日常改动用「保存变化」只记录差异、省空间。\n\n再完整保存一份会把整个游戏目录${sizeNote}原样再复制一份，占用大量空间。${modNote}\n\n确定继续吗？`
+        : `这是第一次保存：会把整个游戏目录${sizeNote}完整复制一份作为母版本。${modNote}\n\n确定继续吗？`,
     );
     if (!confirmed) return;
     startVersionOperation(
@@ -3609,17 +3681,14 @@ function App() {
 
   async function deleteVersion(record: VersionRecord) {
     const confirmed = window.confirm(
-      `确定删除「${record.label}」吗？\n\n只能删除最新的版本，删掉后不能恢复。`,
+      `确定删除「${record.label}」吗？
+
+只能删除最新的版本，删掉后不能恢复。`,
     );
     if (!confirmed) return;
-    try {
-      const message = await invoke<string>("delete_version", { versionId: record.id });
-      setVersionVerified(null);
-      showToast(message, "success");
-      await refreshVersionStatus();
-    } catch (error: unknown) {
-      showToast(error instanceof Error ? error.message : String(error), "error");
-    }
+    setVersionVerified(null);
+    // 删除可能上 GB：走后台操作，进度进任务中心与概览的进度面板。
+    startVersionOperation("delete_version", { versionId: record.id }, `删除「${record.label}」`);
   }
 
   async function saveVersionStore() {
@@ -3987,21 +4056,21 @@ function App() {
     );
   }
 
-  async function deleteModVersion(rootPath: string, record: VersionRecord) {
+  async function deleteModVersion(rootPath: string, modName: string, record: VersionRecord) {
     const confirmed = window.confirm(
-      `确定删除「${record.label}」吗？\n\n只能删除最新的版本，删掉后不能恢复。`,
+      `确定删除「${record.label}」吗？
+
+只能删除最新的版本，删掉后不能恢复。`,
     );
     if (!confirmed) return;
-    try {
-      const message = await invoke<string>("delete_mod_version", {
-        rootPath,
-        versionId: record.id,
-      });
-      showToast(message, "success");
-      await Promise.all([loadModVersionStatus(rootPath), loadModVersionTargets()]);
-    } catch (error: unknown) {
-      showToast(error instanceof Error ? error.message : String(error), "error");
-    }
+    // 删除走后台操作：进度进任务中心与模组版本进度面板，完成后监听器自动刷新列表。
+    startModVersionOperation(
+      "delete_mod_version",
+      rootPath,
+      { versionId: record.id },
+      `删除「${record.label}」`,
+      modName,
+    );
   }
 
   function verifyModVersion(rootPath: string, name: string) {
@@ -6620,8 +6689,10 @@ function App() {
       <Box mt="5">
         <HStack gap="2" wrap="wrap">
           <Text color="gray.800" fontSize="md" fontWeight="800">PZMANAGER</Text>
-          <Badge colorPalette="blue" size="sm">v{appManifest.version}</Badge>
+          <Badge colorPalette="purple" size="sm">DevBuild {DEV_BUILD_INFO.buildId}</Badge>
+          <Badge colorPalette="orange" size="sm">{DEV_BUILD_INFO.channel}</Badge>
         </HStack>
+        <Text color="gray.500" fontSize="xs" mt="1">发行:{DEV_BUILD_INFO.distributor}</Text>
         <Text color="gray.500" fontSize="sm" mt="2">
           Project Zomboid（僵尸毁灭工程）的 Windows 桌面启动器 + 模组管理器：
           整合创意工坊订阅、JAR 模组管理、内置翻译器与下载器，不修改游戏本体。
@@ -6642,6 +6713,34 @@ function App() {
             variant="outline"
           >
             反馈信息
+          </Button>
+        </HStack>
+      </Box>
+      <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
+        <HStack justify="space-between" align="center" gap="3" wrap="wrap">
+          <Box>
+            <HStack align="center" gap="2" wrap="wrap">
+              <Text color="gray.800" fontSize="sm" fontWeight="700">隐私协议</Text>
+              {privacyConsentedVersion ? (
+                <Badge colorPalette="green" size="sm">
+                  已同意 v{privacyConsentedVersion}
+                </Badge>
+              ) : (
+                <Badge colorPalette="orange" size="sm">未同意</Badge>
+              )}
+            </HStack>
+            <Text color="gray.500" fontSize="xs" mt="0.5">
+              撤销后下一次启动会重新弹出隐私协议，需要重新同意才能继续使用启动器。
+            </Text>
+          </Box>
+          <Button
+            colorPalette="red"
+            disabled={!privacyConsentedVersion}
+            onClick={() => void revokePrivacyConsent()}
+            size="sm"
+            variant="outline"
+          >
+            撤销同意
           </Button>
         </HStack>
       </Box>
@@ -6705,13 +6804,16 @@ function App() {
               <>
                 <HStack gap="2" wrap="wrap" align="center">
                   <Text color="gray.500" fontSize="sm">
-                    {launcherUpdate.unknownVersion ? "未知版本" : "已是最新版本"}（v
-                    {launcherUpdate.currentVersion}）。
+                    内测版本 DevBuild {DEV_BUILD_INFO.buildId}。
                   </Text>
-                  {launcherUpdate.unknownVersion ? (
-                    <Badge colorPalette="purple" size="sm">BETA</Badge>
-                  ) : null}
+                  <Badge colorPalette="purple" size="sm">{DEV_BUILD_INFO.channel}</Badge>
                 </HStack>
+                <Text color="gray.500" fontSize="xs" mt="1">
+                  发行:{DEV_BUILD_INFO.distributor}
+                  {launcherUpdate.updateAvailable
+                    ? " · 更新源已有新版本,可参考下方更新内容"
+                    : " · 内测构建不参与公开版本对比"}
+                </Text>
                 {/* 最新版同样展示更新日志：就是当前版本自身的发布说明。 */}
                 {launcherUpdate.notes ? (
                   <Box mt="2">
@@ -6843,10 +6945,11 @@ function App() {
       {versionStatusError ? (
         <Text color="red.500" fontSize="xs" mt="3" whiteSpace="pre-wrap">读取失败：{versionStatusError}</Text>
       ) : null}
-      {!versionStatus && versionStatusLoading ? (
-        <Text color="gray.500" fontSize="sm" mt="4">正在读取版本信息...</Text>
-      ) : null}
-
+      {/* 首次读取用骨架屏占位（复用资源中心那套）；刷新时 versionStatus 已在，不重播。 */}
+      <SkeletonGate
+        loading={versionStatusLoading && !versionStatus}
+        skeleton={<SkeletonList rows={5} lines={2} />}
+      >
       {versionStatus ? (
         <>
           <Box className="pz-version-section">
@@ -7033,6 +7136,7 @@ function App() {
           {versionOperationProgressContent}
         </>
       ) : null}
+      </SkeletonGate>
     </>
   );
 
@@ -7066,9 +7170,11 @@ function App() {
       {versionStatusError ? (
         <Text color="red.500" fontSize="xs" mt="3" whiteSpace="pre-wrap">读取失败：{versionStatusError}</Text>
       ) : null}
-      {!versionStatus && versionStatusLoading ? (
-        <Text color="gray.500" fontSize="sm" mt="4">正在读取版本信息...</Text>
-      ) : null}
+      {/* 首次读取用骨架屏占位（复用资源中心那套）；刷新时 versionStatus 已在，不重播。 */}
+      <SkeletonGate
+        loading={versionStatusLoading && !versionStatus}
+        skeleton={<SkeletonList rows={4} lines={2} />}
+      >
       {versionStatus ? (
         <>
           {versionOperationProgressContent}
@@ -7274,6 +7380,7 @@ function App() {
           </Box>
         </>
       ) : null}
+      </SkeletonGate>
     </>
   );
 
@@ -7336,6 +7443,8 @@ function App() {
           <Text color="gray.800" fontSize="sm" fontWeight="700">整合包</Text>
           <Text color="gray.500" fontSize="xs">{modVersionPacks?.length ?? 0} 个</Text>
         </HStack>
+        {/* 首次读取用骨架屏占位；加载完（哪怕 0 条）才显示空状态文案。 */}
+        <SkeletonGate loading={!modVersionPacks} skeleton={<SkeletonList rows={2} lines={1} />}>
         {!modVersionPacks || modVersionPacks.length === 0 ? (
           <Text color="gray.500" fontSize="sm" mt="2">
             还没有整合包。点「一键保存全部模组」把当前所有模组存成一份，之后可以整套还原。
@@ -7387,6 +7496,7 @@ function App() {
             ))}
           </Box>
         )}
+        </SkeletonGate>
       </Box>
 
       <Box className="pz-version-section">
@@ -7422,9 +7532,12 @@ function App() {
       </Box>
 
       <Box className="pz-version-section">
-        {modVersionTargetsLoading && !modVersionTargets ? (
-          <Text color="gray.500" fontSize="sm">正在读取模组列表…</Text>
-        ) : !modVersionTargets ? (
+        {/* 首次读取用骨架屏占位（模组行带海报占位）；刷新时 targets 已在，不重播。 */}
+        <SkeletonGate
+          loading={modVersionTargetsLoading && !modVersionTargets}
+          skeleton={<SkeletonList rows={6} thumb="poster" />}
+        >
+        {!modVersionTargets ? (
           <Text color="gray.500" fontSize="sm">尚未读取模组列表。</Text>
         ) : filteredModVersionTargets.length === 0 ? (
           <Text color="gray.500" fontSize="sm">没有符合条件的模组。</Text>
@@ -7495,9 +7608,9 @@ function App() {
                     <Box className="pz-version-expand">
                       {expanded || modVersionClosingKey === target.key ? (
                         <Box className="pz-version-mod-detail">
-                      {!status ? (
-                        <Text color="gray.500" fontSize="xs">正在读取版本状态…</Text>
-                      ) : (
+                      {/* 首次展开按需读取状态，用骨架占位；读完（含失败提示后）显示正文。 */}
+                      <SkeletonGate loading={!status} skeleton={<SkeletonList rows={2} lines={2} />}>
+                      {!status ? null : (
                         <>
                           {status.versions.length > 0 ? (
                             <HStack align="center" gap="2" wrap="wrap">
@@ -7528,12 +7641,13 @@ function App() {
                           <ModVersionTimeline
                             busy={modVersionBusy}
                             currentMatch={status.currentMatch}
-                            onDelete={(record) => void deleteModVersion(target.rootPath, record)}
+                            onDelete={(record) => void deleteModVersion(target.rootPath, target.name, record)}
                             onRestore={(record) => restoreModVersion(target.rootPath, target.name, record)}
                             versions={status.versions}
                           />
                         </>
                       )}
+                      </SkeletonGate>
                         </Box>
                       ) : null}
                     </Box>
@@ -7543,6 +7657,7 @@ function App() {
             })}
           </Box>
         )}
+        </SkeletonGate>
       </Box>
 
       {modVersionOperation ? (
@@ -8700,7 +8815,7 @@ function App() {
           loading={modVersionDialogLoading}
           name={modVersionDialog.name}
           onClose={closeModVersionDialog}
-          onDelete={(record) => void deleteModVersion(modVersionDialog.rootPath, record)}
+          onDelete={(record) => void deleteModVersion(modVersionDialog.rootPath, modVersionDialog.name, record)}
           onRecord={() =>
             recordModVersion({
               rootPath: modVersionDialog.rootPath,
@@ -8749,6 +8864,98 @@ function App() {
               <HStack justify="end" mt="3">
                 <Button colorPalette="blue" loading={copyingShot} onClick={() => void copyPreview()}>
                   复制图片
+                </Button>
+              </HStack>
+            </Box>
+          </Box>
+        </Portal>
+      )}
+
+      {/* 隐私协议同意框：内嵌官网 policy 页（wall=true 只渲染正文）。
+          不可点遮罩关闭——不同意只能退出应用。 */}
+      {showPrivacyConsent && (
+        <Portal>
+          <Box
+            aria-modal="true"
+            className="pz-privacy-overlay"
+            position="fixed"
+            role="dialog"
+            zIndex="tooltip"
+          >
+            <Box
+              aria-label="隐私协议"
+              className="pz-resource-file-dialog pz-privacy-dialog"
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+            >
+              <Text color="gray.900" fontSize="lg" fontWeight="700">隐私协议与使用条款</Text>
+              <Text color="gray.500" fontSize="xs" mt="1">
+                使用 PZManager 前请阅读并同意以下协议。页面加载不出来时，也可以直接看下方的要点。
+              </Text>
+              <Box className="pz-privacy-frame-wrap" mt="3">
+                <iframe
+                  className="pz-privacy-frame"
+                  src="https://pzm.sanyec.top/policy.html?wall=true"
+                  title="PZManager 隐私协议"
+                />
+              </Box>
+              <Button
+                className="pz-privacy-open-browser"
+                onClick={() => void openUrl("https://pzm.sanyec.top/policy.html")}
+                size="xs"
+                variant="ghost"
+              >
+                在浏览器中打开完整页面 ↗
+              </Button>
+              <Stack gap="2" mt="3">
+                <Checkbox.Root
+                  checked={privacyAgreeCollect}
+                  onCheckedChange={(details) => setPrivacyAgreeCollect(Boolean(details.checked))}
+                >
+                  <Checkbox.HiddenInput />
+                  <Checkbox.Control>
+                    <Checkbox.Indicator />
+                  </Checkbox.Control>
+                  <Checkbox.Label>同意信息收集（仅限协议中列出的本地数据与反馈内容）</Checkbox.Label>
+                </Checkbox.Root>
+                <Checkbox.Root
+                  checked={privacyAgreeSend}
+                  onCheckedChange={(details) => setPrivacyAgreeSend(Boolean(details.checked))}
+                >
+                  <Checkbox.HiddenInput />
+                  <Checkbox.Control>
+                    <Checkbox.Indicator />
+                  </Checkbox.Control>
+                  <Checkbox.Label>同意信息发送（仅在检查更新与你主动反馈时联网）</Checkbox.Label>
+                </Checkbox.Root>
+                <Checkbox.Root
+                  checked={privacyTrapChecked}
+                  onCheckedChange={(details) => setPrivacyTrapChecked(Boolean(details.checked))}
+                >
+                  <Checkbox.HiddenInput />
+                  <Checkbox.Control>
+                    <Checkbox.Indicator />
+                  </Checkbox.Control>
+                  <Checkbox.Label>我真的有认真看这个页面，所以我不会勾选此项</Checkbox.Label>
+                </Checkbox.Root>
+              </Stack>
+              {privacyTrapChecked ? (
+                <Text color="orange.600" fontSize="xs" mt="2">
+                  欸，说好了不勾选的——把它去掉，再认真看一遍上面的协议。
+                </Text>
+              ) : null}
+              <HStack justify="end" gap="2" mt="3">
+                <Button colorPalette="red" onClick={() => void disagreePrivacyPolicy()} size="sm" variant="outline">
+                  不同意并退出
+                </Button>
+                <Button
+                  colorPalette="blue"
+                  disabled={!(privacyAgreeCollect && privacyAgreeSend && !privacyTrapChecked)}
+                  loading={privacyBusy}
+                  onClick={() => void agreePrivacyPolicy()}
+                  size="sm"
+                >
+                  同意并进入
                 </Button>
               </HStack>
             </Box>

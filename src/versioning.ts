@@ -298,6 +298,7 @@ export function versionPhaseLabel(phase: string): string {
     scanning: "正在检查文件",
     hashing: "正在核对文件",
     copying: "正在复制文件",
+    deleting: "正在删除版本文件",
     delta: "正在保存变化",
     restoring: "正在还原文件",
     pzopt: "正在处理 PZ Optimization",
@@ -461,4 +462,24 @@ export function formatVersionElapsed(startedAt: number | null): string | null {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return minutes + " 分 " + rest + " 秒";
+}
+
+/** 前端版 `{主}.{次}.{YYMMDD}` 比较：与 Rust compare_versions 同规则（容忍 v 前缀、缺段按 0）。 */
+export function compareVersionStrings(left: string, right: string): number {
+  const parts = (value: string) =>
+    value
+      .trim()
+      .replace(/^[vV]/, "")
+      .split(".")
+      .map((part) => Number.parseInt(part, 10) || 0);
+  const leftParts = parts(left);
+  const rightParts = parts(right);
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const a = leftParts[index] ?? 0;
+    const b = rightParts[index] ?? 0;
+    if (a !== b) {
+      return a < b ? -1 : 1;
+    }
+  }
+  return 0;
 }

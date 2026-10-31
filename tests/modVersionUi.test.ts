@@ -12,7 +12,7 @@ import {
   type VersionRecord,
 } from "../src/versioning.ts";
 
-import { appSource } from "./sourceText.ts";
+import { appSource, rustSource } from "./sourceText.ts";
 const cssSource = readFileSync(
   fileURLToPath(new URL("../src/App.css", import.meta.url)),
   "utf8",
@@ -323,4 +323,52 @@ test("shot preview uses the acrylic dialog recipe at a compact size", () => {
     appSource,
     /previewCloseTimerRef\.current = window\.setTimeout\(\(\) => \{[\s\S]{0,400}?URL\.revokeObjectURL\(current\.url\);[\s\S]{0,200}?setPreviewClosing\(false\);/,
   );
+});
+
+test("version and mod-version deletes run as background operations", () => {
+  // 删除可能上 GB：走后台操作，进度进任务中心与进度面板，不再是一次性 invoke。
+  assert.match(appSource, /startVersionOperation\("delete_version", \{ versionId: record\.id \}, `删除「\$\{record\.label\}」`\)/);
+  assert.match(
+    appSource,
+    /startModVersionOperation\(\s*"delete_mod_version",\s*rootPath,\s*\{ versionId: record\.id \},\s*`删除「\$\{record\.label\}」`,\s*modName,/,
+  );
+  // 删除阶段有专属文案。
+  assert.match(appSource, /deleting: "正在删除版本文件"/);
+  // 后端删除命令已事件化（签名带 app，返回操作 id）。
+  assert.match(rustSource, /fn delete_version\(app: tauri::AppHandle, version_id: String\) -> Result<u64, String>/);
+  assert.match(rustSource, /spawn_version_operation_with\(app, "mod-version-progress", "modDelete", target, 1, move \|progress\|/);
+  // 后端删除按文件粒度上报进度（phase = deleting），并容忍删除过程中的路径缺失。
+  assert.match(rustSource, /fn delete_version_progress\(/);
+  assert.match(rustSource, /phase: "deleting"\.to_string\(\)/);
+  // 演示模式方案已暂存。
+  assert.ok(readFileSync(fileURLToPath(new URL("../docs/demo-mode.md", import.meta.url)), "utf8").includes("演示模式"));
+});
+
+test("privacy consent modal embeds the online policy at 75% with a browser link", () => {
+  assert.match(appSource, /src="https:\/\/pzm\.sanyec\.top\/policy\.html\?wall=true"/);
+  assert.match(appSource, /在浏览器中打开完整页面 ↗/);
+  assert.match(appSource, /openUrl\("https:\/\/pzm\.sanyec\.top\/policy\.html"\)/);
+  // 75% 缩放用 transform（zoom 会把布局盒留成 133.34% 导致内容偏左被裁）。
+  assert.match(
+    cssSource,
+    /\.pz-privacy-frame \{[\s\S]*?height: 133\.34%;[\s\S]*?transform: scale\(0\.75\);[\s\S]*?transform-origin: 0 0;/,
+  );
+  assert.match(cssSource, /\.pz-privacy-frame-wrap \{[\s\S]*?height: 40vh;/);
+});
+
+test("about page shows privacy consent status with a revoke button", () => {
+  assert.match(appSource, /async function revokePrivacyConsent\(\) \{/);
+  assert.match(appSource, /invoke\("clear_privacy_consent"\)/);
+  assert.match(appSource, /撤销后会立即重新弹出同意框/);
+  assert.match(rustSource, /fn clear_privacy_consent\(\)/);
+});
+
+test("privacy consent status lives on the about page under feedback", () => {
+  const aboutStart = appSource.indexOf("const aboutSettingsContent");
+  const feedbackAt = appSource.indexOf("反馈问题", aboutStart);
+  const privacyAt = appSource.indexOf("隐私协议", feedbackAt);
+  assert.ok(privacyAt > feedbackAt, "隐私协议区块应在反馈问题之后");
+  assert.match(appSource, /已同意 v\{privacyConsentedVersion\}/);
+  assert.match(appSource, /disabled=\{!privacyConsentedVersion\}/);
+  assert.match(appSource, /onClick=\{\(\) => void revokePrivacyConsent\(\)\}/);
 });

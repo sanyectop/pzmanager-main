@@ -25,7 +25,7 @@ import {
   versionMatchLabel,
   versionOrdinal,
 } from "../versioning";
-import { HintDot } from "./common";
+import { HintDot, SkeletonGate, SkeletonList } from "./common";
 import { useDialogAutoHeight } from "./shell";
 import { useEffect, useRef, useState } from "react";
 
@@ -311,9 +311,12 @@ export function ModVersionDialog({
             </HStack>
           </HStack>
 
-          {loading && !status ? (
-            <Text color="gray.500" fontSize="sm" mt="4">正在读取版本信息…</Text>
-          ) : status ? (
+          {/* 首次读取用骨架屏占位（复用资源中心那套，模组行带海报占位）。 */}
+          <SkeletonGate
+            loading={loading && !status}
+            skeleton={<SkeletonList rows={3} thumb="poster" />}
+          >
+          {loading && !status ? null : status ? (
             <>
               {/* 没有版本时只留时间线的空状态，避免同一句话出现两遍。 */}
               {status.versions.length > 0 ? (
@@ -340,6 +343,7 @@ export function ModVersionDialog({
               </Box>
             </>
           ) : null}
+          </SkeletonGate>
         </Box>
       </Box>
     </Portal>

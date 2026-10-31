@@ -354,3 +354,25 @@ pub(crate) fn save_memory_limit(memory_mb: u64) -> Result<(), String> {
     settings.memory_limit_mb = Some(memory_mb);
     save_app_settings_at(&path, &settings)
 }
+
+/// 记录用户同意隐私协议时的协议版本号（首次启动与版本更新后都会要求重新同意）。
+#[tauri::command]
+pub(crate) fn save_privacy_consent(version: String) -> Result<(), String> {
+    let trimmed = version.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("隐私协议版本号不能为空".to_string());
+    }
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.privacy_consented_version = Some(trimmed);
+    save_app_settings_at(&path, &settings)
+}
+
+/// 撤销隐私协议同意：清空记录，下次启动会重新弹出同意框。
+#[tauri::command]
+pub(crate) fn clear_privacy_consent() -> Result<(), String> {
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.privacy_consented_version = None;
+    save_app_settings_at(&path, &settings)
+}

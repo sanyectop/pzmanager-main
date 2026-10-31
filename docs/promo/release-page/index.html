@@ -8,6 +8,12 @@
 <link rel="icon" type="image/png" href="pzm-logo.png" />
 <link rel="apple-touch-icon" href="pzm-logo.png" />
 <script>
+  // 嵌入模式(?wall=true):隐藏顶栏 / 目录 / 页脚,只渲染正文,供启动器内嵌展示。
+  if (new URLSearchParams(location.search).get("wall") === "true") {
+    document.documentElement.dataset.wall = "true";
+  }
+</script>
+<script>
   // 提前应用主题,避免闪烁;未设置过时默认亮色
   document.documentElement.dataset.theme =
     localStorage.getItem("pzm-theme") || "light";
@@ -456,7 +462,18 @@
     .downloads { flex-direction: column; align-items: stretch; }
     .nav-links a:not(.nav-cta) { display: none; }
   }
-</style>
+  /* ---------- wall=true 嵌入模式 ---------- */
+  html[data-wall="true"] .topnav,
+  html[data-wall="true"] .toc,
+  html[data-wall="true"] footer,
+  html[data-wall="true"] .back-top { display: none !important; }
+  html[data-wall="true"] .layout {
+    grid-template-columns: 1fr;
+    max-width: 880px;
+    padding-top: 28px;
+  }
+  html[data-wall="true"] { scroll-padding-top: 24px; }
+  </style>
 </head>
 <body>
 
@@ -646,6 +663,7 @@
       <a href="https://github.com/sanyectop/pzmanager-main/issues" target="_blank" rel="noopener">问题反馈</a>
       <a href="https://1813934047.share.123pan.cn/123pan/7AH7Vv-qA21A?pwd=PZMa" target="_blank" rel="noopener">123 云盘</a>
       <a href="https://ifdian.net/a/sanyee" target="_blank" rel="noopener">爱发电 · 支持作者</a>
+      <a href="policy.html">隐私协议</a>
     </div>
     <p>PZManager © 2026 叁葉 · 本工具为社区作品,与 Project Zomboid 及 The Indie Stone 无官方关联。</p>
   </div>
