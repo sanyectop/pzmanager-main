@@ -46,3 +46,7 @@ feedback-viewer*/__pycache__/
 steam-relay(服务端请勿上传)/
 update-api(服务端请勿上传)/
 feedback-viewer(开发人员工具请勿上传)/
+
+
+# 本地发布产物(F:\pzmanager\release),不进仓库
+release/
