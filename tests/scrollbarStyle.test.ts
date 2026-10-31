@@ -12,10 +12,37 @@ const css = readFileSync(
 test("vertical scrollbar hugs the container edge", () => {
   const block = css.match(/\*::\-webkit\-scrollbar\-thumb:vertical\s*\{([^}]*)\}/);
   assert.ok(block, "缺少纵向滚动条滑块规则");
-  // 不再留左右透明边，铺满轨道并贴住右缘；右侧不做圆角。
+  // 不再留左右透明边，铺满轨道并贴住右缘。
   assert.match(block[1], /border:\s*0;/);
-  assert.match(block[1], /border-radius:\s*var\(--pz-radius-pill\) 0 0 var\(--pz-radius-pill\);/);
   assert.match(block[1], /background-clip:\s*border-box;/);
+});
+
+test("scrollbars are rectangular", () => {
+  // 轨道和滑块都不做圆角：胶囊形已废弃，横纵向统一矩形。
+  const track = css.match(/\*::\-webkit\-scrollbar\-track\s*\{([^}]*)\}/);
+  assert.ok(track, "缺少滚动条轨道规则");
+  assert.doesNotMatch(track[1], /border-radius/);
+
+  for (const name of ["thumb", "thumb:hover", "thumb:active", "thumb:vertical"]) {
+    const block = css.match(new RegExp("\\*::-webkit-scrollbar-" + name.replace(":", ":") + "\\s*\\{([^}]*)\\}"));
+    assert.ok(block, `缺少滚动条 ${name} 规则`);
+    assert.doesNotMatch(block[1], /--pz-radius-pill/);
+  }
+  const thumb = css.match(/\*::\-webkit\-scrollbar\-thumb\s*\{([^}]*)\}/);
+  assert.match(thumb[1], /border-radius:\s*0;/);
+});
+
+test("nested resource-center scrollbars sit on the panel edge", () => {
+  // 资源中心由内部区域自己滚动，外层不该预留用不到的 gutter，否则右侧空 8px。
+  const appContent = css.match(/\.pz-app-content-resource-center\s*\{([^}]*)\}/);
+  assert.ok(appContent, "缺少资源中心正文规则");
+  assert.match(appContent[1], /scrollbar-gutter:\s*auto;/);
+
+  // 光影下载列表抵消正文 1rem 右内边距，再在滚动容器内补回，行宽不变、滚动条贴边。
+  const list = css.match(/\.pz-resource-download-list\s*\{([^}]*)\}/);
+  assert.ok(list, "缺少光影下载列表规则");
+  assert.match(list[1], /margin-right:\s*-1rem;/);
+  assert.match(list[1], /padding-right:\s*1rem;/);
 });
 
 test("defines a shared custom scrollbar theme", () => {

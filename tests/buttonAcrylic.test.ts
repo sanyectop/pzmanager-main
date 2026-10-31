@@ -48,6 +48,7 @@ test("navigation buttons stay flat instead of becoming white pills", () => {
   assert.ok(start >= 0, "missing navigation exception rule");
   const block = cssSource.slice(start, cssSource.indexOf("}", start) + 1);
   assert.match(block, /\.pz-resource-center-sidebar-item:not\(\.pz-resource-center-sidebar-item-active\)/);
+  assert.match(block, /\.pz-version-hub-item:not\(\.is-active\)/);
   assert.match(block, /\.pz-version-tab:not\(\.pz-version-tab-active\)/);
   assert.match(block, /\.pz-version-filter:not\(\.is-active\)/);
   assert.match(block, /background:\s*transparent !important/);

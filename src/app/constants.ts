@@ -124,12 +124,10 @@ export const PZ_OPTIMIZATION_WORKSHOP_ID = "3805285544";
 
 export const navigationItems = [
   { value: "launch", label: "启动", icon: "play", description: "选择账户、调整内存并启动 Project Zomboid" },
-  { value: "overview", label: "支持库", icon: "library", description: "Project Zomboid 本机环境与安装状态" },
-  { value: "shots", label: "截图管理", icon: "images", description: "浏览和复制 Viewpoint 截图" },
-  { value: "shaderpacks", label: "光影管理", icon: "sun-medium", description: "导入和删除 Viewpoint 光影包" },
+  { value: "versions", label: "版本", icon: "cube", description: "游戏与模组版本隔离、历史版本与备份设置" },
   { value: "workshop", label: "资源中心", icon: "package-open", description: "浏览创意工坊与光影包下载资源" },
   { value: "mods", label: "模组管理", icon: "file-cog", description: "管理 Lua 与 JAR 模组" },
-  { value: "settings", label: "设置", icon: "sliders-horizontal", description: "关于、通用、版本、百宝箱与模组加载器等设置" },
+  { value: "settings", label: "设置", icon: "sliders-horizontal", description: "关于、通用、百宝箱与模组加载器等设置" },
 ] as const satisfies Array<{ value: ActivePage; label: string; icon: string; description: string }>;
 
 export const CUSTOM_TRANSLATION_MAX_CHARS = 20000;

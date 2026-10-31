@@ -127,16 +127,28 @@ test("formats the timeline date box as year/month/day", () => {
   assert.equal(formatVersionDate(0), "未知日期");
 });
 
-test("settings › 版本 has three tabs wired to the version tab state", () => {
+test("版本 page lists its sections in a left sidebar wired to versionTab", () => {
   assert.match(appSource, /const \[versionTab, setVersionTab\] = useState<VersionTab>\("game"\);/);
-  assert.match(appSource, /role="tablist"/);
-  assert.match(appSource, /aria-selected=\{versionTab === "game"\}/);
-  assert.match(appSource, /aria-selected=\{versionTab === "mods"\}/);
-  assert.match(appSource, /aria-selected=\{versionTab === "history"\}/);
-  assert.match(
-    appSource,
-    /versionTab === "game"\s*\?\s*gameVersionSettingsContent\s*:\s*versionTab === "mods"\s*\?\s*modVersionSettingsContent\s*:\s*versionHistorySettingsContent/,
-  );
+  // 六个分区：概览 / 模组版本 / 历史版本 / 支持库 / 光影包 / 截图。
+  for (const [value, label] of [
+    ["game", "概览"],
+    ["mods", "模组版本"],
+    ["history", "历史版本"],
+    ["support", "支持库"],
+    ["shaderpacks", "光影包"],
+    ["shots", "截图"],
+  ]) {
+    assert.match(
+      appSource,
+      new RegExp(`\\{ value: "${value}", label: "${label}", icon: fa\\w+ \\}`),
+    );
+  }
+  assert.match(appSource, /aria-current=\{versionTab === section\.value \? "page" : undefined\}/);
+  assert.match(appSource, /className="pz-version-hub-sidebar"/);
+  // 支持库 / 光影包 / 截图 复用原页面内容。
+  assert.match(appSource, /versionTab === "support" \? \(\s*overviewContent/);
+  assert.match(appSource, /versionTab === "shaderpacks" \? \(\s*shaderpacksContent/);
+  assert.match(appSource, /:\s*\(\s*shotsContent\s*\)/);
 });
 
 test("game version history lives on its own tab", () => {
@@ -243,4 +255,23 @@ test("backend registers every mod version command", () => {
       `missing handler registration: ${command}`,
     );
   }
+});
+
+test("support / shaderpacks / shots are folded into the versions page", () => {
+  // 顶栏不再有这三个独立入口。
+  assert.doesNotMatch(appSource, /value: "overview", label: "支持库"/);
+  assert.doesNotMatch(appSource, /value: "shots", label: "截图管理"/);
+  assert.doesNotMatch(appSource, /value: "shaderpacks", label: "光影管理"/);
+  // 旧入口统一重定向到版本页对应分区。
+  assert.match(
+    appSource,
+    /if \(nextPage === "overview" \|\| nextPage === "shots" \|\| nextPage === "shaderpacks"\) \{\s*setVersionTab\(nextPage === "overview" \? "support" : nextPage\);\s*nextPage = "versions";/,
+  );
+  // 光影包拖放同时接受「版本 › 光影包」视图。
+  assert.match(appSource, /activePage === "versions" && versionTab === "shaderpacks"/);
+  // 媒体分区不触发版本状态刷新。
+  assert.match(
+    appSource,
+    /if \(versionTab === "support" \|\| versionTab === "shaderpacks" \|\| versionTab === "shots"\) \{\s*return;\s*\}/,
+  );
 });

@@ -5,6 +5,7 @@ import test from "node:test";
 import { appSource } from "./sourceText.ts";
 import {
   MEMORY_CLEAN_NO_DECREASE_GRACE_MS,
+  MEMORY_CLEAN_POLL_MS,
   MEMORY_CLEAN_PLATEAU_GRACE_MS,
   applyMemoryCleanSample,
   createMemoryCleanTracker,
@@ -16,6 +17,10 @@ import {
 function sample(usedMb: number) {
   return { usedMb, usedPercent: 50 };
 }
+
+test("内存占用按每秒一次的节奏检测", () => {
+  assert.equal(MEMORY_CLEAN_POLL_MS, 1000);
+});
 
 test("已清理量按点击前基准计算，并保留观察到的峰值", () => {
   let tracker = createMemoryCleanTracker(8000);

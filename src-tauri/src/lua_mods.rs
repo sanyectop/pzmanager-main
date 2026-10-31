@@ -893,3 +893,384 @@ pub(crate) fn save_lua_mod_order(mod_ids: Vec<String>) -> Result<Vec<String>, St
     write_default_mod_ids(&default_path, &ordered)?;
     Ok(ordered)
 }
+
+/// 自动排序结果：备份预设名（未备份为 None）、新顺序里位置有变化的模组数、参与排序总数。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AutoSortLuaModsResult {
+    pub(crate) backup_preset: Option<String>,
+    pub(crate) moved: usize,
+    pub(crate) total: usize,
+}
+
+/// 参考创意工坊模组 Mod Load Order Sorter（MLOS）的自动排序规则：
+/// 1. 预置模组（加载器 / ModManager / modoptions）永远排最前；
+/// 2. loadFirst 的排最前、loadLast 的排最后；
+/// 3. 其余按资源分类归堆（translation → ui → clothes → code → tweaks → vehicle → map → resource → other）；
+/// 4. 同类里按模组 ID 字母序；
+/// 5. 最后按 require / loadAfter / loadBefore 做拓扑排序，依赖必定在前；成环时跳过环边保底。
+pub(crate) fn auto_sort_lua_mod_ids(
+    entries: &[LuaModEntry],
+    categories: &HashMap<String, String>,
+    current_order: &[String],
+) -> Vec<String> {
+    const CATEGORY_ORDER: [&str; 10] = [
+        "tweaks", "resource", "map", "vehicle", "code", "clothes", "ui", "other", "translation",
+        "undefined",
+    ];
+    let category_rank = |category: &str| -> usize {
+        CATEGORY_ORDER
+            .iter()
+            .position(|candidate| candidate.eq_ignore_ascii_case(category))
+            .unwrap_or(usize::MAX)
+    };
+    let preorder_rank = |entry: &LuaModEntry| -> usize {
+        const PREORDER: [&str; 3] = ["modmanager", "modmanagerserver", "modoptions"];
+        if entry.is_loader {
+            0
+        } else if PREORDER
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&entry.id))
+        {
+            1
+        } else {
+            2
+        }
+    };
+    let by_id: HashMap<String, &LuaModEntry> = entries
+        .iter()
+        .map(|entry| (entry.id.to_ascii_lowercase(), entry))
+        .collect();
+    let active: HashSet<String> = current_order
+        .iter()
+        .map(|id| id.to_ascii_lowercase())
+        .collect();
+
+    // 有效 loadAfter：自身 loadAfter + loadBefore 的反向边（X loadBefore Y ⇒ Y loadAfter X）。
+    let mut load_after: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in entries {
+        let key = entry.id.to_ascii_lowercase();
+        if !active.contains(&key) {
+            continue;
+        }
+        let edges = load_after.entry(key).or_default();
+        extend_unique_mod_ids(
+            edges,
+            entry
+                .load_after
+                .iter()
+                .filter(|id| active.contains(&id.to_ascii_lowercase()))
+                .cloned(),
+        );
+    }
+    for entry in entries {
+        let key = entry.id.to_ascii_lowercase();
+        if !active.contains(&key) {
+            continue;
+        }
+        for target in &entry.load_before {
+            let target_key = target.to_ascii_lowercase();
+            if active.contains(&target_key) && target_key != key {
+                extend_unique_mod_ids(load_after.entry(target_key).or_default(), [entry.id.clone()]);
+            }
+        }
+    }
+
+    // 第一步：预置 / loadFirst·loadLast / 分类 / ID 字母序的初始排序。
+    let mut ordered: Vec<&LuaModEntry> = entries
+        .iter()
+        .filter(|entry| active.contains(&entry.id.to_ascii_lowercase()))
+        .collect();
+    ordered.sort_by(|left, right| {
+        let left_key = left.id.to_ascii_lowercase();
+        let right_key = right.id.to_ascii_lowercase();
+        let rank = |entry: &LuaModEntry| -> (usize, bool, bool, usize) {
+            let category = categories
+                .get(&entry.id.to_ascii_lowercase())
+                .map(|value| value.as_str())
+                .unwrap_or("other");
+            (
+                preorder_rank(entry),
+                !entry.load_first,
+                entry.load_last,
+                category_rank(category),
+            )
+        };
+        rank(left)
+            .cmp(&rank(right))
+            .then_with(|| left_key.cmp(&right_key))
+    });
+
+    // 第二步：拓扑排序（require ∪ loadAfter），环上不再重复访问、模组保持参与排序。
+    let mut result: Vec<String> = Vec::with_capacity(ordered.len());
+    let mut done: HashSet<String> = HashSet::new();
+    fn visit(
+        entry: &LuaModEntry,
+        load_after: &HashMap<String, Vec<String>>,
+        by_id: &HashMap<String, &LuaModEntry>,
+        done: &mut HashSet<String>,
+        visiting: &mut HashSet<String>,
+        result: &mut Vec<String>,
+    ) {
+        let key = entry.id.to_ascii_lowercase();
+        if done.contains(&key) {
+            return;
+        }
+        if !visiting.insert(key.clone()) {
+            // 成环：放弃本次经由依赖的进入，但模组仍按初始顺序参与结果。
+            return;
+        }
+        let mut edges = load_after.get(&key).cloned().unwrap_or_default();
+        extend_unique_mod_ids(&mut edges, entry.requires.clone());
+        for dependency in &edges {
+            if let Some(dependency_entry) = by_id.get(&dependency.to_ascii_lowercase()) {
+                visit(dependency_entry, load_after, by_id, done, visiting, result);
+            }
+        }
+        visiting.remove(&key);
+        if done.insert(key) {
+            result.push(entry.id.clone());
+        }
+    }
+    for entry in &ordered {
+        visit(entry, &load_after, &by_id, &mut done, &mut HashSet::new(), &mut result);
+    }
+
+    // 拓扑里被环完全吞掉的模组兜底补齐（理论上 visit 不会丢，防御一下）。
+    for entry in &ordered {
+        if !done.contains(&entry.id.to_ascii_lowercase()) {
+            result.push(entry.id.clone());
+        }
+    }
+    result
+}
+
+/// 按模组目录特征判定资源分类（MLOS 的 getExtraModInfo 简化版：不看 tags，只看目录）。
+pub(crate) fn detect_lua_mod_category(path: &Path, name: &str) -> &'static str {
+    let mut dirs = vec![path.join("common")];
+    if let Ok(entries) = fs::read_dir(path) {
+        dirs.extend(entries.flatten().filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            let is_version_dir = entry.file_type().ok()?.is_dir()
+                && (name.starts_with("41") || name.starts_with("42"));
+            is_version_dir.then(|| entry.path())
+        }));
+    }
+    let exists = |relative: &[&str]| -> bool {
+        dirs.iter()
+            .any(|dir| relative.iter().any(|rel| dir.join(rel).is_dir()))
+    };
+    let is_ui = exists(&["media/ui", "media/textures/ui"]);
+    let is_models = exists(&["media/models", "media/models_X"]);
+    let is_textures = exists(&["media/textures", "media/texturepacks"]);
+    let is_vehicle = exists(&["media/models/vehicles", "media/models_X/vehicles"]);
+    let is_code = exists(&["media/lua/client", "media/lua/server", "media/scripts", "media/shared"]);
+    let is_skinned = exists(&["media/models_X/Skinned"]);
+    let is_translation = exists(&["media/lua/shared/Translate"]);
+    let is_resource = exists(&["media/resource"]);
+    let is_map = exists(&["media/maps"]);
+    let lower = name.to_ascii_lowercase();
+    let is_tweak = ["framework", " api", "_api", "tweak", "interface", "utilit", "bugfix"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+    // 与 MLOS 相同的优先级：翻译 → UI → 皮肤 → 代码 → 框架 → 载具 → 地图 → 资源 → 其它。
+    if is_translation && !(is_code || is_models || is_textures) {
+        "translation"
+    } else if is_ui {
+        "ui"
+    } else if is_skinned {
+        "clothes"
+    } else if is_code && !(is_models || is_textures || is_ui || is_resource) {
+        "code"
+    } else if is_tweak {
+        "tweaks"
+    } else if is_vehicle && is_textures {
+        "vehicle"
+    } else if is_map {
+        "map"
+    } else if (is_textures || is_resource) && !(is_code || is_models || is_map || is_ui) {
+        "resource"
+    } else {
+        "other"
+    }
+}
+
+/// 「自动排序」：重排所有已启用 Lua 模组的加载顺序并写回 default.txt；可选先存备份预设。
+#[tauri::command(async)]
+pub(crate) fn auto_sort_lua_mods(
+    backup_name: Option<String>,
+) -> Result<AutoSortLuaModsResult, String> {
+    let zomboid = user_zomboid_directory()?;
+    let default_path = zomboid.join("mods").join("default.txt");
+    let current_order = read_default_mod_ids(&default_path)?;
+    let backup_preset = match backup_name.as_deref() {
+        Some(name) if !name.trim().is_empty() => Some(save_mod_preset(name.to_string())?.name),
+        _ => None,
+    };
+    let entries = lua_mod_entries()?;
+    let mut categories = HashMap::new();
+    for entry in &entries {
+        categories.insert(
+            entry.id.to_ascii_lowercase(),
+            detect_lua_mod_category(Path::new(&entry.path), &entry.name).to_string(),
+        );
+    }
+    let new_order = auto_sort_lua_mod_ids(&entries, &categories, &current_order);
+    let moved = new_order
+        .iter()
+        .zip(current_order.iter())
+        .filter(|(new_id, old_id)| !new_id.eq_ignore_ascii_case(old_id))
+        .count();
+    if moved > 0 {
+        let backup_dir = zomboid
+            .join(".pzmanager")
+            .join("default-backups")
+            .join(current_unix_timestamp()?);
+        backup_file(&default_path, &backup_dir, "default.txt")?;
+        write_default_mod_ids(&default_path, &new_order)?;
+    }
+    Ok(AutoSortLuaModsResult {
+        backup_preset,
+        moved,
+        total: new_order.len(),
+    })
+}
+
+#[cfg(test)]
+mod auto_sort_tests {
+    use super::{auto_sort_lua_mod_ids, detect_lua_mod_category, LuaModEntry};
+    use std::collections::HashMap;
+
+    fn entry(id: &str, path: &str) -> LuaModEntry {
+        LuaModEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: path.to_string(),
+            source: "local".to_string(),
+            workshop_id: None,
+            enabled: true,
+            load_order: None,
+            requires: Vec::new(),
+            load_after: Vec::new(),
+            load_before: Vec::new(),
+            load_first: false,
+            load_last: false,
+            has_common: false,
+            has_b42: true,
+            is_loader: false,
+            poster_path: None,
+        }
+    }
+
+    fn categories_of(entries: &[LuaModEntry], map: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut categories = HashMap::new();
+        for (id, category) in map {
+            categories.insert(id.to_string(), category.to_string());
+        }
+        for entry in entries {
+            categories
+                .entry(entry.id.to_ascii_lowercase())
+                .or_insert_with(|| "other".to_string());
+        }
+        categories
+    }
+
+    #[test]
+    fn dependencies_and_load_after_run_first() {
+        let entries = vec![
+            entry("GamePlay", "p1"),
+            {
+                let mut e = entry("FrameworkA", "p2");
+                e.load_after = vec!["GamePlay".to_string()];
+                e
+            },
+            {
+                let mut e = entry("Content", "p3");
+                e.requires = vec!["FrameworkA".to_string()];
+                e
+            },
+        ];
+        let categories = categories_of(&entries, &[]);
+        let order = auto_sort_lua_mod_ids(&entries, &categories, &["GamePlay".into(), "FrameworkA".into(), "Content".into()]);
+        let position = |id: &str| order.iter().position(|v| v.eq_ignore_ascii_case(id)).unwrap();
+        assert!(position("GamePlay") < position("FrameworkA"));
+        assert!(position("FrameworkA") < position("Content"));
+    }
+
+    #[test]
+    fn loader_and_preorder_mods_come_first() {
+        let mut loader = entry("ZombieBuddy", "p1");
+        loader.is_loader = true;
+        let entries = vec![entry("zzz-mod", "p2"), loader, entry("modoptions", "p3")];
+        let categories = categories_of(&entries, &[]);
+        let order = auto_sort_lua_mod_ids(&entries, &categories, &["zzz-mod".into(), "ZombieBuddy".into(), "modoptions".into()]);
+        assert_eq!(order[0].to_ascii_lowercase(), "zombiebuddy");
+        assert_eq!(order[1].to_ascii_lowercase(), "modoptions");
+        assert_eq!(order[2].to_ascii_lowercase(), "zzz-mod");
+    }
+
+    #[test]
+    fn load_first_and_last_pin_positions() {
+        let mut first = entry("a-first", "p1");
+        first.load_first = true;
+        let mut last = entry("z-last", "p2");
+        last.load_last = true;
+        let entries = vec![last, entry("m-mid", "p3"), first];
+        let categories = categories_of(&entries, &[]);
+        let order = auto_sort_lua_mod_ids(&entries, &categories, &["z-last".into(), "m-mid".into(), "a-first".into()]);
+        assert_eq!(order[0].to_ascii_lowercase(), "a-first");
+        assert_eq!(order[2].to_ascii_lowercase(), "z-last");
+    }
+
+    #[test]
+    fn categories_group_together() {
+        let entries = vec![
+            entry("a-ui", "p1"),
+            entry("b-map", "p2"),
+            entry("c-ui", "p3"),
+            entry("d-map", "p4"),
+        ];
+        let categories = categories_of(
+            &entries,
+            &[("a-ui", "ui"), ("c-ui", "ui"), ("b-map", "map"), ("d-map", "map")],
+        );
+        let order = auto_sort_lua_mod_ids(&entries, &categories, &["a-ui".into(), "b-map".into(), "c-ui".into(), "d-map".into()]);
+        // MLOS 的分类序里 map 在 ui 之前（tweaks → resource → map → … → ui）。
+        let rank = |id: &str| match id {
+            "b-map" | "d-map" => 0,
+            _ => 1,
+        };
+        let ranks: Vec<usize> = order.iter().map(|id| rank(id)).collect();
+        let mut sorted = ranks.clone();
+        sorted.sort();
+        assert_eq!(ranks, sorted, "同类应归堆：{:?}", order);
+    }
+
+    #[test]
+    fn cycles_keep_all_mods() {
+        let mut a = entry("a", "p1");
+        a.load_after = vec!["b".to_string()];
+        let mut b = entry("b", "p2");
+        b.load_after = vec!["a".to_string()];
+        let entries = vec![a, b, entry("c", "p3")];
+        let categories = categories_of(&entries, &[]);
+        let order = auto_sort_lua_mod_ids(&entries, &categories, &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(order.len(), 3, "成环时模组不能丢：{:?}", order);
+    }
+
+    #[test]
+    fn category_detection_uses_media_folders() {
+        let base = std::env::temp_dir().join(format!("pz-autosort-{}", std::process::id()));
+        let ui_mod = base.join("ui-mod");
+        std::fs::create_dir_all(ui_mod.join("common/media/ui")).unwrap();
+        let map_mod = base.join("map-mod");
+        std::fs::create_dir_all(map_mod.join("42.0/media/maps")).unwrap();
+        let plain = base.join("plain-mod");
+        std::fs::create_dir_all(plain.join("42.0/media/lua/client")).unwrap();
+        assert_eq!(detect_lua_mod_category(&ui_mod, "ui-mod"), "ui");
+        assert_eq!(detect_lua_mod_category(&map_mod, "map-mod"), "map");
+        assert_eq!(detect_lua_mod_category(&plain, "plain-mod"), "code");
+        std::fs::remove_dir_all(&base).ok();
+    }
+}

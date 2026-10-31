@@ -364,3 +364,101 @@ export function versionDeltaChainDepth(versions: VersionRecord[]): number {
   }
   return depth;
 }
+
+/** 版本操作的时间估算：按进度事件的百分比变化率做指数平滑，换步骤/进度回退时重置。 */
+export type VersionEtaTracker = {
+  startedAt: number | null;
+  lastAt: number;
+  lastPercent: number;
+  lastStep: number;
+  ratePerMs: number | null;
+  /** 上一次对外展示的估算值：新估算与它按 4:6 混合，压掉显示抖动。 */
+  smoothedEtaSeconds: number | null;
+};
+
+export function createVersionEtaTracker(): VersionEtaTracker {
+  return { startedAt: null, lastAt: 0, lastPercent: 0, lastStep: 0, ratePerMs: null, smoothedEtaSeconds: null };
+}
+
+/** 每条进度事件喂一次；返回当前步骤的剩余秒数（还估不出来时是 null）。 */
+export function updateVersionEta(
+  tracker: VersionEtaTracker,
+  update: VersionOperationUpdate | null,
+): number | null {
+  if (!update) {
+    return null;
+  }
+  const now = Date.now();
+  const percent = versionProgressPercent(update);
+  const step = update.step ?? 1;
+  if (update.status === "started") {
+    tracker.startedAt = now;
+  }
+  tracker.startedAt ??= now;
+  // 换步骤（哈希 → 复制）或进度回退时，旧速率对新阶段没有意义，重新积累样本。
+  if (update.status === "started" || step !== tracker.lastStep || percent < tracker.lastPercent) {
+    tracker.lastAt = now;
+    tracker.lastPercent = percent;
+    tracker.lastStep = step;
+    tracker.ratePerMs = null;
+    tracker.smoothedEtaSeconds = null;
+    return null;
+  }
+  // 百分比是整数，多数事件里它根本没动；把「距离上次百分比变化」的时间攒起来测速率，
+  // 而不是每次事件都重置计时，否则间隔永远达不到采样阈值、速率永远积累不出来。
+  if (percent > tracker.lastPercent) {
+    const elapsedMs = now - tracker.lastAt;
+    if (elapsedMs >= 300) {
+      const instantaneous = (percent - tracker.lastPercent) / elapsedMs;
+      tracker.ratePerMs =
+        tracker.ratePerMs === null ? instantaneous : 0.35 * instantaneous + 0.65 * tracker.ratePerMs;
+      tracker.lastAt = now;
+      tracker.lastPercent = percent;
+    }
+  }
+  if (tracker.ratePerMs === null || tracker.ratePerMs <= 0 || percent >= 100) {
+    return null;
+  }
+  const etaMs = (100 - percent) / tracker.ratePerMs;
+  // 速率太慢或样本太少时给出的大数没有参考价值，宁可不显示。
+  if (!Number.isFinite(etaMs) || etaMs > 6 * 60 * 60 * 1000) {
+    return null;
+  }
+  const rawEta = Math.max(1, Math.round(etaMs / 1000));
+  // 和上一次展示的估算按 4:6 混合：单次速率波动不会直接打在界面上，
+  // 连续偏快/偏慢仍会在几轮内收敛到新水平。
+  const smoothed =
+    tracker.smoothedEtaSeconds === null
+      ? rawEta
+      : Math.max(1, Math.round(0.4 * rawEta + 0.6 * tracker.smoothedEtaSeconds));
+  tracker.smoothedEtaSeconds = smoothed;
+  return smoothed;
+}
+
+/** 把剩余秒数转成人话；超过一小时就不给精确数了。 */
+export function formatVersionEta(seconds: number | null): string | null {
+  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+  if (seconds < 60) {
+    return "约 " + Math.max(1, Math.round(seconds)) + " 秒";
+  }
+  if (seconds < 60 * 60) {
+    return "约 " + Math.max(1, Math.round(seconds / 60)) + " 分钟";
+  }
+  return "超过 1 小时";
+}
+
+/** 操作已进行的时长（进度事件驱动刷新，不额外开计时器）。 */
+export function formatVersionElapsed(startedAt: number | null): string | null {
+  if (!startedAt) {
+    return null;
+  }
+  const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  if (seconds < 60) {
+    return seconds + " 秒";
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes + " 分 " + rest + " 秒";
+}

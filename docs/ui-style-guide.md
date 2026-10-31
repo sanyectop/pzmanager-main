@@ -290,7 +290,7 @@
 - 长名称和说明使用省略号或限制行数，不能让列表横向溢出。
 - 缩略图不可用时使用统一占位符，不要保留巨大空白框。
 - 悬停/聚焦高亮用 `--pz-radius-sm`（与按钮圆角一致）。高亮画在列表项的 `::before` 上（配合 `isolation: isolate` + `z-index: -1`），行的分隔线因此保持直角；不要直接给整行加 `border-radius`。
-- 右键菜单挂在整行上（`Menu.Root` + `Menu.ContextTrigger asChild`，行本身仍是网格/弹性子元素）；左键（含 Enter/Space）默认是「在窗口内打开详情」，需要 Steam 客户端时点行右侧的方形分享按钮（`.pz-workshop-share-button`，`26px` 见方、`--pz-control-height`，图标是自绘的「向上再向右折」箭头 `.pz-workshop-share-icon`——不要换成三点连线的 `faShareNodes`），按钮自己 `stopPropagation`，不要改变整行的左键行为。菜单项文案写清去向（「在 Steam 中打开」「在窗口内打开」），只有两项时不做分组和图标。
+- 右键菜单挂在整行上（`Menu.Root` + `Menu.ContextTrigger asChild`，行本身仍是网格/弹性子元素）；左键（含 Enter/Space）默认是「在窗口内打开详情」，需要 Steam 客户端时点行右侧的方形分享按钮（`.pz-workshop-share-button`，`26px` 见方、`--pz-control-height`，图标是自绘的斜向右上箭头 `.pz-workshop-share-icon`——不要换成三点连线的 `faShareNodes`），按钮自己 `stopPropagation`，不要改变整行的左键行为。菜单项文案写清去向（「在 Steam 中打开」「在窗口内打开」），只有两项时不做分组和图标。
 - 需要展示富文本详情时用模态弹窗，不要撑高行内区域：外壳复用光影下载弹窗的 `.pz-resource-file-overlay` / `.pz-resource-file-dialog`（含 `is-closing` 退场动画），并 `Portal` 到 `body`——`.pz-main` 带 `backdrop-filter` + `overflow: hidden`，会裁掉就地渲染的 `position: fixed` 弹层。详情正文用 `.pz-developer-news-content`，限高后自己滚动。
 - 弹窗高度随内容变化（加载中 → 内容就绪）时不要瞬跳：用 `useDialogAutoHeight`（量出目标高度 → 从旧高度过渡 → `transitionend` 交还 `height: auto`，不把高度写死）。时长与缓动直接取自 `.pz-resource-file-dialog` 的 `height` 过渡，`prefers-reduced-motion` 下会被压到 `1ms`，所以过渡事件仍会触发、内联高度仍能交还。
 
@@ -333,11 +333,12 @@
 ### 4.8 设置页
 
 - 设置页使用与资源中心相同的左右结构。
+- 「版本」是顶栏一级页面（图标 `cube`，资源 `public/icons/cube.svg`），不再出现在设置侧栏；它沿用设置页的平铺排版。
 - 通用设置最大宽度为 `52rem`，避免输入项横跨整个窗口。
 - 「通用」底部的 Steam 中转与本地代理归入「网络」分组：分区标题「网络」+ 问号说明，模式下拉、地址输入和操作按钮保持可见；不要把长段说明平铺在控件上方。
 - 每项设置由左侧标题与说明、右侧控件组成，窄屏时自动换行。
-- 设置子页平铺，不用卡片式布局：不要给整页套浮层卡面（底色 / 圆角 / 阴影 / 背景模糊），也不要在页面里再套一层卡片。需要分组时用分区标题 + 顶部细分割线，信息成行排列——「设置 › 版本」的 `.pz-version-section` / `.pz-version-fact` / `.pz-version-entry` 就是这套；警告只用左侧一条状态线（`.pz-version-notice`），不要做成带底色圆角的告警卡。版本列表本身较宽，最大宽度放宽到 `64rem`。
-- 设置子页还需要再分类时，用页面内的胶囊分段（`.pz-version-tabs` + `.pz-version-tab-active`，`role="tablist"` / `role="tab"` / `aria-selected`），不要为二级分类再加一条侧栏，也不要把分段做成带底色的容器。「设置 › 版本」的「游戏版本 / 模组版本 / 历史版本」就是这样，外层仍是同一个平铺面板。历史版本单独一页，只放游戏版本链（改动统计、还原、删除）；保存、备份位置和开关留在「游戏版本」，两个分页共用 `.pz-version-section` 和同一条后台进度块。
+- 设置子页与顶栏「版本」页都平铺，不用卡片式布局：不要给整页套浮层卡面（底色 / 圆角 / 阴影 / 背景模糊），也不要在页面里再套一层卡片。需要分组时用分区标题 + 顶部细分割线，信息成行排列——版本页的 `.pz-version-section` / `.pz-version-fact` / `.pz-version-entry` 就是这套；警告只用左侧一条状态线（`.pz-version-notice`），不要做成带底色圆角的告警卡。版本列表本身较宽，最大宽度放宽到 `64rem`。
+- 设置子页或版本页还需要再分类时，用页面内的胶囊分段（`.pz-version-tabs` + `.pz-version-tab-active`，`role="tablist"` / `role="tab"` / `aria-selected`），不要为二级分类再加一条侧栏，也不要把分段做成带底色的容器。版本页的「游戏版本 / 模组版本 / 历史版本」就是这样，外层仍是同一个平铺面板。历史版本单独一页，只放游戏版本链（改动统计、还原、删除）；保存、备份位置和开关留在「游戏版本」，两个分页共用 `.pz-version-section` 和同一条后台进度块。
 - 游戏版本页的分区顺序固定为：游戏信息 → 保存版本 → 备份保存位置 → 多线程加速 / 保存时同时备份模组 → 当前状态。保存控件先于保存位置，避免用户先改路径却找不到保存按钮。
 - 版本/模组行的状态标签（「完整备份 / 只存变化」「当前」「创意工坊 / 本地」「N 个版本」「含 N 个模组」等）统一**右对齐到标题行右侧**：标题左、标签右，用 `HStack justify="space-between" wrap="nowrap"` + 右侧 `HStack justify="flex-end"`（`flexShrink="0"`），不要挤在名称后面。标题 `flex="1"` + `lineClamp={1}` 单行省略、`title` 保留完整名称，标签因此不会被挤到下一行；「上次保存 / 创建时间」这类次要信息放在标题下方的元信息行，不占右侧标签区。
 - 版本时间线（模组「版本记录」模态框与行内展开共用 `ModVersionTimeline`）：**最新在最上**，左侧圆形胶囊写序号（最新 = 1，越新越大，最小 `10px`），相邻圆形用 `2px` 竖线相连，紧接一个写日期（`YYYY/MM/DD`）的矩形；类型/「当前」标签右对齐到日期框同一行的右侧；完整时间、文件数、大小和还原/删除放在下面的说明行。空状态只写一句「还没有版本记录」。
@@ -357,7 +358,7 @@
 
 ### 4.9 百宝箱
 
-- 「百宝箱」是「设置 › 设置分类」里的一页（排在「版本」之后），收纳翻译器、下载器、控制台这三件随手用的工具；侧栏不再单独放这三个分类（分类为 关于 / 通用 / 版本 / 百宝箱 / 日志 / 模组加载器 / 启动）。
+- 「百宝箱」是「设置 › 设置分类」里的一页（排在「通用」之后），收纳翻译器、下载器、控制台这三件随手用的工具；侧栏不再单独放这三个分类（分类为 关于 / 通用 / 百宝箱 / 日志 / 模组加载器 / 启动）。
 - 正文**单列全宽**：`.pz-toolbox-page { max-width: none }` + `.pz-toolbox-grid { display: flex; flex-direction: column; gap: .9rem }`，卡片 `margin: 0`。不要恢复 `columns` 瀑布流或多列并排。
 - 每张卡片一个工具：标题 + 一句话说明 + 内容。卡片是浅色面（`--pz-surface-card`）+ 细描边 + 小阴影，圆角 `--pz-radius-md`。
 - 卡片里原有的设置面板去掉自带卡面与内边距（`.pz-toolbox-card .pz-panel { padding: 0; border: 0; background: transparent; box-shadow: none }`），避免「卡片套卡片」；同一卡片内多块内容用 `.pz-toolbox-separator` 细线分隔。

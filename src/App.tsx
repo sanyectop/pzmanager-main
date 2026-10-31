@@ -1,5 +1,5 @@
 import { Avatar, Badge, Box, Button, HStack, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea } from "@chakra-ui/react";
-import { faCircleInfo, faGear, faPlus, faTrash } from "@fortawesome/free-solid-svg-icons";
+import { faCircleInfo, faClockRotateLeft, faCubes, faGear, faHouse, faImages, faPlus, faScrewdriverWrench, faSun, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -31,7 +31,7 @@ import {
   STEAM_RELAY_MODE_OPTIONS,
   previewImageFallbackUrl,
 } from "./steamRelay";
-import { filterModVersionTargets, formatVersionBytes, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionChangeSummary, versionDeltaChainDepth, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
+import { filterModVersionTargets, formatVersionBytes, formatVersionElapsed, formatVersionEta, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionChangeSummary, versionDeltaChainDepth, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, createVersionEtaTracker, updateVersionEta, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import { DEFAULT_SEASON_FEATURES, DEFAULT_WALLPAPER_EFFECT, normalizeWallpaperEffectSettings, wallpaperEffectAt, type SeasonFeatures, type WallpaperEffectSettings } from "./builtinWallpaper";
 import { SeasonalWallpaper, loadSeasonFeatures } from "./SeasonalWallpaper";
@@ -67,6 +67,7 @@ import {
   JarModScanUpdate,
   LauncherLogTail,
   LauncherUpdateStatus,
+  AutoSortLuaModsResult,
   LuaModBatchToggleResult,
   LuaModEntry,
   ManagedDirectory,
@@ -146,9 +147,13 @@ import {
   DeveloperNewsCard,
   EmptyState,
   HintDot,
+  HtmlContentWithImageReveal,
   MediaPanel,
   PathValue,
   ShotThumbnail,
+  SkeletonGate,
+  SkeletonList,
+  SkeletonNews,
 } from "./components/common";
 import {
   JarModPoster,
@@ -180,7 +185,7 @@ import {
 } from "./app/utils";
 import { BackgroundMenu } from "./components/backgrounds";
 import { FastLaunchCacheStatusLine, FastLaunchWarningDialog } from "./components/fastLaunch";
-import { ModVersionDialog, ModVersionTimeline, VersionStoreDriveDialog } from "./components/version";
+import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWarningDialog, VersionStoreDriveDialog } from "./components/version";
 import { NotificationConsole, TaskCenterPanel, ToastViewport } from "./components/tasks";
 import { ResourceDownloadBrowser, WorkshopDropdown, WorkshopTagPicker, WorkshopTagSelectionSummary } from "./components/workshop";
 import { WindowTitlebar, useDialogAutoHeight } from "./components/shell";
@@ -194,6 +199,9 @@ function App() {
   /** 正在播移除动画的任务 id；动画走完才真正从 tasks 里删掉。 */
   const [taskClosingIds, setTaskClosingIds] = useState<string[]>([]);
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
+  // 任务中心退出动画：先播 .pz-task-panel-out 再卸载，三条关闭路径（× / 点外部 / Esc）共用。
+  const [taskPanelClosing, setTaskPanelClosing] = useState(false);
+  const taskPanelCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const taskIdRef = useRef(0);
   const [installing, setInstalling] = useState(false);
   const [installingPzOptimization, setInstallingPzOptimization] = useState(false);
@@ -342,12 +350,22 @@ function App() {
   const launchCommandRef = useRef<HTMLDivElement | null>(null);
   const [resourceCenterPage, setResourceCenterPage] = useState<ResourceCenterPage>("workshop");
   const [settingsPage, setSettingsPage] = useState<SettingsPage>("general");
+  // 设置内分页切换的滑入方向：按侧栏顺序判断前进/后退，与主页面切换的方向感一致。
+  const [settingsTransitionDirection, setSettingsTransitionDirection] = useState<"forward" | "backward">("forward");
   // 「设置 › 版本」：版本隔离状态、后台操作进度与存储目录草稿。
   const [versionTab, setVersionTab] = useState<VersionTab>("game");
   const [versionStatus, setVersionStatus] = useState<VersionStatus | null>(null);
   const [versionStatusLoading, setVersionStatusLoading] = useState(false);
   const [versionStatusError, setVersionStatusError] = useState<string | null>(null);
   const [versionOperation, setVersionOperation] = useState<VersionOperationUpdate | null>(null);
+  // 还原后 PZ Optimization 未能自动重装：还原继续完成，结束后弹模态框警告。
+  const [pzOptRestoreWarning, setPzOptRestoreWarning] = useState<string | null>(null);
+  // 时间估算：进度事件按百分比变化率平滑出当前步骤的剩余时间，事件驱动刷新。
+  const versionEtaTrackerRef = useRef(createVersionEtaTracker());
+  const [versionTiming, setVersionTiming] = useState<{ startedAt: number | null; etaSeconds: number | null }>({
+    startedAt: null,
+    etaSeconds: null,
+  });
   const [versionOperationRunning, setVersionOperationRunning] = useState(false);
   const [versionVerified, setVersionVerified] = useState<VersionVerifyResult | null>(null);
   const [versionLabelDraft, setVersionLabelDraft] = useState("");
@@ -373,6 +391,13 @@ function App() {
   const [modVersionTargets, setModVersionTargets] = useState<ModVersionTarget[] | null>(null);
   const [modVersionTargetsLoading, setModVersionTargetsLoading] = useState(false);
   const [modVersionPacks, setModVersionPacks] = useState<ModPackRecord[] | null>(null);
+  // 整合包命名 / 重命名弹窗：save = 一键保存时起名（可留空），rename = 改已有整合包的显示名。
+  const [modPackNameDialog, setModPackNameDialog] = useState<{
+    mode: "save" | "rename";
+    pack: ModPackRecord | null;
+  } | null>(null);
+  const [modPackNameDialogClosing, setModPackNameDialogClosing] = useState(false);
+  const [modPackRenaming, setModPackRenaming] = useState(false);
   const [modVersionSearch, setModVersionSearch] = useState("");
   const [modVersionFilter, setModVersionFilter] = useState<ModVersionFilter>("all");
   const [modVersionStatuses, setModVersionStatuses] = useState<Record<string, ModVersionStatus>>({});
@@ -426,7 +451,7 @@ function App() {
   const [jarMods, setJarMods] = useState<ScannedJarMod[] | null>(null);
   const [luaMods, setLuaMods] = useState<LuaModEntry[] | null>(null);
   const [luaModsLoading, setLuaModsLoading] = useState(false);
-  const [luaModBatchAction, setLuaModBatchAction] = useState<"positive" | "negative" | null>(null);
+  const [luaModBatchAction, setLuaModBatchAction] = useState<"positive" | "negative" | "sort" | null>(null);
   const [selectedLuaModKeys, setSelectedLuaModKeys] = useState<Set<string>>(new Set());
   const [expandedLuaModKeys, setExpandedLuaModKeys] = useState<Set<string>>(new Set());
   const [luaModActionId, setLuaModActionId] = useState<string | null>(null);
@@ -455,6 +480,8 @@ function App() {
   const [jarScanFrame, setJarScanFrame] = useState(0);
   const [jarScanProgress, setJarScanProgress] = useState({ scanned: 0, total: 0 });
   const jarScanIdRef = useRef<number | null>(null);
+  // 启动后是否已经为 JAR 页面发起过首次扫描：再次进入页面不再自动扫描，改由「刷新 JAR 列表」手动触发。
+  const jarModsScanStartedRef = useRef(false);
   const workshopBackgroundScanIdRef = useRef<number | null>(null);
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
@@ -902,13 +929,48 @@ function App() {
     }
   }, [developerMode]);
 
+  /** 关闭任务中心：播完退出动画再真正卸载，动画期间忽略重复关闭。 */
+  function closeTaskPanel() {
+    if (!taskPanelOpen || taskPanelClosing) {
+      return;
+    }
+    setTaskPanelClosing(true);
+    if (taskPanelCloseTimerRef.current !== null) {
+      clearTimeout(taskPanelCloseTimerRef.current);
+    }
+    taskPanelCloseTimerRef.current = setTimeout(() => {
+      setTaskPanelOpen(false);
+      setTaskPanelClosing(false);
+      taskPanelCloseTimerRef.current = null;
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
   /** 跳到「设置 › 模组加载器」：支持库、模组管理里的指路按钮都走这里。 */
   function openModLoaderSettings() {
-    setSettingsPage("modLoader");
+    switchSettingsPage("modLoader");
     navigateToPage("settings");
   }
 
+  /** 设置内切换分页：记录滑动方向（按侧栏顺序），供换页动画判断前进/后退。 */
+  function switchSettingsPage(nextPage: SettingsPage) {
+    setSettingsPage((current) => {
+      if (current !== nextPage) {
+        const order: SettingsPage[] = ["about", "general", "toolbox", "logs", "modLoader", "startup"];
+        setSettingsTransitionDirection(
+          order.indexOf(nextPage) >= order.indexOf(current) ? "forward" : "backward",
+        );
+      }
+      return nextPage;
+    });
+  }
+
   function navigateToPage(nextPage: ActivePage) {
+    // 支持库 / 截图 / 光影包已并入「版本」页的分区：旧的页面入口统一重定向过去，
+    // 保证「去支持库安装」这类既有跳转仍能落到正确位置。
+    if (nextPage === "overview" || nextPage === "shots" || nextPage === "shaderpacks") {
+      setVersionTab(nextPage === "overview" ? "support" : nextPage);
+      nextPage = "versions";
+    }
     if (nextPage === activePage && pageTransitionPhase === "idle") {
       return;
     }
@@ -950,6 +1012,9 @@ function App() {
       if (pageTransitionTimerRef.current !== null) {
         clearTimeout(pageTransitionTimerRef.current);
       }
+      if (taskPanelCloseTimerRef.current !== null) {
+        clearTimeout(taskPanelCloseTimerRef.current);
+      }
     };
   }, []);
 
@@ -986,11 +1051,11 @@ function App() {
       if (target?.closest(".pz-task-panel, .pz-task-trigger")) {
         return;
       }
-      setTaskPanelOpen(false);
+      closeTaskPanel();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setTaskPanelOpen(false);
+        closeTaskPanel();
       }
     };
     document.addEventListener("mousedown", closeOnOutside);
@@ -999,7 +1064,8 @@ function App() {
       document.removeEventListener("mousedown", closeOnOutside);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [taskPanelOpen]);
+    // closeTaskPanel 是稳定的普通函数声明，这里只关心开关状态。
+  }, [taskPanelOpen, taskPanelClosing]);
 
   useEffect(() => {
     if (!jarModsLoading) {
@@ -1052,6 +1118,9 @@ function App() {
       }
       const scanId = await invoke<number>("start_zombie_buddy_jar_scan", { refreshCache });
       jarScanIdRef.current = scanId;
+      // 只有真正发起了扫描才记为「本次运行已扫描」：加载器没装时提前返回，
+      // 装好后再进入页面仍会自动扫描一次。
+      jarModsScanStartedRef.current = true;
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
       setJarModsLoading(false);
@@ -1342,6 +1411,33 @@ function App() {
       setModPresets(await invoke<ModPreset[]>("list_mod_presets"));
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }
+
+  /** 「自动排序」：按依赖与分类重排全部已启用 Lua 模组的加载顺序，可选先备份预设。 */
+  async function autoSortLuaMods() {
+    if (luaModBatchAction) return;
+    const proceed = window.confirm(
+      "自动排序会按依赖与分类重排所有已启用 Lua 模组的加载顺序（参考 Mod Load Order Sorter 的规则：加载器最前 → loadFirst → 分类归堆 → loadLast → 依赖拓扑）。\n\n确定继续吗？",
+    );
+    if (!proceed) return;
+    const backup = window.confirm(
+      "是否先备份当前预设？\n\n备份会把当前的启用列表与顺序保存成一个预设，之后可随时一键切回。\n\n[确定] 先备份再排序　[取消] 不备份直接排序",
+    );
+    setLuaModBatchAction("sort");
+    try {
+      const backupName = backup
+        ? `自动排序前备份 ${new Date().toLocaleString("zh-CN", { hour12: false })}`
+        : null;
+      const result = await invoke<AutoSortLuaModsResult>("auto_sort_lua_mods", { backupName });
+      await loadLuaMods();
+      const backupText = result.backupPreset ? `，已保存备份预设「${result.backupPreset}」` : "";
+      const moveText = result.moved > 0 ? `${result.moved} / ${result.total} 个模组的顺序有调整` : "顺序已经是最佳，无需调整";
+      showToast(`自动排序完成：${moveText}${backupText}`, "success");
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setLuaModBatchAction(null);
     }
   }
 
@@ -2467,18 +2563,22 @@ function App() {
       .then((path) => setVersionStorePath(path))
       .catch(() => undefined);
   }, []);
-  // 「设置 › 版本」：进入页面/切分页时读取对应数据（游戏版本与历史版本共用版本状态）。
+  // 「版本」顶层页：进入页面/切分页时读取对应数据（游戏版本与历史版本共用版本状态）。
   useEffect(() => {
-    if (settingsPage !== "versions") return;
+    if (activePage !== "versions") return;
     if (versionTab === "mods") {
       void loadModVersionTargets();
       void loadModVersionPacks();
       return;
     }
+    // 支持库 / 光影包 / 截图 不依赖版本状态：媒体数据启动时就已读好，不再重复刷新。
+    if (versionTab === "support" || versionTab === "shaderpacks" || versionTab === "shots") {
+      return;
+    }
     // 还原会往游戏目录写临时文件，操作期间不扫；完成事件会触发刷新。
     if (versionOperationRunning || versionStatus?.operationRunning) return;
     void refreshVersionStatus();
-  }, [settingsPage, versionTab]);
+  }, [activePage, versionTab]);
 
   // 「设置 › 日志」：进入页面时读取一次启动器日志尾部。
   useEffect(() => {
@@ -2524,10 +2624,12 @@ function App() {
     void listen<VersionOperationUpdate>("version-progress", (event) => {
       const update = event.payload;
       setVersionOperation(update);
+      const etaSeconds = updateVersionEta(versionEtaTrackerRef.current, update);
+      setVersionTiming({ startedAt: versionEtaTrackerRef.current.startedAt, etaSeconds });
       // 同步到任务中心那一行（进行中 / 完成 / 失败）。
       const taskId = versionTaskIdRef.current;
       if (taskId) {
-        applyVersionTaskProgress(taskId, update);
+        applyVersionTaskProgress(taskId, update, etaSeconds);
         if (update.status === "completed" || update.status === "error") {
           versionTaskIdRef.current = null;
         }
@@ -2563,6 +2665,12 @@ function App() {
       if (disposed) cleanup();
       else unlistenVerified = cleanup;
     }).catch(() => undefined);
+    // 还原完成但 PZ Optimization 未能自动重装：后端单独发警告事件，弹模态框提示。
+    void listen<{ error: string }>("version-restore-pzopt-warning", (event) => {
+      setPzOptRestoreWarning(event.payload.error);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+    }).catch(() => undefined);
     return () => {
       disposed = true;
       unlisten?.();
@@ -2577,9 +2685,11 @@ function App() {
     void listen<ModVersionOperationUpdate>("mod-version-progress", (event) => {
       const update = event.payload;
       setModVersionOperation(update);
+      const etaSeconds = updateVersionEta(versionEtaTrackerRef.current, update);
+      setVersionTiming({ startedAt: versionEtaTrackerRef.current.startedAt, etaSeconds });
       const taskId = modVersionTaskIdRef.current;
       if (taskId) {
-        applyVersionTaskProgress(taskId, update);
+        applyVersionTaskProgress(taskId, update, etaSeconds);
         if (update.status === "completed" || update.status === "error") {
           modVersionTaskIdRef.current = null;
         }
@@ -2654,7 +2764,11 @@ function App() {
     const handle = window.setTimeout(() => {
       void loadModPresets();
       if (modManagementPage === "jar") {
-        void loadJarMods();
+        // 只在启动后首次进入 JAR 页面时自动扫描；之后进入直接复用已扫描结果，
+        // 需要重新扫描时点页面上的「刷新 JAR 列表」。
+        if (!jarModsScanStartedRef.current) {
+          void loadJarMods();
+        }
       } else {
         void applyJarModFileState();
         void loadLuaMods();
@@ -2674,7 +2788,11 @@ function App() {
 
     getCurrentWebview()
       .onDragDropEvent((event) => {
-        if (activePage !== "shaderpacks" || event.payload.type !== "drop") {
+        // 光影包已并入「版本 › 光影包」分区：这两个页面状态下都接受拖放。
+        const onShaderpackView =
+          activePage === "shaderpacks" ||
+          (activePage === "versions" && versionTab === "shaderpacks");
+        if (!onShaderpackView || event.payload.type !== "drop") {
           return;
         }
         const rect = dropZoneRef.current?.getBoundingClientRect();
@@ -2706,7 +2824,7 @@ function App() {
       unlisten?.();
 
     };
-  }, [navActivePage]);
+  }, [navActivePage, versionTab]);
 
   async function installZombieBuddy() {
     setInstalling(true);
@@ -3039,14 +3157,16 @@ function App() {
   }
 
   /** 把 version-progress / mod-version-progress 的 payload 写进任务中心的那一行。 */
-  function applyVersionTaskProgress(id: string, update: VersionOperationUpdate) {
+  function applyVersionTaskProgress(id: string, update: VersionOperationUpdate, etaSeconds: number | null = null) {
     const terminal = update.status === "completed" || update.status === "error";
+    const etaText =
+      !terminal && etaSeconds !== null ? ` · 预计剩余 ${formatVersionEta(etaSeconds) ?? "估算中"}` : "";
     updateTask(id, {
       status:
         update.status === "completed" ? "success" : update.status === "error" ? "error" : "running",
       detail: terminal
         ? (update.error ?? update.message ?? (update.status === "completed" ? "完成" : "失败"))
-        : versionPhaseLabel(update.phase),
+        : `${versionPhaseLabel(update.phase)}${etaText}`,
       percent: versionProgressPercent(update),
       step: update.step ?? null,
       steps: update.steps ?? null,
@@ -3301,12 +3421,11 @@ function App() {
     }, RESOURCE_DIALOG_EXIT_MS);
   }
 
-  /** 「去换盘」：收起提示，跳到设置 › 版本的备份位置输入框。 */
+  /** 「去换盘」：收起提示，跳到「版本」页的备份位置输入框。 */
   function goChangeVersionStoreDrive() {
     closeVersionDriveNotice(false);
-    setSettingsPage("versions");
     setVersionTab("game");
-    navigateToPage("settings");
+    navigateToPage("versions");
     window.setTimeout(() => {
       versionStoreInputRef.current?.focus();
       versionStoreInputRef.current?.select();
@@ -3405,7 +3524,7 @@ function App() {
     if (!confirmed) return;
     if (unknown) {
       const forced = window.confirm(
-        "当前游戏文件和保存过的版本都对不上（可能被 Steam 更新或手动改过）。\n\n继续还原会覆盖这些内容，确定吗？",
+        "当前游戏文件可能被 Steam 更新或手动修改过。\\n\\n继续还原会覆盖这些内容，确定吗？",
       );
       if (!forced) return;
     }
@@ -3468,7 +3587,22 @@ function App() {
 
   function cancelVersionOperation() {
     void invoke("cancel_version_operation").catch(() => undefined);
-    showToast("正在取消…（如果正在写文件，会等当前这个文件写完）", "info");
+    showToast("正在中断…", "info");
+  }
+
+  /** 版本操作进行中才显示的时间行：已用时 + 按进度平滑出的剩余时间估算。 */
+  function versionTimingLabel(status: string): string | null {
+    if (status !== "started" && status !== "progress") {
+      return null;
+    }
+    const parts: string[] = [];
+    const elapsed = formatVersionElapsed(versionTiming.startedAt);
+    if (elapsed) {
+      parts.push(`已用 ${elapsed}`);
+    }
+    const eta = formatVersionEta(versionTiming.etaSeconds);
+    parts.push(`预计剩余 ${eta ?? "估算中…"}`);
+    return parts.join(" · ");
   }
 
   async function updateVersionIncludeMods(enabled: boolean) {
@@ -3576,16 +3710,67 @@ function App() {
       showToast("还没有读取到模组列表，先点「刷新」。", "info");
       return;
     }
-    const confirmed = window.confirm(
-      `会把当前 ${total} 个模组各存一个版本（第一次是完整备份，占用空间较大），并记成一条整合包。\n\n以后可以一键把整套模组还原到这个状态。确定继续吗？`,
-    );
-    if (!confirmed) return;
-    void startModPackOperation(
-      "start_mod_version_save_all",
-      { label: null },
-      "保存全部模组",
-      "整合包 · 保存全部模组",
-    );
+    // 命名交给弹窗：留空时后端回落「整合包 N」。
+    setModPackNameDialog({ mode: "save", pack: null });
+  }
+
+  function renameModVersionPack(pack: ModPackRecord) {
+    setModPackNameDialog({ mode: "rename", pack });
+  }
+
+  /** 关闭整合包命名 / 重命名弹窗（取消或点遮罩）；确认走 confirmSaveModPack / confirmRenameModPack。 */
+  function closeModPackNameDialog() {
+    if (!modPackNameDialog || modPackNameDialogClosing) return;
+    setModPackNameDialogClosing(true);
+    window.setTimeout(() => {
+      setModPackNameDialog(null);
+      setModPackNameDialogClosing(false);
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
+  /** 保存整合包（带可选名称）并关掉弹窗。 */
+  function confirmSaveModPack(label: string) {
+    if (modPackNameDialogClosing) return;
+    const trimmed = label.trim();
+    setModPackNameDialogClosing(true);
+    window.setTimeout(() => {
+      setModPackNameDialog(null);
+      setModPackNameDialogClosing(false);
+      void startModPackOperation(
+        "start_mod_version_save_all",
+        { label: trimmed || null },
+        "保存全部模组",
+        trimmed ? `整合包 · ${trimmed}` : "整合包 · 保存全部模组",
+      );
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
+  /** 重命名整合包并刷新列表。 */
+  async function confirmRenameModPack(pack: ModPackRecord, label: string) {
+    if (modPackRenaming) return;
+    const trimmed = label.trim();
+    if (!trimmed) {
+      showToast("整合包名称不能为空。", "error");
+      return;
+    }
+    setModPackRenaming(true);
+    try {
+      const message = await invoke<string>("rename_mod_version_pack", {
+        packId: pack.id,
+        label: trimmed,
+      });
+      showToast(message, "success");
+      setModPackNameDialogClosing(true);
+      window.setTimeout(() => {
+        setModPackNameDialog(null);
+        setModPackNameDialogClosing(false);
+      }, RESOURCE_DIALOG_EXIT_MS);
+      await loadModVersionPacks();
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setModPackRenaming(false);
+    }
   }
 
   function restoreModVersionPack(pack: ModPackRecord) {
@@ -5021,11 +5206,11 @@ function App() {
         </Stack>
 
         <Box className="pz-workshop-results" mt="4">
-          {workshopLoading && !workshopResponse ? (
-            <Text color="gray.500" py="6" textAlign="center">
-              正在读取 Steam 创意工坊...
-            </Text>
-          ) : workshopResponse ? (
+          <SkeletonGate
+            loading={workshopLoading && !workshopResponse}
+            skeleton={<SkeletonList rows={6} thumb="preview" />}
+          >
+            {workshopResponse ? (
             <>
               {workshopResponse.items.length > 0 ? (
                 <Box className="pz-workshop-list">
@@ -5115,8 +5300,8 @@ function App() {
                             title="在 Steam 中打开"
                             variant="outline"
                           >
-                            {/* 向上再向右折的箭头（↱）：表示“到外部打开”，
-                                FontAwesome 的 arrow-turn-up 是“先右后上”，方向相反。 */}
+                            {/* 斜向右上的箭头（↗）：表示“到外部打开”。
+                                不用三点连线的分享图标，也不画成先上后右的折线。 */}
                             <svg
                               aria-hidden="true"
                               className="pz-workshop-share-icon"
@@ -5124,14 +5309,14 @@ function App() {
                               viewBox="0 0 16 16"
                             >
                               <path
-                                d="M4.2 13.4V3.6H12"
+                                d="M3.4 12.6 12.8 3.2"
                                 stroke="currentColor"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
                                 strokeWidth="1.6"
                               />
                               <path
-                                d="M9.8 1.4 12 3.6 9.8 5.8"
+                                d="M6.8 3.2H12.8V9.2"
                                 stroke="currentColor"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
@@ -5231,6 +5416,7 @@ function App() {
           ) : (
             <EmptyState text="准备加载创意工坊..." />
           )}
+          </SkeletonGate>
         </Box>
       </Box>
 
@@ -5395,13 +5581,17 @@ function App() {
         </HStack>
       </Box>
       <Box className="pz-developer-news-list">
-        {developerNewsLoading && !developerNews ? <Text color="gray.500" py="8" textAlign="center">正在读取开发者新闻...</Text> : developerNews?.items.length ? developerNews.items.map((item, index) => {
+        <SkeletonGate
+          loading={developerNewsLoading && !developerNews}
+          skeleton={<SkeletonNews cards={3} />}
+        >
+          {developerNews?.items.length ? developerNews.items.map((item, index) => {
           const engineShare = formatNewsEngineShare(item.engineTally);
           return (
             <DeveloperNewsCard key={item.gid} revealIndex={index}>
               <Text color="gray.900" fontSize="md" fontWeight="700">{item.title}</Text>
               <Text color="gray.500" fontSize="xs" mt="1">{new Date(item.date * 1000).toLocaleString()} {item.author ? `· ${item.author}` : ""} {item.feedLabel ? `· ${item.feedLabel}` : ""}</Text>
-              <Box className="pz-developer-news-content" dangerouslySetInnerHTML={{ __html: item.contentsHtml }} mt="3" />
+              <HtmlContentWithImageReveal className="pz-developer-news-content" html={item.contentsHtml} mt="3" />
               <HStack align="center" gap="2" justify="space-between" mt="1" wrap="wrap">
                 <Box>{item.url && <Button className="pz-news-source-link" onClick={() => void openUrl(item.url)} size="xs" variant="ghost">查看原文 ↗</Button>}</Box>
                 {engineShare && (
@@ -5413,6 +5603,7 @@ function App() {
             </DeveloperNewsCard>
           );
         }) : <EmptyState text="暂无开发者新闻。" />}
+        </SkeletonGate>
       </Box>
     </Box>
   );
@@ -6423,6 +6614,11 @@ function App() {
           width={`${versionProgressPercent(versionOperation)}%`}
         />
       </Box>
+      {versionTimingLabel(versionOperation.status) ? (
+        <Text color="gray.500" fontSize="xs" mt="2">
+          {versionTimingLabel(versionOperation.status)}
+        </Text>
+      ) : null}
       <Text
         color={versionOperation.status === "error" ? "red.600" : "gray.600"}
         fontSize="xs"
@@ -6542,7 +6738,7 @@ function App() {
               </Button>
               {versionBusy ? (
                 <Button colorPalette="red" onClick={cancelVersionOperation} size="sm" variant="outline">
-                  取消
+                  中断
                 </Button>
               ) : null}
             </HStack>
@@ -6964,6 +7160,12 @@ function App() {
           >
             一键保存全部模组
           </Button>
+          {/* 保存整合包耗时可能很长，中断入口放在页首按钮排，不用滚到底部进度框找。 */}
+          {modVersionOperationRunning ? (
+            <Button colorPalette="red" onClick={cancelVersionOperation} size="sm" variant="outline">
+              中断
+            </Button>
+          ) : null}
           <Button
             disabled={modVersionBusy}
             loading={modVersionTargetsLoading}
@@ -7009,6 +7211,14 @@ function App() {
                       variant="outline"
                     >
                       还原整套
+                    </Button>
+                    <Button
+                      disabled={modVersionBusy}
+                      onClick={() => renameModVersionPack(pack)}
+                      size="xs"
+                      variant="ghost"
+                    >
+                      重命名
                     </Button>
                     <Button
                       disabled={modVersionBusy}
@@ -7207,6 +7417,11 @@ function App() {
               width={`${versionProgressPercent(modVersionOperation)}%`}
             />
           </Box>
+          {versionTimingLabel(modVersionOperation.status) ? (
+            <Text color="gray.500" fontSize="xs" mt="2">
+              {versionTimingLabel(modVersionOperation.status)}
+            </Text>
+          ) : null}
           <Text
             color={modVersionOperation.status === "error" ? "red.600" : "gray.600"}
             fontSize="xs"
@@ -7224,7 +7439,7 @@ function App() {
           ) : null}
           {modVersionOperationRunning ? (
             <Button colorPalette="red" onClick={cancelVersionOperation} size="xs" mt="2" variant="outline">
-              取消
+              中断
             </Button>
           ) : null}
         </Box>
@@ -7232,45 +7447,53 @@ function App() {
     </>
   );
 
+  const versionSections: Array<{ value: VersionTab; label: string; icon: typeof faHouse }> = [
+    { value: "game", label: "概览", icon: faHouse },
+    { value: "mods", label: "模组版本", icon: faCubes },
+    { value: "history", label: "历史版本", icon: faClockRotateLeft },
+    { value: "support", label: "支持库", icon: faScrewdriverWrench },
+    { value: "shaderpacks", label: "光影包", icon: faSun },
+    { value: "shots", label: "截图", icon: faImages },
+  ];
+
+  // 「版本」页：左侧分区列表 + 右侧内容（支持库 / 光影包 / 截图 已并入同一页）。
   const versionSettingsContent = (
-    <Box className="pz-panel pz-version-settings-panel">
-      <HStack aria-label="版本隔离分类" className="pz-version-tabs" gap="1" role="tablist">
-        <Button
-          aria-selected={versionTab === "game"}
-          className={`pz-version-tab${versionTab === "game" ? " pz-version-tab-active" : ""}`}
-          onClick={() => setVersionTab("game")}
-          role="tab"
-          size="sm"
-          variant="ghost"
-        >
-          游戏版本
-        </Button>
-        <Button
-          aria-selected={versionTab === "mods"}
-          className={`pz-version-tab${versionTab === "mods" ? " pz-version-tab-active" : ""}`}
-          onClick={() => setVersionTab("mods")}
-          role="tab"
-          size="sm"
-          variant="ghost"
-        >
-          模组版本
-        </Button>
-        <Button
-          aria-selected={versionTab === "history"}
-          className={`pz-version-tab${versionTab === "history" ? " pz-version-tab-active" : ""}`}
-          onClick={() => setVersionTab("history")}
-          role="tab"
-          size="sm"
-          variant="ghost"
-        >
-          历史版本
-        </Button>
-      </HStack>
-      {versionTab === "game"
-        ? gameVersionSettingsContent
-        : versionTab === "mods"
-          ? modVersionSettingsContent
-          : versionHistorySettingsContent}
+    <Box className="pz-version-hub">
+      <Box as="nav" aria-label="版本管理分类" className="pz-version-hub-sidebar">
+        <Text className="pz-version-hub-sidebar-title">版本管理</Text>
+        <Stack gap="1">
+          {versionSections.map((section) => (
+            <Button
+              aria-current={versionTab === section.value ? "page" : undefined}
+              className={`pz-version-hub-item${versionTab === section.value ? " is-active" : ""}`}
+              key={section.value}
+              onClick={() => setVersionTab(section.value)}
+              size="sm"
+              variant="ghost"
+            >
+              <FontAwesomeIcon aria-hidden="true" className="pz-version-hub-icon" icon={section.icon} />
+              <Box as="span">{section.label}</Box>
+            </Button>
+          ))}
+        </Stack>
+      </Box>
+      <Box className="pz-version-hub-main">
+        {versionTab === "game" || versionTab === "mods" || versionTab === "history" ? (
+          <Box className="pz-panel pz-version-settings-panel">
+            {versionTab === "game"
+              ? gameVersionSettingsContent
+              : versionTab === "mods"
+                ? modVersionSettingsContent
+                : versionHistorySettingsContent}
+          </Box>
+        ) : versionTab === "support" ? (
+          overviewContent
+        ) : versionTab === "shaderpacks" ? (
+          shaderpacksContent
+        ) : (
+          shotsContent
+        )}
+      </Box>
     </Box>
   );
 
@@ -7300,7 +7523,7 @@ function App() {
             className={`pz-resource-center-sidebar-item ${
               settingsPage === "about" ? "pz-resource-center-sidebar-item-active" : ""
             }`}
-            onClick={() => setSettingsPage("about")}
+            onClick={() => switchSettingsPage("about")}
             size="sm"
             variant="ghost"
           >
@@ -7311,29 +7534,18 @@ function App() {
             className={`pz-resource-center-sidebar-item ${
               settingsPage === "general" ? "pz-resource-center-sidebar-item-active" : ""
             }`}
-            onClick={() => setSettingsPage("general")}
+            onClick={() => switchSettingsPage("general")}
             size="sm"
             variant="ghost"
           >
             通用
           </Button>
           <Button
-            aria-current={settingsPage === "versions" ? "page" : undefined}
-            className={`pz-resource-center-sidebar-item ${
-              settingsPage === "versions" ? "pz-resource-center-sidebar-item-active" : ""
-            }`}
-            onClick={() => setSettingsPage("versions")}
-            size="sm"
-            variant="ghost"
-          >
-            版本
-          </Button>
-          <Button
             aria-current={settingsPage === "toolbox" ? "page" : undefined}
             className={`pz-resource-center-sidebar-item ${
               settingsPage === "toolbox" ? "pz-resource-center-sidebar-item-active" : ""
             }`}
-            onClick={() => setSettingsPage("toolbox")}
+            onClick={() => switchSettingsPage("toolbox")}
             size="sm"
             variant="ghost"
           >
@@ -7344,7 +7556,7 @@ function App() {
             className={`pz-resource-center-sidebar-item ${
               settingsPage === "logs" ? "pz-resource-center-sidebar-item-active" : ""
             }`}
-            onClick={() => setSettingsPage("logs")}
+            onClick={() => switchSettingsPage("logs")}
             size="sm"
             variant="ghost"
           >
@@ -7355,7 +7567,7 @@ function App() {
             className={`pz-resource-center-sidebar-item ${
               settingsPage === "modLoader" ? "pz-resource-center-sidebar-item-active" : ""
             }`}
-            onClick={() => setSettingsPage("modLoader")}
+            onClick={() => switchSettingsPage("modLoader")}
             size="sm"
             variant="ghost"
           >
@@ -7366,7 +7578,7 @@ function App() {
             className={`pz-resource-center-sidebar-item ${
               settingsPage === "startup" ? "pz-resource-center-sidebar-item-active" : ""
             }`}
-            onClick={() => setSettingsPage("startup")}
+            onClick={() => switchSettingsPage("startup")}
             size="sm"
             variant="ghost"
           >
@@ -7374,13 +7586,17 @@ function App() {
           </Button>
         </Stack>
       </Box>
-      <Box className="pz-resource-center-main">
+      {/* key=settingsPage：切分页时强制重挂正文，换页动画才会重播；
+          data-direction 决定从右滑入还是从左滑入。 */}
+      <Box
+        key={settingsPage}
+        className="pz-resource-center-main"
+        data-direction={settingsTransitionDirection}
+      >
         {settingsPage === "about"
           ? aboutSettingsContent
           : settingsPage === "general"
             ? generalSettingsContent
-          : settingsPage === "versions"
-            ? versionSettingsContent
             : settingsPage === "toolbox"
               ? toolboxContent
             : settingsPage === "logs"
@@ -7477,6 +7693,7 @@ function App() {
       <ModBatchBar
         busyAction={luaModBatchAction}
         negativeLabel="停用"
+        onAutoSort={() => void autoSortLuaMods()}
         onClear={() => startTransition(() => setSelectedLuaModKeys(new Set()))}
         onInvert={invertVisibleLuaMods}
         onNegative={() => void setLuaModsEnabled(selectedLuaMods, false)}
@@ -7487,9 +7704,11 @@ function App() {
         totalCount={filteredLuaMods?.length ?? 0}
       />
       <Box className="pz-lua-mod-list">
-        {luaModsLoading && !luaMods ? (
-          <Text color="gray.500" py="6" textAlign="center">正在读取 Lua 模组列表...</Text>
-        ) : filteredLuaMods && filteredLuaMods.length > 0 ? (
+        <SkeletonGate
+          loading={luaModsLoading && !luaMods}
+          skeleton={<SkeletonList rows={8} thumb="poster" />}
+        >
+        {filteredLuaMods && filteredLuaMods.length > 0 ? (
           filteredLuaMods.map((mod) => {
             const key = luaModKey(mod);
             return (
@@ -7676,9 +7895,15 @@ function App() {
         ) : (
           <EmptyState text={luaMods && luaMods.length > 0 ? "没有符合当前筛选条件的模组。" : "未发现本地或创意工坊 Lua 模组。"} />
         )}
+        </SkeletonGate>
       </Box>
     </Box>
   );
+  // 首次进入 JAR 页面、扫描还没发起（120ms 延迟窗口内）时也按加载态处理，
+  // 避免先闪一帧「尚未扫描 JAR 模组」。
+  const jarModsAwaitingFirstScan =
+    modManagementPage === "jar" && jarMods === null && !jarModsScanStartedRef.current;
+  const jarModsLoadingView = jarModsLoading || jarModsAwaitingFirstScan;
   const jarModsContent = (
     <Box className="pz-panel pz-jar-mods-page">
       <HStack className="pz-mod-page-header" justify="space-between" gap="3" wrap="wrap">
@@ -7763,11 +7988,11 @@ function App() {
               前往 设置 › 模组加载器
             </Button>
           </Box>
-        ) : jarMods ? (
+        ) : jarMods || jarModsLoadingView ? (
           <Stack className="pz-jar-mod-list" gap="2">
             <HStack justify="space-between" color="gray.500" fontSize="sm" mb="1" wrap="wrap">
               <Text>
-                {jarModsLoading
+                {jarModsLoadingView
                   ? developerMode
                     ? jarScanStatusLabel(jarScanFrame, jarScanProgress.scanned, jarScanProgress.total)
                     : "正在扫描模组…"
@@ -7775,7 +8000,7 @@ function App() {
                     ? "扫描 mod.info 与 mod.info.disabled 中的 ZombieBuddy 注解"
                     : "已读取 JAR 模组"}
               </Text>
-              <Text>{jarModsLoading ? `已发现 ${filteredJarMods?.length ?? 0} 个 JAR 模组` : `发现 ${filteredJarMods?.length ?? 0} 个 JAR 模组`}</Text>
+              <Text>{jarModsLoadingView ? `已发现 ${filteredJarMods?.length ?? 0} 个 JAR 模组` : `发现 ${filteredJarMods?.length ?? 0} 个 JAR 模组`}</Text>
             </HStack>
             {jarModsLoading && jarScanProgress.total > 0 && (
               <Box className="pz-jar-scan-progress" aria-label="JAR 模组扫描进度">
@@ -7800,7 +8025,12 @@ function App() {
                   </Box>
                 </Box>
               </Box>
-            )}            {filteredJarMods && filteredJarMods.length > 0 ? (
+            )}
+            <SkeletonGate
+              loading={jarModsLoadingView}
+              skeleton={<SkeletonList rows={8} thumb="poster" />}
+            >
+            {filteredJarMods && filteredJarMods.length > 0 ? (
               filteredJarMods.map((mod) => {
                 const modKey = jarModKey(mod);
                 return (
@@ -8000,6 +8230,7 @@ function App() {
                 }
               />
             )}
+            </SkeletonGate>
           </Stack>
         ) : (
           <Text color="gray.500" py="6" textAlign="center">
@@ -8176,7 +8407,7 @@ function App() {
     >
       {wallpaperSeasonal ? <SeasonalWallpaper effect={wallpaperEffect} /> : null}
       <WindowTitlebar
-        onToggleTasks={() => setTaskPanelOpen((open) => !open)}
+        onToggleTasks={() => (taskPanelOpen ? closeTaskPanel() : setTaskPanelOpen(true))}
         taskCount={tasks.filter((task) => task.status === "running").length}
         taskPanelOpen={taskPanelOpen}
       >
@@ -8216,9 +8447,11 @@ function App() {
       </WindowTitlebar>
       {taskPanelOpen && (
         <TaskCenterPanel
+          closing={taskPanelClosing}
           closingTaskIds={taskClosingIds}
           onClearFinished={clearFinishedTasks}
-          onClose={() => setTaskPanelOpen(false)}
+          onClose={closeTaskPanel}
+          onInterruptVersion={cancelVersionOperation}
           onRemove={removeTask}
           onRetry={retryShaderDownload}
           tasks={tasks}
@@ -8231,7 +8464,7 @@ function App() {
         >
           <Box
             className={`pz-app-content ${
-              activePage === "workshop" || activePage === "mods" || activePage === "settings" ? "pz-app-content-resource-center" : ""
+              activePage === "workshop" || activePage === "mods" || activePage === "settings" || activePage === "versions" ? "pz-app-content-resource-center" : ""
             } ${activePage === "launch" ? "pz-app-content-launch" : ""}`}
           >
             <Stack
@@ -8243,6 +8476,7 @@ function App() {
               {activePage === "overview" && overviewContent}
               {activePage === "shots" && shotsContent}
               {activePage === "shaderpacks" && shaderpacksContent}
+              {activePage === "versions" && versionSettingsContent}
               {activePage === "workshop" && resourceCenterContent}
               {activePage === "mods" && modsContent}
               {activePage === "settings" && settingsContent}
@@ -8256,6 +8490,38 @@ function App() {
           closing={fastLaunchWarningClosing}
           onCancel={() => closeFastLaunchWarning(false)}
           onConfirm={() => closeFastLaunchWarning(true)}
+        />
+      ) : null}
+
+      {pzOptRestoreWarning ? (
+        <PzOptRestoreWarningDialog
+          error={pzOptRestoreWarning}
+          onClose={() => setPzOptRestoreWarning(null)}
+          onGoSupport={() => {
+            setPzOptRestoreWarning(null);
+            navigateToPage("overview");
+          }}
+        />
+      ) : null}
+
+      {modPackNameDialog ? (
+        <ModPackNameDialog
+          busy={
+            modPackNameDialog.mode === "save"
+              ? modVersionOperationRunning || versionOperationRunning
+              : modPackRenaming
+          }
+          closing={modPackNameDialogClosing}
+          initialLabel={modPackNameDialog.pack?.label ?? ""}
+          mode={modPackNameDialog.mode}
+          onCancel={closeModPackNameDialog}
+          onConfirm={(label) => {
+            if (modPackNameDialog.mode === "save") {
+              confirmSaveModPack(label);
+            } else if (modPackNameDialog.pack) {
+              void confirmRenameModPack(modPackNameDialog.pack, label);
+            }
+          }}
         />
       ) : null}
 
