@@ -139,7 +139,6 @@ import {
   TASK_REMOVE_EXIT_MS,
   TRANSLATION_LANGUAGE_OPTIONS,
   VERSION_DIFF_EXIT_MS,
-  DEV_BUILD_INFO,
   ZOMBIE_BUDDY_WORKSHOP_ID,
   initialWorkshopFilters,
   navigationItems,
@@ -610,7 +609,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         showToast(
           status.updateAvailable
             ? `发现新版本 v${status.latestVersion}，可在下方查看并下载。`
-            : `当前是内测版本 DevBuild ${DEV_BUILD_INFO.buildId}。`,
+            : status.unknownVersion
+              ? `当前是未知版本（v${status.currentVersion}），比更新源发布的还新。`
+              : `已是最新版本（v${status.currentVersion}）。`,
           status.updateAvailable ? "success" : "info",
         );
       }
@@ -6707,10 +6708,8 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       <Box mt="5">
         <HStack gap="2" wrap="wrap">
           <Text color="gray.800" fontSize="md" fontWeight="800">PZMANAGER</Text>
-          <Badge colorPalette="purple" size="sm">DevBuild {DEV_BUILD_INFO.buildId}</Badge>
-          <Badge colorPalette="orange" size="sm">{DEV_BUILD_INFO.channel}</Badge>
+          <Badge colorPalette="blue" size="sm">v{appManifest.version}</Badge>
         </HStack>
-        <Text color="gray.500" fontSize="xs" mt="1">发行:{DEV_BUILD_INFO.distributor}</Text>
         <Text color="gray.500" fontSize="sm" mt="2">
           Project Zomboid（僵尸毁灭工程）的 Windows 桌面启动器 + 模组管理器：
           整合创意工坊订阅、JAR 模组管理、内置翻译器与下载器，不修改游戏本体。
@@ -6822,16 +6821,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               <>
                 <HStack gap="2" wrap="wrap" align="center">
                   <Text color="gray.500" fontSize="sm">
-                    内测版本 DevBuild {DEV_BUILD_INFO.buildId}。
+                    {launcherUpdate.unknownVersion ? "未知版本" : "已是最新版本"}（v
+                    {launcherUpdate.currentVersion}）。
                   </Text>
-                  <Badge colorPalette="purple" size="sm">{DEV_BUILD_INFO.channel}</Badge>
+                  {launcherUpdate.unknownVersion ? (
+                    <Badge colorPalette="purple" size="sm">BETA</Badge>
+                  ) : null}
                 </HStack>
-                <Text color="gray.500" fontSize="xs" mt="1">
-                  发行:{DEV_BUILD_INFO.distributor}
-                  {launcherUpdate.updateAvailable
-                    ? " · 更新源已有新版本,可参考下方更新内容"
-                    : " · 内测构建不参与公开版本对比"}
-                </Text>
                 {/* 最新版同样展示更新日志：就是当前版本自身的发布说明。 */}
                 {launcherUpdate.notes ? (
                   <Box mt="2">

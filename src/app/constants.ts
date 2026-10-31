@@ -141,11 +141,3 @@ export const newsEngineLabels: Record<string, string> = {
   mymemory: "MyMemory",
   none: "未翻译",
 };
-
-/// 内测构建身份：构建号手动指定（DevBuild <构建号>），发行渠道为官方交流群。
-/// 内测构建的检查更新不与公开版本号比较，界面一律标注「内测版本」。
-export const DEV_BUILD_INFO = {
-  buildId: "1793461756",
-  channel: "内测版本",
-  distributor: "PZManager官方交流群",
-} as const;
