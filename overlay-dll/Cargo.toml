@@ -1,6 +1,6 @@
 [package]
 name = "pz_overlay"
-version = "1.4.261031"
+version = "1.4.261101"
 description = "PZManager loading overlay for Project Zomboid: draws the launcher UI inside the game window while the game starts."
 edition = "2021"
 license = "MIT"
