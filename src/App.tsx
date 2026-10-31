@@ -6654,7 +6654,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               <Text color="gray.600" fontSize="sm">叁葉</Text>
               <Text color="gray.500" fontSize="xs">邮箱 / QQ：757739990@qq.com</Text>
             </HStack>
-            <Text color="gray.500" fontSize="xs" mt="0.5">Project Zomboid Manager的开发者!</Text>
+            <Text color="gray.500" fontSize="xs" mt="0.5">Project Zomboid Manager 的开发者!<p>(小声:其实up才高二)</p></Text>
           </Box>
         </HStack>
       </Box>
@@ -6679,6 +6679,24 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           </Text>
           <Button
             onClick={() => void openUrl("https://github.com/sanyectop/pzmanager-main")}
+            size="sm"
+            variant="ghost"
+          >
+            打开 ↗
+          </Button>
+        </HStack>
+      </Box>
+      <Box mt="4">
+        <HStack gap="2" align="center">
+          <Text color="gray.800" fontSize="sm" fontWeight="700">爱发电</Text>
+          <Text color="gray.500" fontSize="xs">支持作者 叁葉 持续更新</Text>
+        </HStack>
+        <HStack gap="2" mt="1" align="center">
+          <Text color="gray.500" fontSize="sm" overflowWrap="anywhere">
+            https://ifdian.net/a/sanyee
+          </Text>
+          <Button
+            onClick={() => void openUrl("https://ifdian.net/a/sanyee")}
             size="sm"
             variant="ghost"
           >

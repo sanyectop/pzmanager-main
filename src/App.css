@@ -4950,3 +4950,10 @@ body {
   transform-origin: 0 0;
   width: 133.34%;
 }
+
+/* 问号提示不拦截指针：纯文本提示没有可交互内容，
+   翻转到触发器下方时会盖住问号本身，指针被截走会循环显示/隐藏。 */
+.pz-hint-positioner,
+.pz-hint-tooltip {
+  pointer-events: none !important;
+}

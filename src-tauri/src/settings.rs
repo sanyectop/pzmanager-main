@@ -91,16 +91,15 @@ pub(crate) const WINDOW_HEIGHT_MIN: u32 = 560;
 
 pub(crate) const WINDOW_SIZE_MAX: u32 = 10000;
 
-pub(crate) fn normalize_window_width(value: u32) -> Option<u32> {
-    (WINDOW_WIDTH_MIN..=WINDOW_SIZE_MAX)
-        .contains(&value)
-        .then_some(value)
+/// 把记忆的窗口尺寸钳位到合法区间（最小 840×560）：
+/// DPI 缩放下拖到最小尺寸附近时，逻辑尺寸可能略低于下限——
+/// 之前直接拒绝（None → 不落盘），导致这类调整「不会被记住」；现在钳位保存。
+pub(crate) fn clamp_window_width(value: u32) -> u32 {
+    value.clamp(WINDOW_WIDTH_MIN, WINDOW_SIZE_MAX)
 }
 
-pub(crate) fn normalize_window_height(value: u32) -> Option<u32> {
-    (WINDOW_HEIGHT_MIN..=WINDOW_SIZE_MAX)
-        .contains(&value)
-        .then_some(value)
+pub(crate) fn clamp_window_height(value: u32) -> u32 {
+    value.clamp(WINDOW_HEIGHT_MIN, WINDOW_SIZE_MAX)
 }
 
 pub(crate) fn user_zomboid_directory() -> Result<PathBuf, String> {
@@ -296,12 +295,9 @@ pub(crate) fn save_window_size(app: tauri::AppHandle) -> Result<(u32, u32), Stri
         .map_err(|error| format!("读取屏幕缩放系数失败: {error}"))?;
     let width = (size.width as f64 / factor).round() as u32;
     let height = (size.height as f64 / factor).round() as u32;
-    // 拖动过程会有低于下限的中间态：不落盘也不算错误，等拖完的下一帧再记。
-    let (Some(width), Some(height)) =
-        (normalize_window_width(width), normalize_window_height(height))
-    else {
-        return Err("窗口尺寸超出可记忆范围，已忽略。".to_string());
-    };
+    // 拖动过程的中间态也钳位到合法区间保存（DPI 缩放下最小尺寸附近可能略低于下限）。
+    let width = clamp_window_width(width);
+    let height = clamp_window_height(height);
 
     let path = app_settings_path()?;
     let mut settings = load_app_settings_at(&path)?;
