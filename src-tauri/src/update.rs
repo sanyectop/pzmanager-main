@@ -36,13 +36,15 @@ pub(crate) struct LauncherUpdateDownloads {
     pub(crate) windows_x64_portable: Option<String>,
 }
 
-/// 前端拿到的检查结果。updateAvailable=false 表示已是最新。
+/// 前端拿到的检查结果。updateAvailable=false 表示已是最新;
+/// unknownVersion=true 表示自身版本比更新源还新(开发自编译构建),前端标注「未知版本 + BETA」。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LauncherUpdateStatus {
     pub(crate) current_version: String,
     pub(crate) latest_version: String,
     pub(crate) update_available: bool,
+    pub(crate) unknown_version: bool,
     pub(crate) pub_date: Option<String>,
     pub(crate) notes: Option<String>,
     /// 「下载更新」按钮的跳转地址:优先 123 云盘,缺省时回落 GitHub 安装包、便携版。
@@ -70,14 +72,22 @@ pub(crate) async fn fetch_launcher_update(feed_url: &str) -> Result<LauncherUpda
 }
 
 fn build_update_status(feed: LauncherUpdateFeed) -> Result<LauncherUpdateStatus, String> {
+    build_update_status_with_current(feed, normalize_version(env!("CARGO_PKG_VERSION")))
+}
+
+fn build_update_status_with_current(
+    feed: LauncherUpdateFeed,
+    current_version: String,
+) -> Result<LauncherUpdateStatus, String> {
     let latest_version = normalize_version(&feed.version);
     if latest_version.is_empty() {
         return Err("更新信息里缺少有效版本号。".to_string());
     }
-    let current_version = normalize_version(env!("CARGO_PKG_VERSION"));
     let downloads = feed.downloads.unwrap_or_default();
     Ok(LauncherUpdateStatus {
         update_available: version_is_newer(&latest_version, &current_version),
+        // 自身版本比更新源发布的还高:说明是未发布的开发构建,标注为「未知版本」。
+        unknown_version: version_is_newer(&current_version, &latest_version),
         current_version,
         latest_version,
         pub_date: feed.pub_date,
@@ -217,3 +227,26 @@ mod tests {
         assert!(build_update_status(blank).is_err());
     }
 }
+
+    #[test]
+    fn marks_current_newer_than_feed_as_unknown_version() {
+        let feed = |version: &str| LauncherUpdateFeed {
+            version: version.to_string(),
+            pub_date: None,
+            notes: None,
+            downloads: None,
+            release_page: None,
+        };
+        // 自身 1.4.261031 比更新源的 1.3.261028 还新:未知版本(开发构建)。
+        let status = build_update_status_with_current(feed("1.3.261028"), "1.4.261031".to_string()).unwrap();
+        assert!(status.unknown_version);
+        assert!(!status.update_available);
+        // 更新源发布的新版本:正常更新,不是未知版本。
+        let status = build_update_status_with_current(feed("1.5.261101"), "1.4.261031".to_string()).unwrap();
+        assert!(!status.unknown_version);
+        assert!(status.update_available);
+        // 版本一致:既不是未知版本也没有更新。
+        let status = build_update_status_with_current(feed("1.4.261031"), "1.4.261031".to_string()).unwrap();
+        assert!(!status.unknown_version);
+        assert!(!status.update_available);
+    }

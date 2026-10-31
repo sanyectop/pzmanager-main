@@ -151,6 +151,7 @@ import {
   MediaPanel,
   PathValue,
   ShotThumbnail,
+  type ShotsSource,
   SkeletonGate,
   SkeletonList,
   SkeletonNews,
@@ -357,6 +358,7 @@ function App() {
   const [versionStatus, setVersionStatus] = useState<VersionStatus | null>(null);
   const [versionStatusLoading, setVersionStatusLoading] = useState(false);
   const [versionStatusError, setVersionStatusError] = useState<string | null>(null);
+  const [versionTransitionDirection, setVersionTransitionDirection] = useState<"forward" | "backward">("forward");
   const [versionOperation, setVersionOperation] = useState<VersionOperationUpdate | null>(null);
   // 还原后 PZ Optimization 未能自动重装：还原继续完成，结束后弹模态框警告。
   const [pzOptRestoreWarning, setPzOptRestoreWarning] = useState<string | null>(null);
@@ -485,6 +487,8 @@ function App() {
   const workshopBackgroundScanIdRef = useRef<number | null>(null);
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [previewClosing, setPreviewClosing] = useState(false);
+  const previewCloseTimerRef = useRef<number | null>(null);
   const [copyingShot, setCopyingShot] = useState(false);
   const [deletingShaderpack, setDeletingShaderpack] = useState<string | null>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -596,7 +600,9 @@ function App() {
         showToast(
           status.updateAvailable
             ? `发现新版本 v${status.latestVersion}，可在下方查看并下载。`
-            : `已是最新版本（v${status.currentVersion}）。`,
+            : status.unknownVersion
+              ? `当前是未知版本（v${status.currentVersion}），比更新源发布的还新。`
+              : `已是最新版本（v${status.currentVersion}）。`,
           status.updateAvailable ? "success" : "info",
         );
       }
@@ -964,11 +970,24 @@ function App() {
     });
   }
 
+  /** 「版本」页切换左侧分区：按列表顺序记录前进/后退，内容区据此播放方向性滑入。 */
+  function switchVersionTab(nextTab: VersionTab) {
+    setVersionTab((current) => {
+      if (current !== nextTab) {
+        const order: VersionTab[] = ["game", "mods", "history", "support", "shaderpacks", "shots"];
+        setVersionTransitionDirection(
+          order.indexOf(nextTab) >= order.indexOf(current) ? "forward" : "backward",
+        );
+      }
+      return nextTab;
+    });
+  }
+
   function navigateToPage(nextPage: ActivePage) {
     // 支持库 / 截图 / 光影包已并入「版本」页的分区：旧的页面入口统一重定向过去，
     // 保证「去支持库安装」这类既有跳转仍能落到正确位置。
     if (nextPage === "overview" || nextPage === "shots" || nextPage === "shaderpacks") {
-      setVersionTab(nextPage === "overview" ? "support" : nextPage);
+      switchVersionTab(nextPage === "overview" ? "support" : nextPage);
       nextPage = "versions";
     }
     if (nextPage === activePage && pageTransitionPhase === "idle") {
@@ -1014,6 +1033,9 @@ function App() {
       }
       if (taskPanelCloseTimerRef.current !== null) {
         clearTimeout(taskPanelCloseTimerRef.current);
+      }
+      if (previewCloseTimerRef.current !== null) {
+        clearTimeout(previewCloseTimerRef.current);
       }
     };
   }, []);
@@ -3044,9 +3066,58 @@ function App() {
     }
   }
 
-  async function openShot(name: string) {
+  // 截图页子来源：Viewpoint 启动器截图 / Steam 云截图（userdata/<账号>/760/remote/108600）。
+  const [shotsSource, setShotsSource] = useState<ShotsSource>("viewpoint");
+  const [steamShots, setSteamShots] = useState<ManagedDirectory | null>(null);
+  const [steamShotsLoading, setSteamShotsLoading] = useState(false);
+
+  async function loadSteamShots() {
+    if (steamShotsLoading) return;
+    setSteamShotsLoading(true);
     try {
-      const bytes = await invoke<ArrayBuffer>("read_viewpoint_shot", { name });
+      setSteamShots(await invoke<ManagedDirectory>("list_steam_screenshots"));
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+      setSteamShots({ directory: "", files: [] });
+    } finally {
+      setSteamShotsLoading(false);
+    }
+  }
+
+  function switchShotsSource(source: ShotsSource) {
+    setShotsSource(source);
+    if (source === "steam" && !steamShots && !steamShotsLoading) {
+      void loadSteamShots();
+    }
+  }
+
+  /** 关闭截图预览：先播弹窗退场动画，结束再释放 ObjectURL 并卸载。 */
+  function closeShotPreview() {
+    if (previewClosing) {
+      return;
+    }
+    setPreviewClosing(true);
+    if (previewCloseTimerRef.current !== null) {
+      clearTimeout(previewCloseTimerRef.current);
+    }
+    previewCloseTimerRef.current = window.setTimeout(() => {
+      previewCloseTimerRef.current = null;
+      setPreview((current) => {
+        if (current) {
+          URL.revokeObjectURL(current.url);
+        }
+        return null;
+      });
+      setPreviewClosing(false);
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
+  async function openShot(name: string, source: ShotsSource = "viewpoint") {
+    try {
+      const bytes = await invoke<ArrayBuffer>(
+        source === "steam" ? "read_steam_screenshot" : "read_viewpoint_shot",
+        { name },
+      );
       const mime = mimeTypeFor(name);
       const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
       setPreview({ name, url, bytes });
@@ -3424,7 +3495,7 @@ function App() {
   /** 「去换盘」：收起提示，跳到「版本」页的备份位置输入框。 */
   function goChangeVersionStoreDrive() {
     closeVersionDriveNotice(false);
-    setVersionTab("game");
+    switchVersionTab("game");
     navigateToPage("versions");
     window.setTimeout(() => {
       versionStoreInputRef.current?.focus();
@@ -4957,11 +5028,33 @@ function App() {
 
   const shotsContent = (
     <MediaPanel
-      title="Viewpoint 截图"
-      description="预览截图并复制到系统剪贴板。"
-      directory={shots?.directory}
+      title="截图"
+      description="Viewpoint 启动器截图与 Steam 云截图，点击预览并复制到系统剪贴板。"
+      directory={shotsSource === "steam" ? steamShots?.directory : shots?.directory}
       developerMode={developerMode}
     >
+      <HStack className="pz-shots-source-tabs" gap="1" mb="4" wrap="wrap">
+        <Button
+          aria-selected={shotsSource === "viewpoint"}
+          className={`pz-shots-source-tab${shotsSource === "viewpoint" ? " is-active" : ""}`}
+          onClick={() => switchShotsSource("viewpoint")}
+          size="xs"
+          variant="ghost"
+        >
+          Viewpoint 截图
+        </Button>
+        <Button
+          aria-selected={shotsSource === "steam"}
+          className={`pz-shots-source-tab${shotsSource === "steam" ? " is-active" : ""}`}
+          onClick={() => switchShotsSource("steam")}
+          size="xs"
+          variant="ghost"
+        >
+          Steam 截图
+        </Button>
+      </HStack>
+      {shotsSource === "viewpoint" ? (
+        <>
       {loadingMedia && !shots ? (
         <Text color="gray.500">正在读取截图目录...</Text>
       ) : shots && shots.files.length > 0 ? (
@@ -4993,6 +5086,54 @@ function App() {
         </Box>
       ) : (
         <EmptyState text="截图目录中暂无图片。" />
+      )}
+        </>
+      ) : steamShotsLoading ? (
+        <Box display="grid" gap="3" gridTemplateColumns="repeat(auto-fill, minmax(160px, 1fr))">
+          {Array.from({ length: 8 }).map((_, index) => (
+            <Box className="pz-media-card" bg="gray.50" borderColor="gray.200" borderRadius="sm" borderWidth="1px" key={index} overflow="hidden">
+              <Box className="pz-skeleton-shine" style={{ aspectRatio: "16 / 10" }} />
+              <Box p="2">
+                <Box className="pz-skeleton-shine pz-skeleton-line" style={{ width: "70%" }} />
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      ) : steamShots && steamShots.files.length > 0 ? (
+        <Box display="grid" gap="3" gridTemplateColumns="repeat(auto-fill, minmax(160px, 1fr))">
+          {steamShots.files.map((shot) => (
+            <Box
+              className="pz-media-card"
+              key={shot.name}
+              bg="gray.50"
+              borderColor="gray.200"
+              borderRadius="sm"
+              borderWidth="1px"
+              cursor="pointer"
+              onClick={() => void openShot(shot.name, "steam")}
+              overflow="hidden"
+              _hover={{ borderColor: "blue.400", boxShadow: "sm" }}
+            >
+              <ShotThumbnail name={shot.name} source="steam" />
+              <Box p="2">
+                <Text color="gray.800" fontSize="sm" fontWeight="600" overflowWrap="anywhere">
+                  {shot.name}
+                </Text>
+                <Text color="gray.500" fontSize="xs" mt="1">
+                  {formatBytes(shot.sizeBytes)}
+                </Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      ) : (
+        <EmptyState
+          text={
+            steamShots && steamShots.directory
+              ? "Steam 截图目录暂无图片。"
+              : "没有找到 Steam 截图目录：未检测到 Steam 安装位置或已登录的用户。"
+          }
+        />
       )}
     </MediaPanel>
   );
@@ -6562,7 +6703,15 @@ function App() {
               </>
             ) : (
               <>
-                <Text color="gray.500" fontSize="sm">已是最新版本（v{launcherUpdate.currentVersion}）。</Text>
+                <HStack gap="2" wrap="wrap" align="center">
+                  <Text color="gray.500" fontSize="sm">
+                    {launcherUpdate.unknownVersion ? "未知版本" : "已是最新版本"}（v
+                    {launcherUpdate.currentVersion}）。
+                  </Text>
+                  {launcherUpdate.unknownVersion ? (
+                    <Badge colorPalette="purple" size="sm">BETA</Badge>
+                  ) : null}
+                </HStack>
                 {/* 最新版同样展示更新日志：就是当前版本自身的发布说明。 */}
                 {launcherUpdate.notes ? (
                   <Box mt="2">
@@ -6636,6 +6785,36 @@ function App() {
       ) : null}
     </Box>
   ) : null;
+  // 「当前状态」紧跟在「游戏版本」标题下方：一眼就能看到当前目录和保存过的版本是否一致。
+  const versionCurrentStatusContent = versionStatus ? (
+    <Box className="pz-version-section pz-version-status-block">
+      <HStack align="center" gap="2" wrap="wrap">
+        <Text color="gray.800" fontSize="sm" fontWeight="700">当前状态</Text>
+        <Badge colorPalette={versionStatus.currentMatch.kind === "unknown" ? "orange" : "blue"} size="sm">
+          {versionMatchLabel(versionStatus.currentMatch, versionStatus.versions)}
+        </Badge>
+      </HStack>
+      <Text color="gray.500" fontSize="xs" mt="1" whiteSpace="pre-wrap">{versionStatus.currentMatch.message}</Text>
+      {versionVerified ? (
+        <Text
+          color={versionVerified.matchedVersionId ? "green.700" : "red.600"}
+          fontSize="xs"
+          mt="2"
+        >
+          上次检查：
+          {versionVerified.matchedVersionId
+            ? `和「${versionLabelById(versionStatus.versions, versionVerified.matchedVersionId)}」完全一致`
+            : "和保存过的版本都不一样"}
+          {developerMode ? `（${shortVersionHash(versionVerified.rootHash)}）` : ""}
+        </Text>
+      ) : null}
+      {versionStatus.pendingChanges ? (
+        <Text color="orange.700" fontSize="xs" mt="2">
+          和最新版本相比：新增 {versionStatus.pendingChanges.added} · 删除 {versionStatus.pendingChanges.removed} · 修改 {versionStatus.pendingChanges.modified}。
+        </Text>
+      ) : null}
+    </Box>
+  ) : null;
   const gameVersionSettingsContent = (
     <>
       <HStack align="start" gap="3" justify="space-between" wrap="wrap">
@@ -6658,6 +6837,8 @@ function App() {
           刷新
         </Button>
       </HStack>
+
+      {versionCurrentStatusContent}
 
       {versionStatusError ? (
         <Text color="red.500" fontSize="xs" mt="3" whiteSpace="pre-wrap">读取失败：{versionStatusError}</Text>
@@ -6837,34 +7018,6 @@ function App() {
                 </Switch.Control>
               </Switch.Root>
             </HStack>
-          </Box>
-
-          <Box className="pz-version-section">
-            <HStack align="center" gap="2" wrap="wrap">
-              <Text color="gray.800" fontSize="sm" fontWeight="700">当前状态</Text>
-              <Badge colorPalette={versionStatus.currentMatch.kind === "unknown" ? "orange" : "blue"} size="sm">
-                {versionMatchLabel(versionStatus.currentMatch, versionStatus.versions)}
-              </Badge>
-            </HStack>
-            <Text color="gray.500" fontSize="xs" mt="1" whiteSpace="pre-wrap">{versionStatus.currentMatch.message}</Text>
-            {versionVerified ? (
-              <Text
-                color={versionVerified.matchedVersionId ? "green.700" : "red.600"}
-                fontSize="xs"
-                mt="2"
-              >
-                上次检查：
-                {versionVerified.matchedVersionId
-                  ? `和「${versionLabelById(versionStatus.versions, versionVerified.matchedVersionId)}」完全一致`
-                  : "和保存过的版本都不一样"}
-                {developerMode ? `（${shortVersionHash(versionVerified.rootHash)}）` : ""}
-              </Text>
-            ) : null}
-            {versionStatus.pendingChanges ? (
-              <Text color="orange.700" fontSize="xs" mt="2">
-                和最新版本相比：新增 {versionStatus.pendingChanges.added} · 删除 {versionStatus.pendingChanges.removed} · 修改 {versionStatus.pendingChanges.modified}。
-              </Text>
-            ) : null}
           </Box>
 
           {versionStatus.steamUpdatePending ? (
@@ -7467,7 +7620,7 @@ function App() {
               aria-current={versionTab === section.value ? "page" : undefined}
               className={`pz-version-hub-item${versionTab === section.value ? " is-active" : ""}`}
               key={section.value}
-              onClick={() => setVersionTab(section.value)}
+              onClick={() => switchVersionTab(section.value)}
               size="sm"
               variant="ghost"
             >
@@ -7477,7 +7630,11 @@ function App() {
           ))}
         </Stack>
       </Box>
-      <Box className="pz-version-hub-main">
+      <Box
+        className="pz-version-hub-main"
+        data-direction={versionTransitionDirection}
+        key={versionTab}
+      >
         {versionTab === "game" || versionTab === "mods" || versionTab === "history" ? (
           <Box className="pz-panel pz-version-settings-panel">
             {versionTab === "game"
@@ -8559,58 +8716,44 @@ function App() {
         />
       ) : null}
 
+      {/* 截图预览：亚克力弹窗配方与光影下载/工坊详情一致（Portal + 进出场动画）。
+          尺寸收窄：预览图限高 52vh，弹窗宽度 min(560px, 100%)。 */}
       {preview && (
-        <Box
-          className="pz-modal-overlay"
-          alignItems="center"
-          bg="blackAlpha.700"
-          display="flex"
-          inset="0"
-          justifyContent="center"
-          onClick={() => {
-            URL.revokeObjectURL(preview.url);
-            setPreview(null);
-          }}
-          p="3"
-          position="fixed"
-          zIndex="modal"
-        >
+        <Portal>
           <Box
-            className="pz-modal"
-            bg="white"
-            borderRadius="md"
-            maxH="90vh"
-            maxW="min(960px, 100%)"
-            onClick={(event) => event.stopPropagation()}
-            overflow="auto"
-            p={{ base: "3", md: "5" }}
-            width="100%"
+            className={`pz-resource-file-overlay ${previewClosing ? "is-closing" : ""}`}
+            onClick={closeShotPreview}
           >
-            <HStack justify="space-between" gap="2">
-              <Text color="gray.900" fontWeight="700" overflowWrap="anywhere">
-                {preview.name}
-              </Text>
-              <Button
-                onClick={() => {
-                  URL.revokeObjectURL(preview.url);
-                  setPreview(null);
-                }}
-                size="sm"
-                variant="ghost"
-              >
-                关闭
-              </Button>
-            </HStack>
-            <Box bg="gray.100" borderRadius="sm" mt="3" overflow="auto" textAlign="center">
-              <FallbackImage alt={preview.name} className="is-large" src={preview.url} style={{ display: "block", margin: "0 auto", maxHeight: "65vh", maxWidth: "100%" }} />
+            <Box
+              aria-label="截图预览"
+              aria-modal="true"
+              className="pz-resource-file-dialog pz-shot-preview-dialog"
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+            >
+              <HStack justify="space-between" gap="2">
+                <Text color="gray.900" fontWeight="700" overflowWrap="anywhere">
+                  {preview.name}
+                </Text>
+                <Button aria-label="关闭截图预览" onClick={closeShotPreview} size="sm" variant="ghost">
+                  ×
+                </Button>
+              </HStack>
+              <Box className="pz-shot-preview-body" mt="3" textAlign="center">
+                <FallbackImage
+                  alt={preview.name}
+                  src={preview.url}
+                  style={{ display: "block", margin: "0 auto", maxHeight: "52vh", maxWidth: "100%" }}
+                />
+              </Box>
+              <HStack justify="end" mt="3">
+                <Button colorPalette="blue" loading={copyingShot} onClick={() => void copyPreview()}>
+                  复制图片
+                </Button>
+              </HStack>
             </Box>
-            <HStack justify="end" mt="4">
-              <Button colorPalette="blue" loading={copyingShot} onClick={() => void copyPreview()}>
-                复制图片
-              </Button>
-            </HStack>
           </Box>
-        </Box>
+        </Portal>
       )}
       {feedbackOpen && (
         <Portal>

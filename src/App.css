@@ -4852,3 +4852,61 @@ body {
     width: auto;
   }
 }
+
+/* 「版本」页切换左侧分区：内容区按方向滑入（前进从右、后退从左）。
+   容器 key={versionTab} 强制重挂，动画才会随每次切换重播；overflow 容器本身不做
+   transform，避免影响内部滚动条的定位。 */
+.pz-version-hub-main > * {
+  animation: pz-page-content-in-from-right var(--pz-dur-base) var(--pz-ease-page-slide) both;
+}
+
+.pz-version-hub-main[data-direction="backward"] > * {
+  animation-name: pz-page-content-in-from-left;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-version-hub-main > * {
+    animation: none;
+  }
+}
+
+/* 「当前状态」紧贴「游戏版本」标题：它是标题下的第一段信息，不再画分段上边框。 */
+.pz-version-status-block {
+  margin-top: 0.7rem;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* 截图页的来源子分页（Viewpoint 截图 / Steam 截图）：与版本筛选按钮同款胶囊。 */
+.pz-shots-source-tab {
+  height: var(--pz-control-height) !important;
+  min-height: var(--pz-control-height) !important;
+  padding-inline: 0.7rem !important;
+  border-radius: var(--pz-radius-pill) !important;
+  color: var(--pz-text-label) !important;
+  font-size: var(--pz-font-sm) !important;
+}
+
+.pz-shots-source-tab:hover {
+  background: var(--pz-fill-accent) !important;
+  color: var(--pz-accent-strong) !important;
+}
+
+.pz-shots-source-tab.is-active {
+  background: var(--pz-fill-accent-active) !important;
+  color: var(--pz-accent-deep) !important;
+  font-weight: 700 !important;
+}
+
+/* 截图预览弹窗：沿用亚克力弹窗配方（.pz-resource-file-dialog），只收窄宽度、
+   预览图区域限高，避免大图把弹窗撑满整屏。 */
+.pz-shot-preview-dialog {
+  width: min(560px, 100%);
+}
+
+.pz-shot-preview-body {
+  min-height: 0;
+  max-height: 52vh;
+  overflow: auto;
+  border-radius: var(--pz-radius-sm);
+}
