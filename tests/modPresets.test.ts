@@ -46,6 +46,33 @@ test("preset box stays a vertical scroll list on narrow screens", () => {
   assert.match(cssSource, /\.pz-resource-center-sidebar \.pz-mod-preset-list\s*\{[^}]*flex-direction:\s*column;[^}]*overflow-x:\s*visible;/s);
 });
 
+test("long preset names scroll instead of being cut off for good", () => {
+  assert.match(appSource, /<ScrollingLabel text=\{preset\.name\} \/>/);
+  // 只有真的放不下才滚：比 container.clientWidth 与文字 scrollWidth。
+  assert.match(
+    appSource,
+    /const overflow = Math\.max\(0, textElement\.scrollWidth - container\.clientWidth\);/,
+  );
+  assert.match(appSource, /className=\{`pz-scroll-label\$\{distance > 0 \? " is-overflowing" : ""\}`\}/);
+  assert.match(appSource, /"--pz-scroll-distance": `\$\{distance\}px`,/);
+  // 裁切在容器、位移在文字层，否则滚动的还是同一段被裁掉的文字。
+  assert.match(cssSource, /\.pz-scroll-label\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(cssSource, /\.pz-scroll-label-text\s*\{[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s);
+  assert.match(
+    cssSource,
+    /\.pz-mod-preset-item:hover \.pz-scroll-label\.is-overflowing \.pz-scroll-label-text,[\s\S]*?width:\s*max-content;[\s\S]*?animation-name:\s*pz-scroll-label-walk;/,
+  );
+  assert.match(
+    cssSource,
+    /@keyframes pz-scroll-label-walk \{[\s\S]*?translateX\(calc\(-1 \* var\(--pz-scroll-distance, 0px\)\)\)/,
+  );
+  // 减弱动效时退回省略号。
+  assert.match(
+    cssSource,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]{0,400}?\.pz-scroll-label\.is-overflowing:hover \.pz-scroll-label-text \{[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?animation:\s*none;/,
+  );
+});
+
 test("settings sub-pages scroll inside their own content area", () => {
   assert.match(cssSource, /\.pz-settings-center > \.pz-resource-center-main\s*\{[^}]*overflow-y:\s*auto;/s);
   assert.match(cssSource, /\.pz-settings-center > \.pz-resource-center-main\s*\{\s*overflow-y:\s*visible;\s*\}/);

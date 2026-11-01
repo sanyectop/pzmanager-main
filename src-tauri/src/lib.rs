@@ -236,6 +236,9 @@ struct AppSettings {
     /// 「启动时清理内存」：点「启动游戏」时先清理一次，再把游戏拉起来。
     #[serde(default)]
     clean_memory_on_launch: bool,
+    /// 「激进内存清理」：常规清理之外，再把系统的已修改页 / 待机缓存还给空闲列表。
+    #[serde(default)]
+    aggressive_memory_clean: bool,
     /// 内置四季壁纸的手动 / 固定设置，前端 builtinWallpaper.ts 的 WallpaperEffectSettings 原样存取。
     #[serde(default)]
     wallpaper_effect: Option<serde_json::Value>,
@@ -2103,10 +2106,19 @@ async fn detect_steam_proxy() -> Vec<steam_relay::ProxyProbe> {
     steam_relay::detect_local_proxies().await
 }
 
-/// 设置 › 关于 › 反馈信息：上传最近一次启动的日志 + 用户描述。
+/// 设置 › 关于 › 反馈信息：上传最近一次启动的日志 + 用户描述（联系方式可选，拼在描述末尾）。
 #[tauri::command]
-async fn submit_feedback(description: String) -> Result<feedback::FeedbackUploadResult, String> {
-    feedback::submit_feedback(description).await
+async fn submit_feedback(
+    description: String,
+    contact: Option<String>,
+) -> Result<feedback::FeedbackUploadResult, String> {
+    feedback::submit_feedback(description, contact).await
+}
+
+/// 设置 › 关于 › 反馈信息：本机提交过的反馈编号（新→旧）。
+#[tauri::command]
+fn list_submitted_feedback() -> Result<Vec<feedback::FeedbackHistoryEntry>, String> {
+    Ok(feedback::read_history())
 }
 
 /// 设置页「Steam 网络加速 › 测试连接」：探一下中转的 /healthz，报耗时。
@@ -2204,6 +2216,17 @@ fn save_clean_memory_on_launch(enabled: bool) -> Result<(), String> {
     save_app_settings_at(&path, &settings)
 }
 
+/// 保存「激进内存清理」开关；后端立刻同步给 memclean，下一次清理就按新模式跑。
+#[tauri::command]
+fn save_aggressive_memory_clean(enabled: bool) -> Result<(), String> {
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    settings.aggressive_memory_clean = enabled;
+    save_app_settings_at(&path, &settings)?;
+    memclean::set_aggressive_cleanup(enabled);
+    Ok(())
+}
+
 /// 当前系统内存占用，给设置界面显示（也用来判断阈值合不合理）。
 #[tauri::command]
 fn get_memory_status() -> Result<memclean::MemoryStatus, String> {
@@ -2214,6 +2237,21 @@ fn get_memory_status() -> Result<memclean::MemoryStatus, String> {
 #[tauri::command(async)]
 fn clean_memory_now() -> Result<memclean::CleanupReport, String> {
     Ok(memclean::clean_memory())
+}
+
+/// 当前启动器是否以管理员身份运行：激进清理的系统级步骤只有管理员才生效。
+#[tauri::command]
+fn is_launcher_elevated() -> bool {
+    memclean::is_elevated()
+}
+
+/// 以管理员身份重新启动启动器；用户在 UAC 里取消时返回错误，当前实例继续运行。
+#[tauri::command]
+fn restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
+    memclean::restart_as_admin()?;
+    // 新实例已经拉起，当前实例退出，避免两个启动器同时运行。
+    app.exit(0);
+    Ok(())
 }
 
 fn current_steam_config_paths() -> Vec<PathBuf> {
@@ -2633,6 +2671,11 @@ pub fn run() {
                 })
                 .unwrap_or((false, memclean::DEFAULT_THRESHOLD_PERCENT));
             memclean::set_silent_cleanup(enabled, threshold);
+            memclean::set_aggressive_cleanup(
+                loaded_settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.aggressive_memory_clean),
+            );
             memclean::start_silent_loop(app.handle().clone());
 
             // 恢复上一次记住的窗口尺寸（拖动窗口边缘调整后会自动记住）。
@@ -2679,6 +2722,7 @@ pub fn run() {
             save_fast_launch,
             save_silent_memory_cleanup,
             save_clean_memory_on_launch,
+            save_aggressive_memory_clean,
             save_steam_relay_settings,
             save_steam_proxy,
             detect_steam_proxy,
@@ -2707,9 +2751,12 @@ pub fn run() {
             start_mod_version_save_all,
             start_mod_version_restore_pack,
             submit_feedback,
+            list_submitted_feedback,
             ping_steam_relay,
             get_memory_status,
             clean_memory_now,
+            is_launcher_elevated,
+            restart_as_admin,
             fast_launch_cache_status,
             startup_timing,
             set_background_path,

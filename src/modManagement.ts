@@ -42,6 +42,29 @@ export function mergeItemsPreservingOrder<T>(
   return merged;
 }
 
+/** 拖动排序：把一组模组当作一个整块移动到 anchor 的前/后，组内相对顺序保持不变。
+    返回 null 表示 anchor 不在列表里（拖动点落在空白处），调用方应保持现状。 */
+export function moveModIdBlock(
+  ids: readonly string[],
+  moving: readonly string[],
+  anchor: string,
+  after: boolean,
+): string[] | null {
+  const movingKeys = new Set(moving.map((id) => id.toLowerCase()));
+  const block = ids.filter((id) => movingKeys.has(id.toLowerCase()));
+  if (block.length === 0) {
+    return null;
+  }
+  const rest = ids.filter((id) => !movingKeys.has(id.toLowerCase()));
+  const index = rest.findIndex((id) => id.toLowerCase() === anchor.toLowerCase());
+  if (index < 0) {
+    return null;
+  }
+  const next = [...rest];
+  next.splice(index + (after ? 1 : 0), 0, ...block);
+  return next;
+}
+
 export function filterLuaMods<T extends Pick<LuaModLike, "enabled" | "hasB42">>(
   mods: readonly T[],
   filters: ReadonlySet<LuaModFilter>,

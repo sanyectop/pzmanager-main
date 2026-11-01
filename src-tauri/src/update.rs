@@ -45,6 +45,10 @@ pub(crate) struct LauncherUpdateStatus {
     pub(crate) latest_version: String,
     pub(crate) update_available: bool,
     pub(crate) unknown_version: bool,
+    /// 当前版本是不是内测构建（`x.y.z-devbuild.<构建号>`）。
+    pub(crate) dev_build: bool,
+    /// 内测构建号；非内测构建为 None。
+    pub(crate) dev_build_id: Option<String>,
     pub(crate) pub_date: Option<String>,
     pub(crate) notes: Option<String>,
     /// 「下载更新」按钮的跳转地址:优先 123 云盘,缺省时回落 GitHub 安装包、便携版。
@@ -84,10 +88,19 @@ fn build_update_status_with_current(
         return Err("更新信息里缺少有效版本号。".to_string());
     }
     let downloads = feed.downloads.unwrap_or_default();
+    // 内测构建（1.5.261101-devbuild.1793501619）只拿 base 和更新源比：
+    // 构建号只是本机这次编译的标识，按完整串比会把它当成"比正式版还新"。
+    let dev_build = parse_dev_build_version(&current_version);
+    let compare_version = dev_build
+        .as_ref()
+        .map(|value| value.base.clone())
+        .unwrap_or_else(|| current_version.clone());
     Ok(LauncherUpdateStatus {
-        update_available: version_is_newer(&latest_version, &current_version),
-        // 自身版本比更新源发布的还高:说明是未发布的开发构建,标注为「未知版本」。
-        unknown_version: version_is_newer(&current_version, &latest_version),
+        update_available: version_is_newer(&latest_version, &compare_version),
+        // 普通构建比更新源还新才是「未知版本」；DevBuild 本来就是未发布的内测版，按内测展示。
+        unknown_version: dev_build.is_none() && version_is_newer(&compare_version, &latest_version),
+        dev_build: dev_build.is_some(),
+        dev_build_id: dev_build.map(|value| value.build_id),
         current_version,
         latest_version,
         pub_date: feed.pub_date,
@@ -98,6 +111,40 @@ fn build_update_status_with_current(
             .or(downloads.windows_x64_portable),
         release_page_url: feed.release_page,
     })
+}
+
+/// 内测构建版本号：`1.5.261101-devbuild.1793501619`。
+///
+/// 版本工具（pytools/version_manager.py）写出来的就是这个格式：base 沿用 YYMMDD 版本，
+/// 后缀是标准 semver prerelease。这里只关心「是不是内测」和「构建号是多少」，
+/// 与更新源比较时用 base。
+pub(crate) fn parse_dev_build_version(version: &str) -> Option<DevBuildVersion> {
+    let normalized = normalize_version(version);
+    let (base, rest) = normalized.split_once('-')?;
+    // 前缀大小写不敏感：-devbuild.7 / -DevBuild.7 都认。
+    let build_id = rest
+        .get(.."devbuild.".len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case("devbuild."))
+        .map(|_| &rest["devbuild.".len()..])?;
+    let valid_base = !base.is_empty()
+        && base
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '.')
+        && base.starts_with(|ch: char| ch.is_ascii_digit());
+    let valid_build = !build_id.is_empty() && build_id.chars().all(|ch| ch.is_ascii_alphanumeric());
+    if !valid_base || !valid_build {
+        return None;
+    }
+    Some(DevBuildVersion {
+        base: base.to_string(),
+        build_id: build_id.to_string(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DevBuildVersion {
+    pub(crate) base: String,
+    pub(crate) build_id: String,
 }
 
 /// 去掉展示层的 v/V 前缀与首尾空白。
@@ -249,4 +296,60 @@ mod tests {
         let status = build_update_status_with_current(feed("1.4.261031"), "1.4.261031".to_string()).unwrap();
         assert!(!status.unknown_version);
         assert!(!status.update_available);
+    }
+
+    #[test]
+    fn parses_dev_build_versions() {
+        assert_eq!(
+            parse_dev_build_version("1.5.261101-devbuild.1793501619"),
+            Some(DevBuildVersion {
+                base: "1.5.261101".to_string(),
+                build_id: "1793501619".to_string(),
+            })
+        );
+        // 允许 v 前缀、大小写混写、纯数字构建号。
+        assert_eq!(
+            parse_dev_build_version("v1.5.261101-DevBuild.7"),
+            Some(DevBuildVersion {
+                base: "1.5.261101".to_string(),
+                build_id: "7".to_string(),
+            })
+        );
+        // 正式版、别的后缀、空构建号都不算内测。
+        assert_eq!(parse_dev_build_version("1.5.261101"), None);
+        assert_eq!(parse_dev_build_version("1.5.261101-beta.7"), None);
+        assert_eq!(parse_dev_build_version("1.5.261101-devbuild."), None);
+        assert_eq!(parse_dev_build_version("1.5.261101-devbuild.a-b"), None);
+    }
+
+    #[test]
+    fn dev_builds_are_not_reported_as_unknown_versions() {
+        let feed = |version: &str| LauncherUpdateFeed {
+            version: version.to_string(),
+            pub_date: None,
+            notes: None,
+            downloads: None,
+            release_page: None,
+        };
+        // 同号正式版已发布：内测构建既不算"未知版本"，也不算"有更新"（按 base 比较）。
+        let status = build_update_status_with_current(
+            feed("1.5.261101"),
+            "1.5.261101-devbuild.1793501619".to_string(),
+        )
+        .unwrap();
+        assert!(status.dev_build);
+        assert_eq!(status.dev_build_id.as_deref(), Some("1793501619"));
+        assert!(!status.unknown_version);
+        assert!(!status.update_available);
+
+        // 内测构建的 base 比更新源旧：正常提示有更新。
+        let status = build_update_status_with_current(feed("1.6.261110"), "1.5.261101-devbuild.5".to_string()).unwrap();
+        assert!(status.dev_build);
+        assert!(status.update_available);
+        assert!(!status.unknown_version);
+
+        // 普通构建比更新源新：仍然是「未知版本」。
+        let status = build_update_status_with_current(feed("1.4.261101"), "1.5.261101".to_string()).unwrap();
+        assert!(!status.dev_build);
+        assert!(status.unknown_version);
     }

@@ -560,9 +560,10 @@ pub(crate) fn order_mod_ids_by_requires(entries: &[LuaModEntry], ids: &[String])
         let right_entry = by_id.get(&right.to_ascii_lowercase()).copied();
         let priority =
             |id: &str, entry: Option<&LuaModEntry>| match id.to_ascii_lowercase().as_str() {
-                "modmanager" => 0,
-                "modmanagerserver" => 1,
-                "modoptions" => 2,
+                _ if entry.is_some_and(|entry| entry.is_loader) => 0,
+                "modmanager" => 1,
+                "modmanagerserver" => 2,
+                "modoptions" => 3,
                 _ if entry.is_some_and(|entry| entry.load_first) => 100,
                 _ if entry.is_some_and(|entry| entry.load_last) => 10_000,
                 _ => 1_000,

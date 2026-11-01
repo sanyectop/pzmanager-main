@@ -1,6 +1,6 @@
 [package]
 name = "pzmanager"
-version = "1.4.261101"
+version = "1.5.261101-devbuild.1793501619"
 description = "Project Zomboid launcher + mod manager"
 authors = ["you"]
 edition = "2021"
@@ -69,6 +69,8 @@ windows = { version = "0.62.2", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Threading",
+    # 「以管理员身份重启」用 ShellExecuteW 的 runas 动词。
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
 ] }

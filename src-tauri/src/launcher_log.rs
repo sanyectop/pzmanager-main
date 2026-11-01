@@ -207,28 +207,27 @@ fn read_text_limited(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn last_session_slice(text: &str, max_bytes: usize) -> (String, bool) {
-    let session_start = text
-        .rfind(SESSION_MARKER)
-        .map(|index| text[..index].rfind('\n').map_or(0, |offset| offset + 1))
-        .unwrap_or(0);
-    let sliced = &text[session_start..];
-    let mut start = sliced.len().saturating_sub(max_bytes);
-    while start < sliced.len() && !sliced.is_char_boundary(start) {
+/// 取文本尾部：按字节截断并回退到字符边界（中文不会被切出半个字）。
+fn tail_bytes(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let mut start = text.len() - max_bytes;
+    while start < text.len() && !text.is_char_boundary(start) {
         start += 1;
     }
-    (
-        sliced[start..].to_string(),
-        // 只表示“本次会话内容超过了 max_bytes”，不把“切掉了更早的会话”算作截断。
-        start > 0,
-    )
+    (text[start..].to_string(), true)
 }
 
-/// 给反馈上传用：最近一次启动会话的日志尾部。
-pub(crate) fn recent_session_log(max_bytes: usize) -> Option<(String, bool)> {
+/// 给反馈上传用：整份启动器日志的尾部。
+///
+/// 以前只带"最近一次会话"，但用户常常是**重启启动器之后**才来反馈，
+/// 那样出问题的那次会话就丢了。现在带上整份日志（单文件 2 MB 轮转，尾部 1 MB 足够），
+/// 里面可能包含更早的启动器会话。
+pub(crate) fn full_log_tail(max_bytes: usize) -> Option<(String, bool)> {
     let path = log_file_path()?;
     let text = read_text_limited(&path)?;
-    Some(last_session_slice(&text, max_bytes))
+    Some(tail_bytes(&text, max_bytes))
 }
 
 fn read_tail_at(path: &Path, limit: u64) -> Result<LauncherLogTail, String> {
@@ -380,12 +379,15 @@ mod tests {
     }
 
     #[test]
-    fn keeps_only_the_last_session() {
-        let text = "old session\nold line\n=== launcher session ===\nstart line\nwork line\n";
-        let (sliced, truncated) = last_session_slice(text, 1024);
-        assert!(sliced.starts_with(SESSION_MARKER));
-        assert!(sliced.contains("work line"));
-        assert!(!sliced.contains("old line"));
+    fn tail_bytes_keeps_the_end_and_respects_char_boundaries() {
+        let text = "旧会话\n=== launcher session ===\n最近会话\n工作记录\n";
+        let (tail, truncated) = tail_bytes(text, 1024);
         assert!(!truncated);
+        assert_eq!(tail, text);
+        // 中文按 3 字节切：只留最后 4 字节时要落在字符边界上，且不带替换符。
+        let (tail, truncated) = tail_bytes("日志内容", 4);
+        assert!(truncated);
+        assert_eq!(tail, "容");
+        assert!(!tail.contains('\u{FFFD}'));
     }
 }

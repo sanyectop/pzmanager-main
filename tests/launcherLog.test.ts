@@ -39,6 +39,8 @@ test("launcher log rotates and is included in feedback uploads", () => {
   assert.match(logSource, /MAX_LOG_BYTES/);
   assert.match(logSource, /SESSION_MARKER/);
   assert.match(logSource, /rotate_if_needed_at/);
-  assert.match(feedbackSource, /recent_session_log/);
+  // 反馈带整份启动器日志的尾部（重启过启动器也能带上出问题的那次会话）。
+  assert.match(logSource, /pub\(crate\) fn full_log_tail\(max_bytes: usize\)/);
+  assert.match(feedbackSource, /full_log_tail\(MAX_LAUNCHER_LOG_BYTES\)/);
   assert.match(feedbackSource, /launcher\.log/);
 });

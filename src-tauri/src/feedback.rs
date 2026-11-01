@@ -1,9 +1,9 @@
-//! 「设置 › 关于 › 反馈信息」：把**最近一次启动**的日志连同用户描述上传到
-//! 中转服务器（`steam-relay/` 的 `POST /feedback`，默认 `pzmlan.sanyec.top`）。
+//! 「设置 › 关于 › 反馈信息」：把日志连同用户描述上传到中转服务器
+//! （`steam-relay/` 的 `POST /feedback`，默认 `pzmlan.sanyec.top`）。
 //!
-//! 两个日志的来源与"最近一次启动"的界定：
-//! - `%USERPROFILE%\Zomboid\.pzmanager\logs\launcher.log`：启动器日志，
-//!   按会话标记只取最近一次启动器的部分。
+//! 三个日志的来源与截取口径：
+//! - `%USERPROFILE%\Zomboid\.pzmanager\logs\launcher.log`：启动器日志，**整份**的尾部
+//!   （最多 1 MB）。用户常是重启启动器之后才反馈，只带"当前会话"会把出问题的那次丢掉。
 //! - `%TEMP%\overlay.log`：注入游戏的 pz_overlay.dll **追加**写、跨启动累积，
 //!   所以只取最后一个「已加载」标记之后的部分（即最近一次游戏启动）。
 //! - `%USERPROFILE%\Zomboid\console.txt`：游戏每次启动重写，本身就是最近一次。
@@ -26,6 +26,10 @@ const MAX_LAUNCHER_LOG_BYTES: usize = 1024 * 1024;
 const READ_HARD_LIMIT: u64 = 64 * 1024 * 1024;
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DESCRIPTION_CHARS: usize = 5000;
+/// 联系方式（可选）最长字数：够填邮箱 / QQ / 群昵称，又不至于把描述撑爆。
+const MAX_CONTACT_CHARS: usize = 200;
+/// 本机保留的反馈编号条数上限（新的在前）。
+const MAX_HISTORY_ENTRIES: usize = 50;
 /// overlay.dll 每次被游戏加载都会写这行（`pz_overlay v… 已加载（pid=…）`）。
 const OVERLAY_LOAD_MARKER: &str = "已加载";
 
@@ -43,6 +47,17 @@ pub(crate) struct FeedbackUploadResult {
     pub(crate) feedback_id: String,
     pub(crate) uploaded: Vec<String>,
     pub(crate) skipped: Vec<String>,
+}
+
+/// 本机记住的一条提交记录（设置 › 关于 ›「已提交的反馈」列表）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FeedbackHistoryEntry {
+    pub(crate) id: String,
+    /// Unix 秒；服务器回包没带时间时用本机提交时间。
+    pub(crate) sent_at: u64,
+    /// 描述前几十个字，方便在列表里认出是哪次反馈。
+    pub(crate) summary: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -102,7 +117,7 @@ fn since_last_game_launch(text: &str) -> &str {
 fn collect_logs() -> Vec<UploadFile> {
     let mut files = Vec::new();
 
-    match crate::launcher_log::recent_session_log(MAX_LAUNCHER_LOG_BYTES) {
+    match crate::launcher_log::full_log_tail(MAX_LAUNCHER_LOG_BYTES) {
         Some((content, truncated)) => files.push(UploadFile {
             name: "launcher.log",
             content,
@@ -162,7 +177,24 @@ fn collect_logs() -> Vec<UploadFile> {
     files
 }
 
-pub(crate) async fn submit_feedback(description: String) -> Result<FeedbackUploadResult, String> {
+/// 描述 + 可选联系方式拼成最终上报文本（联系方式为空时原样返回描述）。
+///
+/// 中转站的 `POST /feedback` 只有 `description` 一个正文字段，加联系方式不需要动服务端，
+/// 直接拼在描述末尾即可。
+fn compose_report(description: &str, contact: &str) -> String {
+    let contact = contact.trim();
+    let description = description.trim();
+    if contact.is_empty() {
+        description.to_string()
+    } else {
+        format!("{description}\n\n联系方式：{contact}")
+    }
+}
+
+pub(crate) async fn submit_feedback(
+    description: String,
+    contact: Option<String>,
+) -> Result<FeedbackUploadResult, String> {
     let description = description
         .trim()
         .chars()
@@ -171,6 +203,12 @@ pub(crate) async fn submit_feedback(description: String) -> Result<FeedbackUploa
     if description.is_empty() {
         return Err("请先填写错误详情，方便定位问题。".to_string());
     }
+    let contact = contact
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_CONTACT_CHARS)
+        .collect::<String>();
+    let report = compose_report(&description, &contact);
 
     let logs = collect_logs();
     let uploaded: Vec<String> = logs
@@ -195,7 +233,7 @@ pub(crate) async fn submit_feedback(description: String) -> Result<FeedbackUploa
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
     let payload = serde_json::json!({
-        "description": description,
+        "description": report,
         "client": {
             "appVersion": env!("CARGO_PKG_VERSION"),
             "os": std::env::consts::OS,
@@ -247,12 +285,93 @@ pub(crate) async fn submit_feedback(description: String) -> Result<FeedbackUploa
         result.feedback_id,
         result.uploaded.join("、")
     ));
+    if !result.feedback_id.is_empty() {
+        remember_submitted(&result.feedback_id, &description, sent_at);
+    }
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// 本机提交记录：设置 › 关于 ›「已提交的反馈」
+// ---------------------------------------------------------------------------
+
+fn history_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::pzmanager_directory()?.join("feedback-history.json"))
+}
+
+/// 读本机记录；文件不存在 / 损坏都按"空"处理——这只是个方便回查的列表，不能影响主流程。
+pub(crate) fn read_history() -> Vec<FeedbackHistoryEntry> {
+    let Ok(path) = history_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<FeedbackHistoryEntry>>(&text).unwrap_or_default()
+}
+
+/// 记一条提交（新的在最前，最多 [`MAX_HISTORY_ENTRIES`] 条）。写失败只记日志，不影响反馈本身。
+fn remember_submitted(id: &str, description: &str, sent_at: u64) {
+    let Ok(path) = history_path() else {
+        return;
+    };
+    let mut entries = read_history();
+    entries.retain(|entry| entry.id != id);
+    entries.insert(
+        0,
+        FeedbackHistoryEntry {
+            id: id.to_string(),
+            sent_at,
+            summary: summarize(description),
+        },
+    );
+    entries.truncate(MAX_HISTORY_ENTRIES);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(&entries) {
+        Ok(text) => {
+            if std::fs::write(&path, text).is_err() {
+                crate::launcher_log::warn("反馈编号记录写入失败（不影响反馈上传）。");
+            }
+        }
+        Err(error) => crate::launcher_log::warn(&format!("反馈编号记录序列化失败：{error}")),
+    }
+}
+
+/// 描述摘要：取第一行、压缩空白，最多 40 个字。
+fn summarize(description: &str) -> String {
+    let first_line = description.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+    let mut summary: String = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if summary.chars().count() > 40 {
+        summary = summary.chars().take(40).collect::<String>() + "…";
+    }
+    summary
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{since_last_game_launch, tail};
+    use super::{compose_report, since_last_game_launch, summarize, tail};
+
+    #[test]
+    fn appends_optional_contact_to_the_description() {
+        assert_eq!(compose_report("点了启动没反应", ""), "点了启动没反应");
+        assert_eq!(compose_report("点了启动没反应", "   "), "点了启动没反应");
+        assert_eq!(
+            compose_report("  点了启动没反应  ", "  1234@qq.com  "),
+            "点了启动没反应\n\n联系方式：1234@qq.com"
+        );
+    }
+
+    #[test]
+    fn summarizes_first_line_for_the_history_list() {
+        assert_eq!(summarize("第一行  有 空格\n第二行"), "第一行 有 空格");
+        assert_eq!(summarize("\n\n  \n只有一行"), "只有一行");
+        assert_eq!(summarize(""), "");
+        let long = summarize(&"模".repeat(50));
+        assert_eq!(long.chars().count(), 41);
+        assert!(long.ends_with('…'));
+    }
 
     #[test]
     fn keeps_only_the_last_game_launch_section() {

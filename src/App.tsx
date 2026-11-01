@@ -1,5 +1,5 @@
 import { Avatar, Badge, Box, Button, Checkbox, HStack, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea } from "@chakra-ui/react";
-import { faCircleInfo, faClockRotateLeft, faCubes, faGear, faHouse, faImages, faPlus, faScrewdriverWrench, faSun, faTrash } from "@fortawesome/free-solid-svg-icons";
+import { faAnglesDown, faAnglesUp, faCircleInfo, faClockRotateLeft, faCubes, faGear, faHouse, faImages, faPlus, faScrewdriverWrench, faSun, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -10,7 +10,7 @@ import { Image as TauriImage } from "@tauri-apps/api/image";
 import { open } from "@tauri-apps/plugin-dialog";
 import { writeImage, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import "./App.css";
 import { conciseNotification, shouldShowNotification } from "./developerMode";
 import { FallbackImage } from "./FallbackImage";
@@ -24,6 +24,7 @@ import {
   createMemoryCleanTracker,
   memoryCleanFinishedDetail,
   memoryCleanProgressDetail,
+  memoryCleanupSystemDetail,
   shouldFinishMemoryClean,
 } from "./memoryClean";
 import { MIN_MEMORY_MB, defaultMemoryLimitMb } from "./memorySettings";
@@ -32,7 +33,7 @@ import {
   STEAM_RELAY_MODE_OPTIONS,
   previewImageFallbackUrl,
 } from "./steamRelay";
-import { filterModVersionTargets, formatVersionBytes, formatVersionElapsed, formatVersionEta, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionChangeSummary, versionDeltaChainDepth, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, compareVersionStrings, createVersionEtaTracker, updateVersionEta, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
+import { filterModVersionTargets, formatVersionBytes, formatVersionElapsed, formatVersionEta, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionChangeSummary, versionDeltaChainDepth, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, compareVersionStrings, parseDevBuildVersion, createVersionEtaTracker, updateVersionEta, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import { DEFAULT_SEASON_FEATURES, DEFAULT_WALLPAPER_EFFECT, normalizeWallpaperEffectSettings, wallpaperEffectAt, type SeasonFeatures, type WallpaperEffectSettings } from "./builtinWallpaper";
 import { SeasonalWallpaper, loadSeasonFeatures } from "./SeasonalWallpaper";
@@ -42,6 +43,7 @@ import {
   filterLuaMods,
   invertSelection,
   mergeItemsPreservingOrder,
+  moveModIdBlock,
   setSelectionForKeys,
   sortLuaModsForDisplay,
   toggleSelection,
@@ -63,6 +65,7 @@ import {
   DetectionState,
   DeveloperNewsResponse,
   FastLaunchSaveResult,
+  FeedbackHistoryEntry,
   InstallResult,
   JarModBatchDecisionResult,
   JarModScanUpdate,
@@ -151,6 +154,7 @@ import {
   HtmlContentWithImageReveal,
   MediaPanel,
   PathValue,
+  ScrollingLabel,
   ShotThumbnail,
   type ShotsSource,
   SkeletonGate,
@@ -191,6 +195,25 @@ import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWa
 import { NotificationConsole, TaskCenterPanel, ToastViewport } from "./components/tasks";
 import { ResourceDownloadBrowser, WorkshopDropdown, WorkshopTagPicker, WorkshopTagSelectionSummary } from "./components/workshop";
 import { WindowTitlebar, useDialogAutoHeight } from "./components/shell";
+
+/** 当前构建的内测信息：版本号写成 `x.y.z-devbuild.<构建号>` 时才有（见 pytools/version_manager.py）。 */
+const APP_DEV_BUILD = parseDevBuildVersion(appManifest.version);
+
+/** 往上找第一个真正能滚的祖先：拖动时靠它做边缘自动滚动。 */
+function scrollParentOf(element: HTMLElement) {
+  let current = element.parentElement;
+  while (current && current !== document.body) {
+    const overflowY = getComputedStyle(current).overflowY;
+    if (
+      (overflowY === "auto" || overflowY === "scroll") &&
+      current.scrollHeight > current.clientHeight + 1
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
 
 function App() {
   const [detection, setDetection] = useState<DetectionState>({ status: "checking" });
@@ -285,6 +308,12 @@ function App() {
   const [silentMemoryCleanupSaving, setSilentMemoryCleanupSaving] = useState(false);
   const [cleanMemoryOnLaunch, setCleanMemoryOnLaunch] = useState(false);
   const [cleanMemoryOnLaunchSaving, setCleanMemoryOnLaunchSaving] = useState(false);
+  /** 激进内存清理：常规清理之外再清系统工作集 / 文件缓存 / 已修改页 / 待机缓存（系统级步骤需要管理员）。 */
+  const [aggressiveMemoryClean, setAggressiveMemoryClean] = useState(false);
+  const [aggressiveMemoryCleanSaving, setAggressiveMemoryCleanSaving] = useState(false);
+  /** 当前启动器是否以管理员身份运行；null = 还没问过后端。 */
+  const [launcherElevated, setLauncherElevated] = useState<boolean | null>(null);
+  const [restartingAsAdmin, setRestartingAsAdmin] = useState(false);
   const [memoryStatus, setMemoryStatus] = useState<MemoryStatus | null>(null);
   const [lastCleanupReport, setLastCleanupReport] = useState<MemoryCleanupReport | null>(null);
   const [memoryCleaning, setMemoryCleaning] = useState(false);
@@ -429,8 +458,12 @@ function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [feedbackClosing, setFeedbackClosing] = useState(false);
   const [feedbackDescription, setFeedbackDescription] = useState("");
+  const [feedbackContact, setFeedbackContact] = useState("");
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  /** 本机记录过的反馈编号（设置 › 关于 ›「已提交的反馈」，新的在前）。 */
+  const [feedbackHistory, setFeedbackHistory] = useState<FeedbackHistoryEntry[]>([]);
+  const [feedbackHistoryOpen, setFeedbackHistoryOpen] = useState(false);
   const [feedbackResult, setFeedbackResult] = useState<{
     feedbackId: string;
     uploaded: string[];
@@ -458,6 +491,8 @@ function App() {
   const [selectedLuaModKeys, setSelectedLuaModKeys] = useState<Set<string>>(new Set());
   const [expandedLuaModKeys, setExpandedLuaModKeys] = useState<Set<string>>(new Set());
   const [luaModActionId, setLuaModActionId] = useState<string | null>(null);
+  /** Lua 列表的入场滑入动画播完后置 true：之后换位（拖动、筛选）不再重播，详见 .pz-lua-mod-list.is-settled。 */
+  const [luaModListSettled, setLuaModListSettled] = useState(false);
   const [zombieBuddyPanelExpanded, setZombieBuddyPanelExpanded] = useState(false);
   // 支持库页的安装选项：默认只显示名称与状态标签，详情折叠。
   const [supportZombieBuddyExpanded, setSupportZombieBuddyExpanded] = useState(false);
@@ -476,6 +511,35 @@ function App() {
     originals: Map<string, boolean>;
   } | null>(null);
   const suppressRowClickRef = useRef(false);
+  /** Lua 模组拖动排序：拖动中的模组（小写 ID）、实时预览顺序与一起搬动的整组模组 ID。 */
+  const [luaReorder, setLuaReorder] = useState<{ key: string; ids: string[]; group: string[] } | null>(null);
+  const luaReorderRef = useRef<{
+    key: string;
+    ids: string[];
+    group: string[];
+    original: string[];
+    /** 这次跟着指针一起走的行（多选时是整组）及其高度、相对指针的抓取偏移。 */
+    rows: Array<{ element: HTMLElement; grabOffset: number; height: number }>;
+    /** 块顶到指针的距离：块顶 = clientY - blockTopDelta，抓住的那一行因此始终贴着指针。 */
+    blockTopDelta: number;
+    /** 最近一次指针的 Y：换位导致布局变化后，用它把整组重新对齐到指针。 */
+    lastClientY: number;
+    /** 拖动所在的滚动框（靠近上下边缘时自动滚动）。 */
+    scroller: HTMLElement | null;
+    /** 上一次看到的滚动位置：滚动后要把整组重新对位到指针。 */
+    lastScrollTop: number;
+  } | null>(null);
+  const [luaReorderSaving, setLuaReorderSaving] = useState(false);
+  const luaReorderCommitRef = useRef<(ids: string[]) => void>(() => {});
+  /** 列表顺序变化时的 FLIP 起点：渲染期间（DOM 更新前）抓的每行 offsetTop。 */
+  const luaFlipRef = useRef<{ signature: string; tops: Map<string, number> } | null>(null);
+  /** 松手后待放开的行：等最终顺序那次渲染提交之后，再统一滑回槽位。 */
+  const luaDropRowsRef = useRef<Array<{ element: HTMLElement }> | null>(null);
+  const [luaDropToken, setLuaDropToken] = useState(0);
+  /** 拖动期间逐帧回调（自动滚动 + 对位）与它的 rAF 句柄。 */
+  const luaDragTickRef = useRef<() => void>(() => {});
+  const luaDragUpdateRef = useRef<() => void>(() => {});
+  const luaDragFrameRef = useRef<number | null>(null);
   const [selectedJarModKeys, setSelectedJarModKeys] = useState<Set<string>>(new Set());
   const [expandedJarModKeys, setExpandedJarModKeys] = useState<Set<string>>(new Set());
   const [jarConflictExpanded, setJarConflictExpanded] = useState(false);
@@ -535,6 +599,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   const zombieBuddyLuaMod = luaMods?.find((mod) => mod.isLoader) ?? null;
   const totalLuaModCount = luaMods?.filter((mod) => !mod.isLoader).length ?? 0;
   const luaModSearchText = luaModSearch.trim().toLowerCase();
+  /** 拖动排序期间的预览顺序：按拖动中的 ids 重排（未参与排序的行保持原相对位置）。 */
+  const luaReorderIndex = luaReorder
+    ? new Map(luaReorder.ids.map((id, index) => [id.toLowerCase(), index]))
+    : null;
   const filteredLuaMods = luaMods
     ? (() => {
         const filtered = filterLuaMods(
@@ -545,13 +613,38 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           [mod.name, mod.id, mod.author ?? "", mod.description ?? ""]
             .some((value) => value.toLowerCase().includes(luaModSearchText)),
         );
-        return luaModSortMode === "name"
+        const sorted = luaModSortMode === "name"
           ? [...filtered].sort((left, right) =>
               left.name.localeCompare(right.name, "zh-CN", { sensitivity: "base" }),
             )
           : sortLuaModsForDisplay(filtered);
+        if (!luaReorderIndex) {
+          return sorted;
+        }
+        // Array.prototype.sort 稳定：未参与排序的行（未启用/被筛掉的加载器）保持原顺序排在后面。
+        return [...sorted].sort(
+          (left, right) =>
+            (luaReorderIndex.get(left.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+            (luaReorderIndex.get(right.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER),
+        );
       })()
     : undefined;
+  // 列表顺序变了（拖动换位、置顶/置底、启用/停用、排序）就走 FLIP：渲染期间、DOM 还没更新时
+  // 先记下每行的 offsetTop 当起点，提交后再由下面的 useLayoutEffect 反向位移 + 过渡回位。
+  // offsetTop 相对列表本身（.pz-lua-mod-list 是 position: relative），不受 transform 和滚动影响。
+  const luaOrderSignature = (filteredLuaMods ?? []).map(luaModKey).join("\u0000");
+  if (luaFlipRef.current?.signature !== luaOrderSignature) {
+    const tops = new Map<string, number>();
+    document
+      .querySelectorAll<HTMLElement>("[data-lua-mod-key]")
+      .forEach((row) => {
+        const key = row.dataset.luaModKey;
+        if (key) {
+          tops.set(key, row.offsetTop);
+        }
+      });
+    luaFlipRef.current = { signature: luaOrderSignature, tops };
+  }
   const jarModSearchText = jarModSearch.trim().toLowerCase();
   const filteredJarMods = jarMods
     ? filterJarMods(
@@ -564,6 +657,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       )
     : undefined;
   const selectedLuaModCount = selectedLuaModKeys.size;
+  /** 选中项里真正占加载顺序的模组数：多选拖动时整组搬，未启用/加载器不算数。 */
+  const selectedEnabledLuaModCount = (luaMods ?? []).filter(
+    (mod) => mod.enabled && !mod.isLoader && selectedLuaModKeys.has(luaModKey(mod)),
+  ).length;
   const selectedJarModCount = selectedJarModKeys.size;
   function dismissToast(id: number) {
     setToasts((current) => current.map((toast) => (toast.id === id ? { ...toast, closing: true } : toast)));
@@ -609,9 +706,11 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         showToast(
           status.updateAvailable
             ? `发现新版本 v${status.latestVersion}，可在下方查看并下载。`
-            : status.unknownVersion
-              ? `当前是未知版本（v${status.currentVersion}），比更新源发布的还新。`
-              : `已是最新版本（v${status.currentVersion}）。`,
+            : status.devBuild
+              ? `当前是内测版本 DevBuild ${status.devBuildId}。`
+              : status.unknownVersion
+                ? `当前是未知版本（v${status.currentVersion}），比更新源发布的还新。`
+                : `已是最新版本（v${status.currentVersion}）。`,
           status.updateAvailable ? "success" : "info",
         );
       }
@@ -653,9 +752,15 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         feedbackId: string;
         uploaded: string[];
         skipped: string[];
-      }>("submit_feedback", { description: feedbackDescription });
+      }>("submit_feedback", {
+        description: feedbackDescription,
+        // 联系方式选填：空串按"没填"传给后端，不会拼进描述。
+        contact: feedbackContact.trim() || null,
+      });
       setFeedbackResult(result);
       setFeedbackDescription("");
+      setFeedbackContact("");
+      void loadFeedbackHistory();
       showToast(
         result.feedbackId ? `反馈已提交（编号 ${result.feedbackId}）` : "反馈已提交",
         "success",
@@ -665,6 +770,23 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     } finally {
       setFeedbackSubmitting(false);
     }
+  }
+
+  /** 已提交的反馈编号（本机记录，读失败就当空列表）。 */
+  async function loadFeedbackHistory() {
+    try {
+      setFeedbackHistory(await invoke<FeedbackHistoryEntry[]>("list_submitted_feedback"));
+    } catch {
+      setFeedbackHistory([]);
+    }
+  }
+
+  function copyFeedbackId(id: string) {
+    void writeText(id)
+      .then(() => showToast(`已复制反馈编号 ${id}`, "success"))
+      .catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : String(error), "error");
+      });
   }
 
   async function updateDeveloperMode(enabled: boolean) {
@@ -1535,24 +1657,169 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
-  async function moveLuaMod(mod: LuaModEntry, direction: -1 | 1) {
-    if (!luaMods || luaModActionId || luaModBatchAction) return;
-    const enabled = luaMods
+  /** 参与手动排序的已启用模组 ID：加载器（ZombieBuddy 等）固定在 default.txt 最前，不参与排序。 */
+  function movableLuaModIds() {
+    return (luaMods ?? [])
+      .filter((entry) => entry.enabled && entry.loadOrder !== null && !entry.isLoader)
+      .sort((left, right) => (left.loadOrder ?? 0) - (right.loadOrder ?? 0))
+      .map((entry) => entry.id);
+  }
+
+  /** 把可排序部分的顺序写回完整已启用清单：加载器保持原位，其余按 ids 依次填回去。 */
+  function composeLuaModOrder(ids: string[]) {
+    let cursor = 0;
+    return (luaMods ?? [])
       .filter((entry) => entry.enabled && entry.loadOrder !== null)
-      .sort((left, right) => (left.loadOrder ?? 0) - (right.loadOrder ?? 0));
-    const index = enabled.findIndex((entry) => entry.id.toLowerCase() === mod.id.toLowerCase());
-    const target = index + direction;
-    if (index < 0 || target < 0 || target >= enabled.length) return;
-    const ids = enabled.map((entry) => entry.id);
-    [ids[index], ids[target]] = [ids[target], ids[index]];
+      .sort((left, right) => (left.loadOrder ?? 0) - (right.loadOrder ?? 0))
+      .map((entry) => (entry.isLoader ? entry.id : ids[cursor++] ?? entry.id));
+  }
+
+  /** 把新的加载顺序乐观写进本地数据（只重排 loadOrder，加载器位置不变）。
+      拖动松手时要先做这一步再撤预览，否则列表会先回弹到旧顺序、等后端保存完再滑过来。 */
+  function applyLuaModOrder(ids: string[]) {
+    setLuaMods((current) => {
+      if (!current) {
+        return current;
+      }
+      const enabled = current
+        .filter((entry) => entry.enabled && entry.loadOrder !== null)
+        .sort((left, right) => (left.loadOrder ?? 0) - (right.loadOrder ?? 0));
+      let cursor = 0;
+      const full = enabled.map((entry) => (entry.isLoader ? entry.id : ids[cursor++] ?? entry.id));
+      const order = new Map(full.map((id, index) => [id.toLowerCase(), index + 1]));
+      return current.map((entry) => {
+        const next = order.get(entry.id.toLowerCase());
+        return next === undefined || !entry.enabled ? entry : { ...entry, loadOrder: next };
+      });
+    });
+  }
+
+  /** 后端会按 requires / loadAfter / loadBefore 重新约束顺序，被驳回时给用户一句话，而不是静默无反应。 */
+  function reportLuaModOrderResult(requested: string[], applied: string[]) {
+    if (requested.length === 0) return;
+    const requestedKeys = new Set(requested.map((id) => id.toLowerCase()));
+    const appliedOrder = applied.filter((id) => requestedKeys.has(id.toLowerCase()));
+    const blocked = requested.find(
+      (id, index) => appliedOrder[index]?.toLowerCase() !== id.toLowerCase(),
+    );
+    if (blocked === undefined) return;
+    const name =
+      luaMods?.find((entry) => entry.id.toLowerCase() === blocked.toLowerCase())?.name ?? blocked;
+    showToast(`「${name}」没能移动到该位置：前置模组（requires / loadBefore）限定了加载顺序。`, "info");
+  }
+
+  /** 一键置顶 / 置底：把这一个模组挪到可排序列表的最前 / 最后，其余模组相对顺序不变。 */
+  async function moveLuaModToEdge(mod: LuaModEntry, edge: "top" | "bottom") {
+    if (!luaMods || luaModActionId || luaReorderSaving || luaModBatchAction) return;
+    const ids = movableLuaModIds();
+    const index = ids.findIndex((entry) => entry.toLowerCase() === mod.id.toLowerCase());
+    if (index < 0) return;
+    const target = edge === "top" ? 0 : ids.length - 1;
+    if (index === target) return;
+    const [moved] = ids.splice(index, 1);
+    ids.splice(target, 0, moved);
     setLuaModActionId(luaModKey(mod));
+    // 本地先排好，后端回来前列表就已经在新位置（不会先停一下再滑）。
+    applyLuaModOrder(ids);
     try {
-      await invoke<string[]>("save_lua_mod_order", { modIds: ids });
+      const applied = await invoke<string[]>("save_lua_mod_order", {
+        modIds: composeLuaModOrder(ids),
+      });
+      reportLuaModOrderResult(ids, applied);
       await loadLuaMods();
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
+      await loadLuaMods();
     } finally {
       setLuaModActionId(null);
+    }
+  }
+
+  /** 抓住行左侧的拖动柄开始排序：拖动期间只改前端预览顺序，松手才写 default.txt。
+      抓住的那一行 1:1 跟着指针上下走（不占位时可读成「手里拿着这一行」），
+      若它在多选里，则整组选中模组一起搬动，组内相对顺序保持不变。 */
+  function beginLuaModReorder(event: ReactPointerEvent<HTMLElement>, mod: LuaModEntry) {
+    if (event.button !== 0 || luaModSortMode !== "load") return;
+    if (!luaMods || luaModActionId || luaReorderSaving || luaModBatchAction) return;
+    if (!mod.enabled || mod.isLoader) return;
+    const ids = movableLuaModIds();
+    const key = mod.id.toLowerCase();
+    const index = ids.findIndex((entry) => entry.toLowerCase() === key);
+    if (index < 0) return;
+    const row = (event.currentTarget as HTMLElement).closest<HTMLElement>("[data-lua-mod-key]");
+    if (!row) return;
+    // 选中的模组里有未启用/加载器时不参与搬动，只搬真正占加载顺序的那些。
+    const rowKeyById = new Map((luaMods ?? []).map((entry) => [entry.id.toLowerCase(), luaModKey(entry)]));
+    const selectedIds = ids.filter((id) => {
+      const rowKey = rowKeyById.get(id.toLowerCase());
+      return rowKey !== undefined && selectedLuaModKeys.has(rowKey);
+    });
+    const group = selectedLuaModKeys.has(luaModKey(mod)) && selectedIds.length > 1
+      ? selectedIds
+      : [mod.id];
+    event.preventDefault();
+    event.stopPropagation();
+    suppressRowClickRef.current = true;
+    // 保险：即使入场动画还在播，也立刻停掉，拖动过程中不能有行闪一下。
+    setLuaModListSettled(true);
+    // 整组（单行时就是这一行）都不走 CSS 过渡：位移由指针直接驱动，避免跟手时被过渡拖慢。
+    const rowsByKey = new Map<string, HTMLElement>();
+    document.querySelectorAll<HTMLElement>("[data-lua-mod-key]").forEach((element) => {
+      const rowKey = element.dataset.luaModKey;
+      if (rowKey) {
+        rowsByKey.set(rowKey, element);
+      }
+    });
+    const rows = group
+      .map((id) => rowsByKey.get(id.toLowerCase()))
+      .filter((element): element is HTMLElement => element !== undefined)
+      .map((element) => {
+        element.style.transition = "none";
+        return {
+          element,
+          grabOffset: event.clientY - element.getBoundingClientRect().top,
+          height: element.offsetHeight,
+        };
+      });
+    if (rows.length === 0) return;
+    // 整组会堆成一个连续块往前搬（原本分散的选中项也靠到一起）。
+    // 让被抓住的那一行仍然贴着指针：块顶 = 抓住行顶 - 它上面的组员总高。
+    const grabbedIndex = Math.max(0, rows.findIndex((entry) => entry.element === row));
+    const aboveHeight = rows
+      .slice(0, grabbedIndex)
+      .reduce((sum, entry) => sum + entry.height, 0);
+    const scroller = scrollParentOf(row);
+    luaReorderRef.current = {
+      key,
+      ids,
+      group,
+      original: ids,
+      rows,
+      blockTopDelta: rows[grabbedIndex].grabOffset + aboveHeight,
+      lastClientY: event.clientY,
+      scroller,
+      lastScrollTop: scroller?.scrollTop ?? 0,
+    };
+    setLuaReorder({ key, ids, group });
+    // 立刻按当前指针位置把整组摞起来，然后启动逐帧循环（指针停住时也要继续自动滚动/对位）。
+    luaDragUpdateRef.current();
+    luaDragTickRef.current();
+  }
+
+  async function commitLuaModReorder(ids: string[]) {
+    if (!luaMods) return;
+    setLuaReorderSaving(true);
+    try {
+      const applied = await invoke<string[]>("save_lua_mod_order", {
+        modIds: composeLuaModOrder(ids),
+      });
+      reportLuaModOrderResult(ids, applied);
+      await loadLuaMods();
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+      await loadLuaMods();
+    } finally {
+      setLuaReorderSaving(false);
     }
   }
 
@@ -1872,6 +2139,41 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   /**
+   * 激进内存清理：只落盘 + 通知后端。之后的手动清理、静默清理、启动前清理都会带上系统级步骤
+   * （全系统工作集 + 文件缓存 + 已修改页 + 待机列表），静默清理在游戏运行时仍只用常规模式。
+   */
+  async function updateAggressiveMemoryClean(enabled: boolean) {
+    const previous = aggressiveMemoryClean;
+    setAggressiveMemoryClean(enabled);
+    setAggressiveMemoryCleanSaving(true);
+    try {
+      await invoke("save_aggressive_memory_clean", { enabled });
+    } catch (error: unknown) {
+      setAggressiveMemoryClean(previous);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setAggressiveMemoryCleanSaving(false);
+    }
+  }
+
+  /**
+   * 以管理员身份重启启动器（激进清理的系统级步骤需要管理员特权）。
+   * UAC 被取消时后端返回错误，当前实例继续运行。
+   */
+  async function restartLauncherAsAdmin() {
+    if (restartingAsAdmin) {
+      return;
+    }
+    setRestartingAsAdmin(true);
+    try {
+      await invoke("restart_as_admin");
+    } catch (error: unknown) {
+      setRestartingAsAdmin(false);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }
+
+  /**
    * 「立即清理一次」：登记成任务中心的一条任务，边清理边采样物理内存。
    *
    * 后端清理本身只有 100–300 ms，但工作集页回到系统还要一点时间：
@@ -2097,6 +2399,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         });
     };
     refresh();
+    // 管理员状态不会中途变化，问一次即可；拿来给激进清理提示权限不足。
+    invoke<boolean>("is_launcher_elevated")
+      .then((elevated) => {
+        if (active) {
+          setLauncherElevated(elevated);
+        }
+      })
+      .catch(() => {
+        // 读不到就按"未知"处理，不显示提权引导。
+      });
     const timer = window.setInterval(refresh, 5000);
     const unlisten = listen<MemoryCleanupReport>("memory-cleaned", (event) => {
       setLastCleanupReport(event.payload);
@@ -2275,6 +2587,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               : DEFAULT_SILENT_MEMORY_PERCENT,
           );
           setCleanMemoryOnLaunch(Boolean(settingsResult.value.cleanMemoryOnLaunch));
+          setAggressiveMemoryClean(Boolean(settingsResult.value.aggressiveMemoryClean));
           setBackgroundPath(settingsResult.value.backgroundPath);
           setWallpaperEffectSettings(normalizeWallpaperEffectSettings(settingsResult.value.wallpaperEffect));
           setShaderDownloadUrl(settingsResult.value.shaderDownloadUrl ?? "");
@@ -2634,6 +2947,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     void refreshLauncherLog();
   }, [settingsPage]);
 
+  // 「设置 › 关于」：读取本机提交过的反馈编号，给「已提交的反馈」列表用。
+  useEffect(() => {
+    if (activePage !== "settings" || settingsPage !== "about") return;
+    void loadFeedbackHistory();
+  }, [activePage, settingsPage]);
+
   // 前端未捕获错误写进启动器日志，用户可以直接导日志排查。
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -2802,6 +3121,257 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       window.removeEventListener("pointercancel", endRowDrag);
     };
   }, []);
+
+  // 始终指向最新一次渲染里的提交函数，避免全局监听拿到旧的 luaMods 闭包。
+  useEffect(() => {
+    luaReorderCommitRef.current = (ids) => {
+      void commitLuaModReorder(ids);
+    };
+  });
+
+  // Lua 模组拖动排序：按「其它行中线」判断落点，实时换位；松手时一次性写回 default.txt。
+  // 多选时整组一起搬：落点行只要不属于这组，就把整组插到它前/后，组内相对顺序不变。
+  useEffect(() => {
+    const SCROLL_EDGE = 56;
+    const SCROLL_MAX_STEP = 18;
+
+    // 指针靠近滚动框上下边缘时自动滚动；越靠边越快，最少 1px/帧。
+    const autoScroll = (drag: NonNullable<typeof luaReorderRef.current>) => {
+      const scroller = drag.scroller;
+      if (!scroller) {
+        return;
+      }
+      const rect = scroller.getBoundingClientRect();
+      const y = drag.lastClientY;
+      let step = 0;
+      if (y < rect.top + SCROLL_EDGE) {
+        step = -((rect.top + SCROLL_EDGE - y) / SCROLL_EDGE) * SCROLL_MAX_STEP;
+      } else if (y > rect.bottom - SCROLL_EDGE) {
+        step = ((y - (rect.bottom - SCROLL_EDGE)) / SCROLL_EDGE) * SCROLL_MAX_STEP;
+      }
+      if (step === 0) {
+        return;
+      }
+      const clamped = Math.max(-SCROLL_MAX_STEP, Math.min(SCROLL_MAX_STEP, step));
+      const delta = Math.abs(clamped) < 1 ? Math.sign(clamped) : Math.round(clamped);
+      scroller.scrollTop += delta;
+    };
+
+    /** 按最后的指针位置重排手里的整组并重新判断落点。
+        每帧都要跑（指针不动时滚动框也会动），所以位移完全以指针坐标为准。
+        坐标一律用「内容坐标」：行的 offsetTop（相对列表，不受 transform / 滚动影响）。 */
+    const update = (drag: NonNullable<typeof luaReorderRef.current>) => {
+      // 内容原点 = 列表可视区顶部在视口里的位置 − 当前滚动量。
+      const origin = drag.rows[0]?.element.offsetParent as HTMLElement | null;
+      const contentOrigin = origin ? origin.getBoundingClientRect().top - origin.scrollTop : 0;
+      const blockTop = drag.lastClientY - contentOrigin - drag.blockTopDelta;
+      let stackedTop = blockTop;
+      for (const entry of drag.rows) {
+        entry.element.style.transform = `translateY(${stackedTop - entry.element.offsetTop}px)`;
+        stackedTop += entry.height;
+      }
+      const groupKeys = new Set(drag.group.map((id) => id.toLowerCase()));
+      const rows = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-lua-mod-sortable="true"]'),
+      )
+        .filter((row) => !groupKeys.has(row.dataset.luaModKey ?? ""))
+        .map((row) => ({
+          id: row.dataset.luaModId ?? "",
+          top: row.offsetTop,
+          height: row.offsetHeight,
+        }))
+        .filter((row) => row.id !== "")
+        .sort((left, right) => left.top - right.top);
+      if (rows.length === 0) {
+        return;
+      }
+      const next = rows.find((row) => blockTop <= row.top + row.height / 2);
+      const previous = [...rows]
+        .reverse()
+        .find((row) => blockTop > row.top + row.height / 2);
+      const ids = previous
+        ? moveModIdBlock(drag.ids, drag.group, previous.id, true)
+        : next
+          ? moveModIdBlock(drag.ids, drag.group, next.id, false)
+          : null;
+      if (!ids || ids.join("\u0000") === drag.ids.join("\u0000")) {
+        return;
+      }
+      drag.ids = ids;
+      setLuaReorder({ key: drag.key, ids, group: drag.group });
+    };
+
+    // 拖动期间逐帧跑：指针停住时靠这里继续自动滚动；滚动（自动或用户滚轮）后重新对位。
+    // 没滚动就不重算什么，避免每帧扫描整个列表。
+    const tick = () => {
+      const drag = luaReorderRef.current;
+      if (!drag) {
+        return;
+      }
+      autoScroll(drag);
+      const scrollTop = drag.scroller?.scrollTop ?? 0;
+      if (scrollTop !== drag.lastScrollTop) {
+        drag.lastScrollTop = scrollTop;
+        update(drag);
+      }
+      luaDragFrameRef.current = window.requestAnimationFrame(tick);
+    };
+    luaDragTickRef.current = tick;
+    luaDragUpdateRef.current = () => {
+      const drag = luaReorderRef.current;
+      if (drag) {
+        update(drag);
+      }
+    };
+
+    const handleMove = (event: PointerEvent) => {
+      const drag = luaReorderRef.current;
+      if (!drag) {
+        return;
+      }
+      drag.lastClientY = event.clientY;
+      update(drag);
+    };
+    const stop = (commit: boolean) => {
+      const drag = luaReorderRef.current;
+      luaReorderRef.current = null;
+      if (luaDragFrameRef.current !== null) {
+        window.cancelAnimationFrame(luaDragFrameRef.current);
+        luaDragFrameRef.current = null;
+      }
+      if (!drag) {
+        setLuaReorder(null);
+        return;
+      }
+      const changed = drag.ids.join("\u0000") !== drag.original.join("\u0000");
+      if (commit && changed) {
+        // 先把预览顺序写进本地数据，再撤掉预览。否则撤预览的这一刻列表会先回弹到
+        // 旧顺序（后端还没保存完），等 loadLuaMods 回来再 FLIP 到新位置——就是"转一圈"。
+        applyLuaModOrder(drag.ids);
+      }
+      setLuaReorder(null);
+      // 手里那几行的内联位移**先别清**：等这次渲染（最终顺序）提交之后再由 layout effect
+      // 统一放开，动画目标就是最终槽位。在事件里直接清的话，目标还是渲染前的旧布局，
+      // 一旦顺序在同一帧里变了就会先滑到旧位置再"绕"到新位置。
+      luaDropRowsRef.current = drag.rows;
+      setLuaDropToken((token) => token + 1);
+      // 拖动结束后的那一次 click 不应被当成勾选行。
+      suppressRowClickRef.current = true;
+      window.setTimeout(() => {
+        suppressRowClickRef.current = false;
+      }, 0);
+      if (commit && changed) {
+        luaReorderCommitRef.current(drag.ids);
+      }
+    };
+    const handleUp = () => stop(true);
+    const handleCancel = () => stop(false);
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") stop(false);
+    };
+    // 任何祖先滚动（滚轮、滚动链、程序滚动）都重新对位一次，保证手里的整块一直贴在指针上。
+    const handleScroll = () => {
+      luaDragUpdateRef.current();
+    };
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleCancel);
+    window.addEventListener("keydown", handleKey);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleCancel);
+      window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("scroll", handleScroll, true);
+      if (luaDragFrameRef.current !== null) {
+        window.cancelAnimationFrame(luaDragFrameRef.current);
+        luaDragFrameRef.current = null;
+      }
+    };
+  }, []);
+
+  // 换位后行在文档流里的位置变了：手里的整组按新布局重新对齐到指针，
+  // 其它行用 FLIP 滑到新槽位（拖动中被抓的那几行由指针直接驱动，跳过）。
+  useLayoutEffect(() => {
+    const snapshot = luaFlipRef.current;
+    if (!snapshot) {
+      return;
+    }
+    const draggingKeys = new Set((luaReorder?.group ?? []).map((id) => id.toLowerCase()));
+    // 松手后还没放开的行由下面那个 effect 统一处理（目标必须是最终槽位），这里跳过。
+    const droppingRows = new Set(luaDropRowsRef.current?.map(({ element }) => element) ?? []);
+    const animated: HTMLElement[] = [];
+    document.querySelectorAll<HTMLElement>("[data-lua-mod-key]").forEach((row) => {
+      const key = row.dataset.luaModKey;
+      if (!key || draggingKeys.has(key) || droppingRows.has(row)) {
+        return;
+      }
+      const previous = snapshot.tops.get(key);
+      if (previous === undefined) {
+        return;
+      }
+      const delta = previous - row.offsetTop;
+      if (Math.abs(delta) < 0.5) {
+        return;
+      }
+      row.style.transition = "none";
+      row.style.transform = `translateY(${delta}px)`;
+      animated.push(row);
+    });
+    // 先把手里的整组按最后的指针位置重新对齐（换位改变了它们的流内位置）。
+    if (luaReorder) {
+      luaDragUpdateRef.current();
+    }
+    if (animated.length === 0) {
+      return;
+    }
+    // 读一次布局把反向位移提交成过渡起点，同一帧再清掉 → 由 .pz-mod-row 的 transform 过渡滑回原位。
+    void document.body.offsetHeight;
+    animated.forEach((row) => {
+      row.style.transition = "";
+      row.style.transform = "";
+    });
+  }, [luaOrderSignature]);
+
+  // 松手后的收尾：等「最终顺序」这次渲染提交之后再放开手里的行，
+  // 用「当前视口位置 → 最终槽位」做一次 FLIP。在 pointerup 里直接清 transform 的话，
+  // 过渡目标还是渲染前的布局，顺序一旦同帧变化就会先滑回旧位置再绕到新位置。
+  useLayoutEffect(() => {
+    const rows = luaDropRowsRef.current;
+    luaDropRowsRef.current = null;
+    if (!rows || rows.length === 0) {
+      return;
+    }
+    const from = rows.map(({ element }) => element.getBoundingClientRect().top);
+    rows.forEach(({ element }) => {
+      element.style.transition = "none";
+      element.style.transform = "";
+    });
+    void document.body.offsetHeight;
+    const targets = rows.map(({ element }) => element.getBoundingClientRect().top);
+    rows.forEach(({ element }, index) => {
+      const delta = from[index] - targets[index];
+      element.style.transform = Math.abs(delta) < 0.5 ? "" : `translateY(${delta}px)`;
+    });
+    void document.body.offsetHeight;
+    rows.forEach(({ element }) => {
+      element.style.transition = "";
+      element.style.transform = "";
+    });
+  }, [luaDropToken]);
+
+
+  // 入场滑入动画只该播一次：最长延迟 540ms + 260ms 播完后就关掉。
+  // 否则之后每次换位（拖动预览、筛选、排序）React 移动 DOM 节点，
+  // 浏览器都会重播「向右滑入 + 淡入」，看起来就是被挪过的行闪了一下。
+  useEffect(() => {
+    if (!luaMods || luaModListSettled) {
+      return;
+    }
+    const timer = window.setTimeout(() => setLuaModListSettled(true), 1000);
+    return () => window.clearTimeout(timer);
+  }, [luaMods, luaModListSettled]);
 
   useEffect(() => {
     if (activePage !== "mods") {
@@ -6531,7 +7101,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             </HStack>
             <Text color="gray.500" fontSize="xs" mt="1">
               后台每 10 秒检查一次系统内存占用，达到下面的阈值就自动清理一次（类似 PCL2 的「内存优化」）。
-              两次清理至少间隔 60 秒；正在运行的游戏不受影响。
+              两次清理至少间隔 60 秒（打开激进清理后为 5 分钟）；正在运行的游戏不受影响。
             </Text>
             <Box mt="3" maxW="420px">
               <HStack justify="space-between" mb="1">
@@ -6584,6 +7154,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 <Text color="gray.500" fontSize="xs">
                   上次清理释放 {lastCleanupReport.freedMb} MB，用时 {lastCleanupReport.elapsedMs} ms
                   {lastCleanupReport.trimmed > 0 ? `（${lastCleanupReport.trimmed} 个进程）` : ""}
+                  {memoryCleanupSystemDetail(lastCleanupReport)}
                 </Text>
               )}
             </HStack>
@@ -6616,6 +7187,49 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             checked={cleanMemoryOnLaunch}
             disabled={cleanMemoryOnLaunchSaving}
             onCheckedChange={(details) => void updateCleanMemoryOnLaunch(details.checked)}
+          >
+            <Switch.HiddenInput />
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Root>
+        </HStack>
+
+        <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
+          <Box flex="1" minW="240px">
+            <Text color="gray.800" fontSize="sm" fontWeight="700">
+              激进内存清理
+            </Text>
+            <Text color="gray.500" fontSize="xs" mt="1">
+              常规清理只压各进程的工作集（「已提交」是进程持有的提交配额，外部工具无法回收，
+              清理不会让这个数值回落）。打开后追加系统级清理：清空全系统工作集、刷新系统文件缓存、
+              把已修改页写回磁盘，最后把待机缓存（Standby）标成空闲页——任务管理器里「可用内存」变大、
+              「已缓存」下降靠的就是这几步。
+              代价是文件缓存被清掉后，接下来读盘会慢一些，所以只建议内存吃紧时临时打开；
+              系统级步骤需要管理员权限，权限不足时只剩工作集修剪。
+              静默清理在游戏运行时仍只用常规模式，手动清理在游戏运行时也会跳过全系统工作集，避免游戏卡顿。
+            </Text>
+            {aggressiveMemoryClean && launcherElevated === false && (
+              <HStack gap="2" mt="2" wrap="wrap">
+                <Text color="orange.700" fontSize="xs">
+                  当前未以管理员身份运行：激进清理的系统级步骤不会生效。
+                </Text>
+                <Button
+                  loading={restartingAsAdmin}
+                  onClick={() => void restartLauncherAsAdmin()}
+                  size="xs"
+                  variant="outline"
+                >
+                  以管理员身份重启
+                </Button>
+              </HStack>
+            )}
+          </Box>
+          <Switch.Root
+            aria-label="激进内存清理"
+            checked={aggressiveMemoryClean}
+            disabled={aggressiveMemoryCleanSaving}
+            onCheckedChange={(details) => void updateAggressiveMemoryClean(details.checked)}
           >
             <Switch.HiddenInput />
             <Switch.Control>
@@ -6708,7 +7322,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       <Box mt="5">
         <HStack gap="2" wrap="wrap">
           <Text color="gray.800" fontSize="md" fontWeight="800">PZMANAGER</Text>
-          <Badge colorPalette="blue" size="sm">v{appManifest.version}</Badge>
+          <Badge colorPalette="blue" size="sm">v{APP_DEV_BUILD?.base ?? appManifest.version}</Badge>
+          {APP_DEV_BUILD ? (
+            <Badge colorPalette="purple" size="sm">DevBuild {APP_DEV_BUILD.buildId}</Badge>
+          ) : null}
         </HStack>
         <Text color="gray.500" fontSize="sm" mt="2">
           Project Zomboid（僵尸毁灭工程）的 Windows 桌面启动器 + 模组管理器：
@@ -6732,6 +7349,60 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             反馈信息
           </Button>
         </HStack>
+        <Button
+          aria-expanded={feedbackHistoryOpen}
+          className="pz-feedback-history-toggle pz-text-button"
+          mt="3"
+          onClick={() => setFeedbackHistoryOpen((open) => !open)}
+          size="xs"
+          variant="ghost"
+        >
+          {feedbackHistoryOpen ? "收起" : "已提交的反馈"}
+          {feedbackHistory.length > 0 ? `（${feedbackHistory.length}）` : ""}
+          <Text as="span" color="gray.400" ml="1">{feedbackHistoryOpen ? "▴" : "▾"}</Text>
+        </Button>
+        {feedbackHistoryOpen && (
+          <Stack className="pz-feedback-history" gap="1" mt="2">
+            {feedbackHistory.length === 0 ? (
+              <Text color="gray.500" fontSize="xs">这台机器还没有提交过反馈。</Text>
+            ) : (
+              feedbackHistory.map((entry) => (
+                <HStack
+                  align="center"
+                  className="pz-feedback-history-row"
+                  gap="3"
+                  key={entry.id}
+                  wrap="wrap"
+                >
+                  <Text
+                    color="gray.800"
+                    fontFamily="mono"
+                    fontSize="xs"
+                    fontWeight="700"
+                    minW="12rem"
+                  >
+                    {entry.id}
+                  </Text>
+                  <Text color="gray.500" fontSize="xs" minW="9rem">
+                    {new Date(entry.sentAt * 1000).toLocaleString("zh-CN", { hour12: false })}
+                  </Text>
+                  <Text color="gray.500" flex="1" fontSize="xs" lineClamp={1} minW="8rem">
+                    {entry.summary || "（无描述）"}
+                  </Text>
+                  <Button
+                    aria-label={`复制反馈编号 ${entry.id}`}
+                    className="pz-text-button"
+                    onClick={() => copyFeedbackId(entry.id)}
+                    size="xs"
+                    variant="ghost"
+                  >
+                    复制编号
+                  </Button>
+                </HStack>
+              ))
+            )}
+          </Stack>
+        )}
       </Box>
       <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
         <HStack justify="space-between" align="center" gap="3" wrap="wrap">
@@ -6821,10 +7492,22 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               <>
                 <HStack gap="2" wrap="wrap" align="center">
                   <Text color="gray.500" fontSize="sm">
-                    {launcherUpdate.unknownVersion ? "未知版本" : "已是最新版本"}（v
-                    {launcherUpdate.currentVersion}）。
+                    {launcherUpdate.devBuild
+                      ? `内测版本 DevBuild ${launcherUpdate.devBuildId}`
+                      : launcherUpdate.unknownVersion
+                        ? "未知版本"
+                        : "已是最新版本"}（v
+                    {launcherUpdate.devBuild
+                      ? parseDevBuildVersion(launcherUpdate.currentVersion)?.base ??
+                        launcherUpdate.currentVersion
+                      : launcherUpdate.currentVersion}
+                    ）。
                   </Text>
-                  {launcherUpdate.unknownVersion ? (
+                  {launcherUpdate.devBuild ? (
+                    <Badge colorPalette="purple" size="sm">
+                      DevBuild {launcherUpdate.devBuildId}
+                    </Badge>
+                  ) : launcherUpdate.unknownVersion ? (
                     <Badge colorPalette="purple" size="sm">BETA</Badge>
                   ) : null}
                 </HStack>
@@ -7076,6 +7759,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 </Text>
                 {versionDriveNoticeDismissed ? (
                   <Button
+                    className="pz-text-button"
                     onClick={() => void saveVersionDriveNoticeDismissed(false)}
                     size="xs"
                     variant="ghost"
@@ -7598,6 +8282,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                       </Button>
                       <Button
                         aria-expanded={expanded}
+                        className="pz-text-button"
                         disabled={modVersionBusy}
                         onClick={() => toggleModVersionExpansion(target.key, target.rootPath)}
                         size="xs"
@@ -7606,6 +8291,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                         {expanded ? "收起" : "详情"}
                       </Button>
                       <Button
+                        className="pz-text-button"
                         onClick={() => openModVersionDialog(target.rootPath, target.name)}
                         size="xs"
                         variant="ghost"
@@ -7989,7 +8675,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         selectedCount={selectedLuaModCount}
         totalCount={filteredLuaMods?.length ?? 0}
       />
-      <Box className="pz-lua-mod-list">
+      <Box className={`pz-lua-mod-list${luaModListSettled ? " is-settled" : ""}`}>
         <SkeletonGate
           loading={luaModsLoading && !luaMods}
           skeleton={<SkeletonList rows={8} thumb="poster" />}
@@ -8003,13 +8689,23 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 render={() => {
                   const selected = selectedLuaModKeys.has(key);
                   const expanded = expandedLuaModKeys.has(key);
-                  const busy = luaModActionId === key || luaModBatchAction !== null;
-                  const enabledOrder = (luaMods ?? [])
-                    .filter((entry) => entry.enabled && entry.loadOrder !== null)
-                    .sort((left, right) => (left.loadOrder ?? 0) - (right.loadOrder ?? 0));
-                  const orderIndex = enabledOrder.findIndex(
-                    (entry) => entry.id.toLowerCase() === mod.id.toLowerCase(),
+                  const busy =
+                    luaModActionId === key || luaModBatchAction !== null || luaReorderSaving;
+                  // 只统计真正参与加载顺序的模组：加载器固定在最前、不显示在列表里，不能算进置顶/置底的边界。
+                  const orderIds = movableLuaModIds();
+                  const orderIndex = orderIds.findIndex(
+                    (entry) => entry.toLowerCase() === mod.id.toLowerCase(),
                   );
+                  const reorderable = mod.enabled && luaModSortMode === "load";
+                  const inReorderGroup =
+                    luaReorder?.group.some(
+                      (id) => id.toLowerCase() === mod.id.toLowerCase(),
+                    ) ?? false;
+                  const grabbed = luaReorder?.key === mod.id.toLowerCase();
+                  const multiDrag = selected && selectedEnabledLuaModCount > 1;
+                  const dragTitle = multiDrag
+                    ? `拖动调整选中的 ${selectedEnabledLuaModCount} 个模组的加载顺序`
+                    : "拖动调整加载顺序";
                   return (
               <ModRowContextMenu
                 busy={busy}
@@ -8024,7 +8720,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               <Box
                 aria-checked={selected}
                 aria-label={`选择 ${mod.name}`}
-                className={`pz-mod-row pz-lua-mod-row${selected ? " is-selected" : ""}${mod.enabled ? " is-enabled" : ""}${expanded ? " pz-jar-mod-row-expanded" : ""}`}
+                className={`pz-mod-row pz-lua-mod-row${selected ? " is-selected" : ""}${mod.enabled ? " is-enabled" : ""}${expanded ? " pz-jar-mod-row-expanded" : ""}${inReorderGroup ? " is-reordering" : ""}${grabbed ? " is-reordering-grabbed" : ""}`}
+                data-lua-mod-id={mod.id}
+                data-lua-mod-key={mod.id.toLowerCase()}
+                data-lua-mod-sortable={reorderable ? "true" : undefined}
                 key={key}
                 onClick={(event) => {
                   const target = event.target as HTMLElement;
@@ -8055,6 +8754,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               >
                 <Box className="pz-mod-summary pz-compact-mod-summary">
                   <Box className="pz-mod-select-area">
+                    {reorderable && (
+                      <Box
+                        aria-label={`${multiDrag ? `拖动调整选中的 ${selectedEnabledLuaModCount} 个模组` : `拖动调整 ${mod.name}`} 的加载顺序`}
+                        className={`pz-lua-mod-drag-handle${inReorderGroup ? " is-dragging" : ""}`}
+                        onClick={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => beginLuaModReorder(event, mod)}
+                        role="button"
+                        title={dragTitle}
+                      />
+                    )}
                     <LuaModPoster name={mod.name} path={mod.posterPath} />
                     <Box className="pz-jar-mod-summary-content" minW="0">
                       <HStack align="center" className="pz-lua-mod-title-row" gap="2" minW="0">
@@ -8104,32 +8813,32 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                     </Box>
                     <HStack className="pz-mod-hover-actions" gap="1">
                       <Button
-                        aria-label={`上移 ${mod.name}`}
+                        aria-label={`置顶 ${mod.name}`}
                         className="pz-lua-mod-order-button"
                         disabled={busy || orderIndex <= 0}
                         onClick={(event) => {
                           event.stopPropagation();
-                          void moveLuaMod(mod, -1);
+                          void moveLuaModToEdge(mod, "top");
                         }}
                         size="xs"
-                        title="上移"
+                        title="置顶（移到加载顺序最前）"
                         variant="ghost"
                       >
-                        ↑
+                        <FontAwesomeIcon icon={faAnglesUp} />
                       </Button>
                       <Button
-                        aria-label={`下移 ${mod.name}`}
+                        aria-label={`置底 ${mod.name}`}
                         className="pz-lua-mod-order-button"
-                        disabled={busy || orderIndex < 0 || orderIndex >= enabledOrder.length - 1}
+                        disabled={busy || orderIndex < 0 || orderIndex >= orderIds.length - 1}
                         onClick={(event) => {
                           event.stopPropagation();
-                          void moveLuaMod(mod, 1);
+                          void moveLuaModToEdge(mod, "bottom");
                         }}
                         size="xs"
-                        title="下移"
+                        title="置底（移到加载顺序最后）"
                         variant="ghost"
                       >
-                        ↓
+                        <FontAwesomeIcon icon={faAnglesDown} />
                       </Button>
                       <Button
                         aria-expanded={expanded}
@@ -8644,7 +9353,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 title={`切换到预设「${preset.name}」`}
                 variant="ghost"
               >
-                {preset.name}
+                <ScrollingLabel text={preset.name} />
               </Button>
               <Button
                 aria-label={`删除预设 ${preset.name}`}
@@ -9021,9 +9730,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               ) : (
                 <>
                   <Text color="gray.500" fontSize="xs" mt="2">
-                    将上传 %TEMP%\overlay.log（最近一次游戏启动的部分）与
-                    %USERPROFILE%\Zomboid\console.txt。日志可能包含游戏路径、Steam ID
-                    等信息，仅用于排查问题。
+                    将上传启动器日志（%USERPROFILE%\Zomboid\.pzmanager\logs\launcher.log，最近 1 MB）、
+                    %TEMP%\overlay.log（最近一次游戏启动的部分）与 %USERPROFILE%\Zomboid\console.txt。
+                    日志可能包含游戏路径、Steam ID 等信息，仅用于排查问题。
                   </Text>
                   <Textarea
                     aria-label="错误详情"
@@ -9034,6 +9743,21 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                     rows={6}
                     value={feedbackDescription}
                   />
+                  <Box mt="2">
+                    <Text color="gray.500" fontSize="xs">
+                      联系方式（选填，会附在描述末尾，方便回访）
+                    </Text>
+                    <Input
+                      aria-label="联系方式"
+                      disabled={feedbackSubmitting}
+                      maxLength={200}
+                      mt="1"
+                      onChange={(event) => setFeedbackContact(event.currentTarget.value)}
+                      placeholder="邮箱 / QQ / 群昵称，留空则不附"
+                      size="sm"
+                      value={feedbackContact}
+                    />
+                  </Box>
                   {feedbackError && (
                     <Text color="red.500" fontSize="xs" mt="2">{feedbackError}</Text>
                   )}

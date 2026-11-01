@@ -1,7 +1,7 @@
 {
   "name": "pzmanager",
   "private": true,
-  "version": "1.4.261101",
+  "version": "1.5.261101-devbuild.1793501619",
   "type": "module",
   "scripts": {
     "dev": "vite",

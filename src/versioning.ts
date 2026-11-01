@@ -464,10 +464,19 @@ export function formatVersionElapsed(startedAt: number | null): string | null {
   return minutes + " 分 " + rest + " 秒";
 }
 
-/** 前端版 `{主}.{次}.{YYMMDD}` 比较：与 Rust compare_versions 同规则（容忍 v 前缀、缺段按 0）。 */
+/** 内测构建版本号：`1.5.261101-devbuild.1793501619` → { base, buildId }；正式版返回 null。
+    与 Rust `update::parse_dev_build_version` 同规则（容忍 v 前缀、后缀大小写）。 */
+export function parseDevBuildVersion(version: string): { base: string; buildId: string } | null {
+  const normalized = version.trim().replace(/^[vV]/, "");
+  const match = /^(\d+(?:\.\d+)+)-devbuild\.([0-9A-Za-z]+)$/i.exec(normalized);
+  return match ? { base: match[1], buildId: match[2] } : null;
+}
+
+/** 前端版 `{主}.{次}.{YYMMDD}` 比较：与 Rust compare_versions 同规则（容忍 v 前缀、缺段按 0）。
+    内测构建只比 base：构建号是"这一次编译"的标识，不该让它比同号正式版还大。 */
 export function compareVersionStrings(left: string, right: string): number {
   const parts = (value: string) =>
-    value
+    (parseDevBuildVersion(value)?.base ?? value)
       .trim()
       .replace(/^[vV]/, "")
       .split(".")

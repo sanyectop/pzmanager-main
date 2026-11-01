@@ -256,6 +256,7 @@
 - 与输入框 / 下拉同一行的操作按钮统一 `26px`（`--pz-control-height`），由 `App.css` 顶部的全局 `:has()` 规则命中；不要在单个页面再写 `height` 覆盖。标签按钮、分段控件也用 `26px`。
 - 一行内只保留一个最高优先级主按钮。
 - 图标足以表达含义时使用图标按钮，例如关闭、刷新、搜索、设置、信息、下载、排序。
+- **纯文字的小按钮**（`ghost` + 文字或「文字 + 箭头」，如「已提交的反馈」「复制编号」「版本记录」「重新开启换盘提示」）统一挂 `.pz-text-button`：`padding-inline: 0.62rem`，不要让文字贴着描边。Chakra `size="xs"` 的默认内边距对中文太窄，也不要再写 `padding-inline: 0`。这条只给内容流里的按钮用，密集的操作按钮组（整合包行、模组行）保持原样，避免挤到换行。
 - 启动页的大尺寸“启动游戏”和“停止游戏进程”是全局唯一例外，两者必须完全共用尺寸、圆角、排版和悬停反馈。
 - 所有按钮都应提供悬停、键盘焦点、按下、禁用和加载状态。
 - 透明底按钮（`ghost` / `outline`）统一带**亚克力底**：`var(--pz-btn-tint)` 半透明浅色 + `blur(var(--pz-menu-blur)) saturate(var(--pz-menu-saturate))` 背景模糊 + 细描边 + `inset 0 1px 0 var(--pz-btn-highlight)` 顶边内高光，悬停换成 `--pz-btn-tint-hover`。实现集中在 `src/theme.ts` 的 button recipe 覆盖里，不要逐处写内联样式；模糊参数复用菜单令牌，所以「设置 › 通用 › 模糊度」对按钮同样生效。`solid`（蓝色主操作 / 红色危险操作）保持实色，不套亚克力，避免主次不分。
@@ -276,6 +277,34 @@
 - 名称是主标题；内部 ID 使用更小、更弱的等宽字体；说明和路径按需截断。
 - 启用状态使用开关或明确的左侧状态线，不要求用户先选中再点击“启用”。
 - 排序、详情和更多操作放在悬停操作区或更多菜单中，避免常态占据横向空间。
+- 加载顺序支持拖动：行左侧一个 `0.85rem` 宽的点阵拖动柄（`.pz-lua-mod-drag-handle`，径向渐变画的点，
+  不引图标资源），只在「排序 › 加载顺序」且模组已启用时出现；拖动中只改前端预览顺序，
+  松手才写回 `default.txt`，Esc / pointercancel 放弃。拖动时**被抓住的整组一起跟着指针**：
+  按下时把整组行收进 `drag.rows`（每行记下相对指针的抓取偏移和高度），之后每个 pointermove
+  按高度把它们堆成一个连续块，块顶 = 指针 − `blockTopDelta`，所以被抓住的那一行始终贴着指针；
+  原本分散的选中项会靠到一起。换位会改变行在文档流里的位置，所以每次重渲染后要在
+  `useLayoutEffect` 里按最后的指针位置重新对齐一次，否则会差一整行。
+  坐标统一用**内容坐标**：`.pz-lua-mod-list` 是 `position: relative`，行的 `offsetTop`
+  相对列表，不受 transform / 滚动影响；指针位置换算成内容坐标后再比较，滚轮和自动滚动都不会错位。
+  拖动中的行 `z-index: 40`（抓住的那行 41），保证拖过其它行时压在最上面。
+  落点判断用块顶对照其它行的中线。多选时抓住任意选中行会整组搬动
+  （`moveModIdBlock`：整块插到落点行前/后，组内相对顺序不变，未启用和加载器不参与），
+  拖动中的整组行都带 `is-reordering`。拖动期间有一个 rAF 循环：指针进入滚动框上下 `56px`
+  边缘时自动滚动（越靠边越快，上限 18px/帧）；任何祖先的 `scroll`（滚轮、滚动链、程序滚动）
+  都会触发一次重新对位，所以整块始终贴在指针上。
+  列表换位**一律做成滑动，不能瞬移**：渲染期间、DOM 更新前先抓每行的 `offsetTop`，
+  提交后用 FLIP（反向 `translateY` → 关过渡提交起点 → 同帧清空，交给 `.pz-mod-row`
+  的 150ms transform 过渡）滑到新槽位。拖动中被抓住的行由指针直接驱动，不参与 FLIP。
+  覆盖范围包括拖动换位、置顶/置底按钮、启用/停用、排序和筛选。
+  松手时**先**把预览顺序乐观写回本地数据（`applyLuaModOrder`）**再**撤掉预览，
+  并且**不在 pointerup 里清内联位移**：把待放开的行塞进 `luaDropRowsRef`、递增 `luaDropToken`，
+  等「最终顺序」这次渲染提交后由 layout effect 做一次 FLIP（当前视口位置 → 最终槽位）。
+  在事件里直接清 transform 的话，过渡目标还是渲染前的旧布局，顺序一旦同帧变化
+  就会先滑回旧位置再绕到新位置；这一步也让 FLIP 跳过待放开的行，避免两套动画打架。
+  列表的入场滑入动画在稳定后（`.pz-lua-mod-list.is-settled`）会摘掉，否则拖动换位时
+  浏览器会重播「向右滑入 + 淡入」。加载器（ZombieBuddy）固定在 `default.txt`
+  最前、不在列表里显示，不参与拖动和置顶/置底的边界计算。行内按钮是**一键置顶 / 置底**（`moveLuaModToEdge`，`faAnglesUp` / `faAnglesDown`），不做逐格上下移；它与拖动共用同一套顺序口径，点击后先本地排好再落盘，所以列表是滑过去而不是停一下再跳；
+  被 `requires` / `loadBefore` 驳回时用 Toast 说明，不静默失败。
 - 选中、启用、禁用、拒绝四种状态必须视觉可区分。
 - 滚出视口的行使用 `content-visibility: auto` 和稳定的 `contain-intrinsic-size`，并保留占位高度。
 - 右键整行弹出模组菜单（`ModRowContextMenu`：`Menu.Root` + `Menu.ContextTrigger asChild` + `Portal`），
@@ -354,8 +383,10 @@
 - 字体对比度同样是全局一项（`save_font_contrast`，0–100，默认 0）：滑块拖动时只改状态（CSS 变量立刻生效），落盘做 250ms 防抖；数值显示为百分比，左端标注「默认配色」。
 - 「模组加载器」分类是加载器相关操作的唯一入口：方案选择（`save_mod_loader_scheme`）+ 该方案加载器的状态与安装。其它页面（支持库、模组管理）只报状态和指路，不复刻安装按钮或方案下拉；模组管理页在方案为「不使用」时要显示"未启用模组加载器"并给出跳转，而不是要求装 ZombieBuddy。
 - 「启动」分类放启动阶段的实验性优化：「极速启动」（`save_fast_launch`），且**仅当模组加载器方案 = ZombieBuddy 时可用**——其它方案没有可短路的加载器，开关必须 `disabled` 并给出跳转提示。开关旁用 `.pz-hint-dot` 写清三件事：缓存只收「已批准且启用」的模组；指纹与当前启用列表不一致、或注入任何一步异常，都会回退到 ZombieBuddy 原生扫描；该功能会向游戏进程注入代码，建议只在单机/自建服务器使用。打开开关前弹 `.pz-fast-launch-dialog` 警告确认（关闭不需要），页面只保留阻塞提示和缓存状态。
-- 「启动」分类还有两项与加载器无关、任何方案下都可用：「静默内存清理」（`save_silent_memory_cleanup`：开关 + 30–95% 阈值滑块）与「启动时清理内存」（`save_clean_memory_on_launch`）。阈值滑块拖动时只改状态、落盘做 300ms 防抖；开关标题旁用 `Badge` 显示当前系统内存占用（后端 `get_memory_status`，超过阈值时换成橙色），滑块下方左「更频繁」右「更保守」标注方向；「立即清理一次」按钮报告上次释放量与耗时。
+- 「启动」分类还有三项与加载器无关、任何方案下都可用：「静默内存清理」（`save_silent_memory_cleanup`：开关 + 30–95% 阈值滑块）、「启动时清理内存」（`save_clean_memory_on_launch`）与「激进内存清理」（`save_aggressive_memory_clean`）。阈值滑块拖动时只改状态、落盘做 300ms 防抖；开关标题旁用 `Badge` 显示当前系统内存占用（后端 `get_memory_status`，超过阈值时换成橙色），滑块下方左「更频繁」右「更保守」标注方向；「立即清理一次」按钮报告上次释放量与耗时。
+- 激进内存清理是**独立开关**，不是静默清理的子选项：它同时影响手动、静默和启动前三条清理路径。常规清理只有「压各进程工作集」；打开后追加四步系统级清理：`NtSetSystemInformation(SystemMemoryListInformation, MemoryEmptyWorkingSets)` 清空全系统工作集（游戏运行中跳过）、`SetSystemFileCacheSize(-1, -1, 0)` 按官方文档的刷新语义清系统文件缓存、`MemoryFlushModifiedList` 把已修改页刷回磁盘、`MemoryPurgeStandbyList` 把待机缓存标成空闲页。前两步/后两步分别要先 `AdjustTokenPrivileges` 打开 `SeProfileSingleProcessPrivilege` / `SeIncreaseQuotaPrivilege`，非管理员会被拒绝——`CleanupReport` 用 `emptiedWorkingSets` / `flushedFileCache` / `flushedModified` / `purgedStandby` 如实回报，界面写清「需要管理员权限」，不要假装成功；`protectedRunning` 表示游戏运行中跳过了全系统工作集。系统级步骤需要管理员：开关打开且 `is_launcher_elevated` 为 false 时，说明文字下方给一行橙色提示 +「以管理员身份重启」（`restart_as_admin`，`ShellExecuteW` 的 `runas`；用户取消 UAC 则返回错误、原实例继续运行）。文案必须写明「已提交」是进程持有的提交配额、外部工具无法回收，只承诺清「已缓存」（待机列表 + 已修改页 + 系统文件缓存）。静默清理在游戏运行时（`protected_process_running`）强制退回常规模式；手动按钮不受此限，但全系统工作集这一步仍会跳过，避免游戏读盘卡顿。
 - 设置项里的选择控件和资源中心筛选行同款：复用 `WorkshopDropdown`（`.pz-workshop-menu-trigger` + `▾` + `.pz-workshop-tag-menu-content`），不要用原生 `<select>`——原生下拉的下拉箭头、内边距和字体跟全站对不上。
+- 「关于 › 反馈信息」：弹出 `.pz-feedback-dialog` 收集问题描述 + **可选**联系方式（`Input`，`aria-label="联系方式"`，最多 200 字）。联系方式不单独上报，提交时由后端 `compose_report` 拼成「描述 + 空行 + `联系方式：…`」放进中转站唯一认识的 `description` 字段——不要为此改服务端协议。弹窗下方「反馈问题」区块里再放一个可展开的「已提交的反馈（N）」：数据来自 `list_submitted_feedback`（本机 `.pzmanager/feedback-history.json`，最多 50 条、新的在前，只存编号 / 时间 / 描述摘要），每行显示等宽编号 + 时间 + 摘要 + 「复制编号」，列表限高 `12rem` 自己滚动（`.pz-feedback-history`）。
 
 ### 4.9 百宝箱
 

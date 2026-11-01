@@ -194,12 +194,25 @@ export type StartupTiming = {
   previousMs: number | null;
 };
 
+/** 「已提交的反馈」列表里的一条（本机记录，见 feedback.rs）。 */
+export type FeedbackHistoryEntry = {
+  id: string;
+  /** Unix 秒。 */
+  sentAt: number;
+  /** 描述摘要，方便认出是哪次反馈。 */
+  summary: string;
+};
+
 export type LauncherUpdateStatus = {
   currentVersion: string;
   latestVersion: string;
   updateAvailable: boolean;
   /** 自身版本比更新源还新（未发布的开发构建）：标注为「未知版本 + BETA」。 */
   unknownVersion: boolean;
+  /** 当前版本是内测构建（`x.y.z-devbuild.<构建号>`）。 */
+  devBuild: boolean;
+  /** 内测构建号；正式版为 null。 */
+  devBuildId: string | null;
   pubDate: string | null;
   notes: string | null;
   /** 「下载更新」按钮地址:后端已做 123 云盘 → GitHub 安装包 → 便携版回落。 */
@@ -400,6 +413,8 @@ export type AppSettings = {
   silentMemoryCleanup: boolean;
   silentMemoryCleanupThreshold: number;
   cleanMemoryOnLaunch: boolean;
+  /** 「激进内存清理」：常规清理之外再清系统工作集、文件缓存、已修改页与待机缓存。 */
+  aggressiveMemoryClean: boolean;
   /** 「Steam 网络加速」模式：auto / relay / direct；null = 没写过，按 auto。 */
   steamRelayMode: string | null;
   /** 「Steam 网络加速」的中转地址；null/空 = 内置默认。 */
@@ -448,6 +463,18 @@ export type MemoryCleanupReport = {
   usedPercentBefore: number;
   usedPercentAfter: number;
   elapsedMs: number;
+  /** 这次是否跑了激进模式（系统工作集 / 文件缓存 / 已修改页 / 待机列表）。 */
+  aggressive: boolean;
+  /** 清空全系统工作集是否成功；游戏运行时会主动跳过。 */
+  emptiedWorkingSets: boolean;
+  /** 系统文件缓存是否成功刷新。 */
+  flushedFileCache: boolean;
+  /** 已修改页是否成功刷回磁盘。 */
+  flushedModified: boolean;
+  /** 待机列表是否成功转成空闲页。 */
+  purgedStandby: boolean;
+  /** 清理时游戏在运行，因此跳过了清空全系统工作集。 */
+  protectedRunning: boolean;
 };
 
 export type BackgroundEntry = {

@@ -11,6 +11,8 @@ import {
   versionProgressPercent,
   versionStepLabel,
   versionLabelById,
+  compareVersionStrings,
+  parseDevBuildVersion,
   type VersionChangeLog,
   type VersionOperationUpdate,
   type VersionRecord,
@@ -194,4 +196,23 @@ test("counts deltas since the most recent full snapshot", () => {
     ]),
     1,
   );
+});
+
+test("内测构建版本号按 base 比较，构建号不影响大小", () => {
+  assert.deepEqual(parseDevBuildVersion("1.5.261101-devbuild.1793501619"), {
+    base: "1.5.261101",
+    buildId: "1793501619",
+  });
+  assert.deepEqual(parseDevBuildVersion("v1.5.261101-DevBuild.7"), {
+    base: "1.5.261101",
+    buildId: "7",
+  });
+  assert.equal(parseDevBuildVersion("1.5.261101"), null);
+  assert.equal(parseDevBuildVersion("1.5.261101-beta.7"), null);
+
+  // 同号正式版与内测构建视为同一版：隐私协议不会因为换了构建号反复弹窗。
+  assert.equal(compareVersionStrings("1.5.261101-devbuild.1793501619", "1.5.261101"), 0);
+  assert.equal(compareVersionStrings("1.5.261101-devbuild.5", "1.5.261101-devbuild.9"), 0);
+  // 次版本更高的内测构建仍然更新。
+  assert.equal(compareVersionStrings("1.6.0-devbuild.1", "1.5.261101"), 1);
 });

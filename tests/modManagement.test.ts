@@ -5,6 +5,7 @@ import {
   filterLuaMods,
   invertSelection,
   mergeItemsPreservingOrder,
+  moveModIdBlock,
   setSelectionForKeys,
   sortLuaModsForDisplay,
   toggleSelection,
@@ -46,6 +47,29 @@ test("updates Lua mod state while preserving the current visible order", () => {
       { key: "d", enabled: true },
     ],
   );
+});
+
+test("drags a multi-selected block without changing the order inside it", () => {
+  const ids = ["a", "b", "c", "d", "e"];
+
+  // 选中 b、d（中间夹着 c），整组往下搬到 e 之后：组内仍是 b 在 d 前。
+  assert.deepEqual(moveModIdBlock(ids, ["b", "d"], "e", true), ["a", "c", "e", "b", "d"]);
+  // 往上搬到 a 之前。
+  assert.deepEqual(moveModIdBlock(ids, ["b", "d"], "a", false), ["b", "d", "a", "c", "e"]);
+  // 组内顺序以当前加载顺序为准，与传入 moving 的顺序无关。
+  assert.deepEqual(
+    moveModIdBlock(ids, ["d", "b"], "a", false),
+    moveModIdBlock(ids, ["b", "d"], "a", false),
+  );
+  // 落到紧挨着的下一行：整组下移一格，组内顺序不变。
+  assert.deepEqual(moveModIdBlock(ids, ["b", "d"], "c", true), ["a", "c", "b", "d", "e"]);
+  // 单行拖动仍然走同一个入口。
+  assert.deepEqual(moveModIdBlock(ids, ["b"], "a", false), ["b", "a", "c", "d", "e"]);
+});
+
+test("dragging a block returns null when the drop target is not in the list", () => {
+  assert.equal(moveModIdBlock(["a", "b"], ["a"], "missing", true), null);
+  assert.equal(moveModIdBlock(["a", "b"], ["missing"], "a", true), null);
 });
 
 test("combines status and B42 Lua mod filters", () => {

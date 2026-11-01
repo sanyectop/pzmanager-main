@@ -8,6 +8,8 @@
  * 最大下降量当成"已清理"多少 MB。
  */
 
+import type { MemoryCleanupReport } from "./app/types";
+
 /** 采样间隔：每秒检测一次内存占用；完成判定靠「先降后升」，回升即清理完成。 */
 export const MEMORY_CLEAN_POLL_MS = 1000;
 /** 一直没看到内存下降时的观察窗口：过了这段时间就认为这次没什么可清。 */
@@ -89,6 +91,30 @@ export function memoryCleanFinishedDetail(
     return "清理完成，内存占用没有明显下降";
   }
   return `清理完成，共释放 ${peakFreedMb} MB${trimmed !== null && trimmed > 0 ? `（${trimmed} 个进程）` : ""}`;
+}
+
+/**
+ * 「上次清理」结果行里系统级步骤的说明；常规模式返回空串。
+ *
+ * 只报告清理真正能改变的「已缓存」相关步骤（待机列表 / 系统文件缓存 / 全系统工作集）。
+ * 「已提交」是各进程持有的提交配额，外部工具无法回收到更小的数值，不要在这里虚报。
+ */
+export function memoryCleanupSystemDetail(report: MemoryCleanupReport): string {
+  if (!report.aggressive) {
+    return "";
+  }
+  const standby = report.purgedStandby
+    ? "已释放"
+    : report.flushedModified
+      ? "已刷盘、待机列表需要管理员权限"
+      : "需要管理员权限";
+  const fileCache = report.flushedFileCache ? "已刷新" : "需要管理员权限";
+  const workingSets = report.emptiedWorkingSets
+    ? "已清空"
+    : report.protectedRunning
+      ? "游戏运行中，已跳过"
+      : "需要管理员权限";
+  return `，系统缓存：${standby}，文件缓存：${fileCache}，全系统工作集：${workingSets}`;
 }
 
 /**

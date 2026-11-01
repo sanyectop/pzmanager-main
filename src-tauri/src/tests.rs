@@ -168,6 +168,7 @@ fn persists_background_and_memory_settings() {
         silent_memory_cleanup: true,
         silent_memory_cleanup_threshold: 85,
         clean_memory_on_launch: true,
+        aggressive_memory_clean: true,
         wallpaper_effect: None,
         steam_relay_mode: Some("relay".to_string()),
         steam_relay_base: Some("https://mirror.example/steam".to_string()),
@@ -2230,6 +2231,26 @@ fn applies_build_42_and_mlos_load_rules() {
             "Other"
         ]
     );
+}
+
+#[test]
+fn keeps_loaders_ahead_of_a_manually_moved_order() {
+    // 手动拖动/上下移只提交可排序的模组，加载器可能被挤到后面；写回时必须回到最前，
+    // 否则 ZombieBuddy 会排在普通模组之后加载，整套依赖都断掉。
+    let mut loader = lua_mod("ZombieBuddy", "ZombieBuddy");
+    loader.is_loader = true;
+    let entries = vec![loader, lua_mod("ModManager", "Mod Manager"), lua_mod("Other", "Other")];
+
+    let ordered = order_mod_ids_by_requires(
+        &entries,
+        &[
+            "Other".to_string(),
+            "ModManager".to_string(),
+            "ZombieBuddy".to_string(),
+        ],
+    );
+
+    assert_eq!(ordered, ["ZombieBuddy", "ModManager", "Other"]);
 }
 
 #[test]

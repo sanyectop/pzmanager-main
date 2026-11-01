@@ -28,16 +28,22 @@ test("backend resolves the Steam screenshots directory from the logged-in user",
 });
 
 test("update check labels a self-newer build as unknown version with a BETA tag", () => {
-  // 后端在自身版本 > 更新源版本时返回 unknownVersion（开发自编译构建）。
+  // 后端：普通构建比更新源新才返回 unknownVersion；内测构建（-devbuild.N）不算未知版本。
   assert.match(rustSource, /unknown_version: bool/);
   assert.match(
     rustSource,
-    /unknown_version: version_is_newer\(&current_version, &latest_version\)/,
+    /unknown_version: dev_build\.is_none\(\) && version_is_newer\(&compare_version, &latest_version\)/,
   );
-  // 前端把「已是最新版本」替换为「未知版本 + BETA 徽标」，toast 同步提示。
-  assert.match(appSource, /\{launcherUpdate\.unknownVersion \? "未知版本" : "已是最新版本"\}/);
-  assert.match(appSource, /\{launcherUpdate\.unknownVersion \? \(\s*<Badge colorPalette="purple" size="sm">BETA<\/Badge>/);
+  assert.match(rustSource, /pub\(crate\) dev_build: bool,/);
+  // 前端：内测构建显示「内测版本 DevBuild N + 紫色徽标」，其余才落到「未知版本 + BETA」。
+  assert.match(appSource, /\? `内测版本 DevBuild \$\{launcherUpdate\.devBuildId\}`/);
+  assert.match(appSource, /launcherUpdate\.unknownVersion\s*\? "未知版本"\s*:\s*"已是最新版本"/);
+  assert.match(appSource, /DevBuild \{launcherUpdate\.devBuildId\}/);
+  assert.match(appSource, /\) : launcherUpdate\.unknownVersion \? \(\s*<Badge colorPalette="purple" size="sm">BETA<\/Badge>/);
+  assert.match(appSource, /当前是内测版本 DevBuild \$\{status\.devBuildId\}。/);
   assert.match(appSource, /当前是未知版本（v\$\{status\.currentVersion\}），比更新源发布的还新。/);
+  // 关于页顶部：内测构建显示基础版本 + DevBuild 徽标。
+  assert.match(appSource, /v\{APP_DEV_BUILD\?\.base \?\? appManifest\.version\}/);
 });
 
 test("about page lists the Afdian link below the project repository", () => {

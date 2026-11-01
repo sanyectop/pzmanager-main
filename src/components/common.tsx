@@ -2,7 +2,7 @@
 import { Box, Portal, Text, Tooltip } from "@chakra-ui/react";
 import type { BoxProps } from "@chakra-ui/react";
 import { FallbackImage } from "../FallbackImage";
-import { ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { mimeTypeFor } from "../app/utils";
 
@@ -306,6 +306,57 @@ export function ShotThumbnail({ name, source = "viewpoint" }: { name: string; so
         </Text>
       )}
     </Box>
+  );
+}
+
+/** 侧栏里放不下的长名字：平时省略号，悬停（或键盘聚焦）时来回滚动，露出完整名称。
+    只在真的溢出时滚——短名字不动，也不会把行撑宽。 */
+export function ScrollingLabel({ text }: { text: string }) {
+  const containerRef = useRef<HTMLSpanElement | null>(null);
+  const textRef = useRef<HTMLSpanElement | null>(null);
+  const [distance, setDistance] = useState(0);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const textElement = textRef.current;
+    if (!container || !textElement) {
+      return;
+    }
+    const measure = () => {
+      const overflow = Math.max(0, textElement.scrollWidth - container.clientWidth);
+      setDistance(overflow > 1 ? overflow : 0);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [text]);
+
+  return (
+    <span
+      className={`pz-scroll-label${distance > 0 ? " is-overflowing" : ""}`}
+      ref={containerRef}
+    >
+      {/* 位移和动画时长必须挂在真正滚动的文字层上：animation-* 不会从父元素继承。 */}
+      <span
+        className="pz-scroll-label-text"
+        ref={textRef}
+        style={
+          distance > 0
+            ? ({
+                "--pz-scroll-distance": `${distance}px`,
+                // 距离越长滚得越久，但限制在 2.4s–12s，避免几十个字的预设名滚得太快。
+                animationDuration: `${Math.min(12, Math.max(2.4, distance / 36))}s`,
+              } as CSSProperties)
+            : undefined
+        }
+      >
+        {text}
+      </span>
+    </span>
   );
 }
 

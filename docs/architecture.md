@@ -167,7 +167,7 @@ pzm/
 | [overlay.rs](../src-tauri/src/overlay.rs) | 注入入口：路径校验、进程轮询（优先 `ProjectZomboid64.exe`，其次 `javaw.exe`）、重复注入检测 | 编译期二选一注入后端 |
 | `overlay_inject_win32.rs` / `overlay_inject_dll_syringe.rs` | 两套等价后端，对外都是 `inject_dll(pid, dll_path)` | 后者需 nightly |
 | [overlay_session.rs](../src-tauri/src/overlay_session.rs) | 会话编排：等窗口 → 注入 → 解析控制台 → 写状态文件 → 判定完成 → 发停止事件；并提供游戏进程查询/停止命令；顺带记录「检测到窗口 → 移除覆盖层」的启动时长（落盘 `startup-timing.json`，发 `startup-timing` 事件，`startup_timing` 命令读回） | ⚠️ 正在大改 |
-| [memclean.rs](../src-tauri/src/memclean.rs) | 系统内存状态（`GlobalMemoryStatusEx`）与工作集清理（`SetProcessWorkingSetSizeEx(-1,-1)`，等价 `EmptyWorkingSet`）+ 静默清理后台线程 | 形态对齐 PCL2 的「内存优化」；清理**跳过游戏进程与自身** |
+| [memclean.rs](../src-tauri/src/memclean.rs) | 系统内存状态（`GlobalMemoryStatusEx`）与工作集清理（`SetProcessWorkingSetSizeEx(-1,-1)`，等价 `EmptyWorkingSet`）；激进模式追加系统级四步（`MemoryEmptyWorkingSets` / `SetSystemFileCacheSize(-1,-1,0)` / `MemoryFlushModifiedList` / `MemoryPurgeStandbyList`）；静默清理后台线程；`is_elevated` / `restart_as_admin` 管提权 | 形态对齐 PCL2 的「内存优化」；清理**跳过游戏进程与自身** |
 | `main.rs` | 仅 `pzmanager_lib::run()` | 5 行 |
 
 ### 6.2 Steam 发现链
@@ -301,7 +301,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | 域 | 命令 |
 | --- | --- |
 | 环境/设置/启动（17） | `detect_project_zomboid`、`get_system_memory_mb`、`get_app_settings`、`save_memory_limit`、`save_developer_mode`、`save_steam_account_hidden`、`save_translation_language`、`save_font_contrast`、`save_mod_loader_scheme`、`save_fast_launch`、`set_background_path`、`save_shader_download_settings`、`launch_project_zomboid` |
-| 内存清理（4） | `save_silent_memory_cleanup`、`save_clean_memory_on_launch`、`get_memory_status`、`clean_memory_now` |
+| 内存清理（7） | `save_silent_memory_cleanup`、`save_clean_memory_on_launch`、`save_aggressive_memory_clean`、`get_memory_status`、`clean_memory_now`、`is_launcher_elevated`、`restart_as_admin` |
 | 一键安装/配置（3） | `install_zombie_buddy`、`install_pz_optimization`、`configure_viewpoint_three_d` |
 | 模组管理（8） | `start_zombie_buddy_jar_scan`、`list_lua_mods`、`set_lua_mod_enabled`、`set_lua_mods_enabled`、`save_lua_mod_order`、`set_zombie_buddy_mod_decision`、`set_zombie_buddy_mods_decisions`、`apply_jar_mod_file_state` |
 | 媒体读取（4） | `read_background`、`read_jar_mod_poster`、`read_lua_mod_poster`、`read_viewpoint_shot` |
@@ -319,21 +319,24 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 
 重新生成：在 `src-tauri/src/lib.rs` 里搜 `invoke_handler`，`generate_handler![]` 的内容就是权威清单（命令参数用 `snake_case`，前端 invoke 用 `camelCase`）。
 
-### 6.8 内存清理（静默 / 启动时）
+### 6.8 内存清理（静默 / 启动时 / 激进）
 
-设置 › 启动 里的两项，都只做同一件事：**把各进程的工作集（working set）还给系统**，不结束任何进程、不碰页面文件。
+设置 › 启动 里的三项：常规清理只做一件事——**把各进程的工作集（working set）还给系统**，不结束任何进程；打开「激进内存清理」后才追加系统级内存列表与文件缓存清理。
 
 | 设置项 | 存储字段 | 触发时机 |
 | --- | --- | --- |
-| 静默内存清理 | `silentMemoryCleanup` + `silentMemoryCleanupThreshold`（30–95%，默认 80） | 后台线程每 10s 读一次 `GlobalMemoryStatusEx`，占用 ≥ 阈值就清一次；两次之间至少隔 60s（`CLEANUP_COOLDOWN`） |
+| 静默内存清理 | `silentMemoryCleanup` + `silentMemoryCleanupThreshold`（30–95%，默认 80） | 后台线程每 10s 读一次 `GlobalMemoryStatusEx`，占用 ≥ 阈值就清一次；两次之间至少隔 60s（`CLEANUP_COOLDOWN`），激进模式拉长到 300s（`AGGRESSIVE_CLEANUP_COOLDOWN`），避免反复刷盘/清缓存拖慢读盘 |
 | 启动时清理内存 | `cleanMemoryOnLaunch` | `launch_project_zomboid` 里、`apply_launch_loader` 之后、拉起 Steam 之前清理一次 |
+| 激进内存清理 | `aggressiveMemoryClean` | 不是独立触发点，而是给手动 / 静默 / 启动前三条路径加系统级步骤 |
 
 * **清理口径对齐 PCL2**：PCL2 的 `--memory` 子进程用「清理前后可用物理内存差」回报释放量（`Application.xaml.vb`），`McLaunchMemoryOptimize` 是启动阶段的那一次（`ModLaunch.vb`）——本项目沿用同一口径，`CleanupReport.freed_mb` 只在可用内存**变多**时才算数。
-* **绝不清游戏进程**：`PROTECTED_EXE_NAMES`（`java.exe` / `javaw.exe` / `ProjectZomboid64.exe` …）与自身 pid 一律跳过。把正在跑的游戏工作集压掉，后面每帧都要缺页重读，玩家只会感到卡顿。
+* **「已提交」回收不了**：commit charge 是各进程持有的提交配额，外部工具把驻留页挤出工作集只会把它变成待机页，数值本身不会回落。激进模式真正能改变的是「已缓存」：`MemoryEmptyWorkingSets` 清全系统工作集 → `SetSystemFileCacheSize(-1,-1,0)` 刷新系统文件缓存 → `MemoryFlushModifiedList` 刷已修改页 → `MemoryPurgeStandbyList` 把待机页标成空闲。界面文案不要承诺清「已提交」。
+* **系统级步骤要管理员**：两条 NT 指令前置 `AdjustTokenPrivileges` 打开 `SeProfileSingleProcessPrivilege` / `SeIncreaseQuotaPrivilege`；非管理员会拿到 `STATUS_PRIVILEGE_NOT_HELD`，`CleanupReport` 用 `emptied_working_sets` / `flushed_file_cache` / `flushed_modified` / `purged_standby` 如实回报。设置页在开关打开且 `is_launcher_elevated` 为 false 时给「以管理员身份重启」（`restart_as_admin` → `ShellExecuteW(runas)`，取消 UAC 则返回错误、原实例继续运行）；`tauri::is_dev()` 为真时直接返回错误，避免 `tauri dev` 拉起的第二实例脱离 dev server 白屏。
+* **绝不清游戏进程**：`PROTECTED_EXE_NAMES`（`java.exe` / `javaw.exe` / `ProjectZomboid64.exe` …）与自身 pid 一律跳过。激进模式的 `MemoryEmptyWorkingSets` 无法排除单个进程，所以 `protected_process_running()` 为真时跳过这一步（`protected_running` 回报给界面）；静默清理在游戏运行时干脆退回常规模式。
 * **不是启动前置条件**：读不到内存状态、清理报错都只记日志，绝不阻断启动。
-* **设置即时生效**：`save_silent_memory_cleanup` 落盘后立刻 `set_silent_cleanup()` 改原子变量，不用重启启动器；启动时 `setup()` 再把持久化值喂一次。
-* **前端**：`get_memory_status` 每 5s 轮询一次（仅在弹窗里显示占用百分比），清理由后端 `memory-cleaned` 事件推给界面刷新。
-* **测试**：`memclean.rs` 自带 3 条（阈值收敛、真实清理跑通、静默配置往返）；注意 CI/沙箱里 `tempfile` 相关测试会因临时目录被拒而失败，与本模块无关。
+* **设置即时生效**：`save_silent_memory_cleanup` / `save_aggressive_memory_clean` 落盘后立刻更新原子变量，不用重启启动器；启动时 `setup()` 再把持久化值喂一次。
+* **前端**：`get_memory_status` 每 5s 轮询一次（设置页显示占用百分比），清理由后端 `memory-cleaned` 事件推给界面刷新；「上次清理」的系统级结果由 `memoryCleanupSystemDetail()` 统一拼文案。
+* **测试**：`memclean.rs` 自带阈值收敛、真实清理跑通、静默/激进配置往返、常规模式不报系统级步骤等单元测试；会真清待机列表的 `aggressive_cleanup_runs` 默认 `#[ignore]`。注意 CI/沙箱里 `tempfile` 相关测试会因临时目录被拒而失败，与本模块无关。
 
 ## 7. 覆盖层（概要）
 

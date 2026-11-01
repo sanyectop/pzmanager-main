@@ -2116,6 +2116,13 @@ body {
   animation-delay: 0ms;
 }
 
+/* 入场滑入动画只播一次。React 在换位时移动 DOM 节点，Chromium 会把节点上的
+   animation 重新播一遍（旧的 delay 还在），拖动/筛选换位时行就会「消失一下再向右滑入」。
+   列表稳定后（App.tsx 里 ~1s 后、以及开始拖动时）加 is-settled 把动画摘掉。 */
+.pz-lua-mod-list.is-settled > * {
+  animation: none;
+}
+
 .pz-resource-center-main > .pz-panel {
   display: flex;
   flex-direction: column;
@@ -2580,6 +2587,32 @@ body {
   width: 100%;
   min-height: 8rem;
   resize: vertical;
+}
+
+/* 「设置 › 关于 › 已提交的反馈」：一行一条（编号 · 时间 · 摘要 · 复制），整体限高可滚。 */
+.pz-feedback-history-toggle {
+  align-self: flex-start;
+  color: var(--pz-text-label) !important;
+}
+
+/* 文字型小按钮（ghost + 纯文字 / 文字+箭头，如「已提交的反馈」「复制编号」「版本记录」）：
+   Chakra 的 xs 内边距太窄，文字几乎贴着描边。统一给两侧留出可点区域。
+   只用在内容流里的按钮上；密集的操作按钮组（整合包行、模组行）不要套。 */
+.pz-app-shell .chakra-button.pz-text-button {
+  padding-inline: 0.62rem !important;
+}
+
+.pz-feedback-history {
+  max-height: 12rem;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.pz-feedback-history-row {
+  padding: 0.32rem 0.5rem;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-sm);
+  background: var(--pz-surface-card);
 }
 
 .pz-translator-textarea {
@@ -3811,6 +3844,9 @@ body {
 }
 
 .pz-lua-mod-list {
+  /* 行必须有「列表自己」作为 offsetParent：拖动排序和 FLIP 都用 offsetTop 当内容坐标，
+     它不受 transform / 滚动影响；offsetParent 落在滚动容器之外的话坐标空间就对不上了。 */
+  position: relative;
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
@@ -4170,6 +4206,10 @@ body {
   padding: 0.45rem clamp(0.8rem, 2vw, 1.2rem) 0.75rem;
 }
 
+/* 换位时行是「滑」过去的：JS 用 FLIP 先把行挪回旧位置，再由 .pz-mod-row 自己的
+   transform 过渡（150ms）滑到新位置。拖动中手里那几行单独关掉了过渡（内联 transition: none），
+   所以它们仍然 1:1 跟手。 */
+
 .pz-lua-mod-row.is-enabled .pz-lua-mod-name {
   color: var(--pz-text-accent-strong) !important;
 }
@@ -4210,6 +4250,61 @@ body {
 
 .pz-lua-mod-order-button:disabled {
   opacity: 0.32;
+}
+
+/* 拖动排序：只有「已启用 + 按加载顺序显示」的行才有拖动柄。
+   点阵用径向渐变画，不额外引入图标资源。 */
+.pz-lua-mod-drag-handle {
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 0.85rem;
+  border-radius: var(--pz-radius-sm);
+  background-image: radial-gradient(circle, var(--pz-text-label) 1px, transparent 1.2px);
+  background-position: center;
+  background-repeat: repeat;
+  background-size: 0.34rem 0.34rem;
+  cursor: grab;
+  opacity: 0.32;
+  touch-action: none;
+  transition:
+    opacity var(--pz-dur-fast) ease,
+    background-color var(--pz-dur-fast) ease;
+}
+
+.pz-lua-mod-row:hover .pz-lua-mod-drag-handle,
+.pz-lua-mod-row:focus-within .pz-lua-mod-drag-handle {
+  opacity: 0.7;
+}
+
+.pz-lua-mod-drag-handle:hover {
+  background-color: var(--pz-fill-row-hover);
+  opacity: 1;
+}
+
+.pz-lua-mod-drag-handle.is-dragging {
+  cursor: grabbing;
+  opacity: 1;
+}
+
+/* 拖动中的整组模组：统一高亮成「正在搬动」，并抬到列表里最高的一层，
+   拖过其它行时不会被压住。多选时整组都跟着指针走，所以整组都抬起来。 */
+.pz-lua-mod-row.is-reordering {
+  position: relative;
+  z-index: 40;
+  border-color: var(--pz-accent-line-strong);
+  background: var(--pz-fill-row-selected);
+  box-shadow: var(--pz-shadow-sm);
+}
+
+.pz-lua-mod-row.is-reordering-grabbed {
+  z-index: 41;
+}
+
+/* 拖动期间整块列表吞掉文本选择，避免拖过文字时被划蓝。 */
+.pz-lua-mod-list:has(.pz-lua-mod-row.is-reordering) {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grabbing;
 }
 
 /* 这两条规则作用在同一批按钮上（TSX 里 class 是
@@ -4300,8 +4395,63 @@ body {
   min-width: 0;
   justify-content: flex-start;
   overflow: hidden;
+}
+
+/* 放不下的长名字（预设名等）：平时省略号，悬停或键盘聚焦时来回滚动露出全名。
+   裁切和位移必须分两层——裁切框自己一旦被 transform 移动，露出来的仍是同一段文字。 */
+.pz-scroll-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.pz-scroll-label-text {
+  display: block;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pz-mod-preset-item:hover .pz-scroll-label.is-overflowing .pz-scroll-label-text,
+.pz-mod-preset-apply:focus-visible .pz-scroll-label.is-overflowing .pz-scroll-label-text,
+.pz-scroll-label.is-overflowing:hover .pz-scroll-label-text {
+  /* 文字层按内容宽度铺开、自己不再裁切，交给外层 .pz-scroll-label 裁切；
+     否则平移的仍是被自己裁掉的那一段，滚不出后半截文字。 */
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  animation-name: pz-scroll-label-walk;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+@keyframes pz-scroll-label-walk {
+  0%,
+  8% {
+    transform: translateX(0);
+  }
+  46%,
+  54% {
+    transform: translateX(calc(-1 * var(--pz-scroll-distance, 0px)));
+  }
+  92%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 减弱动效时不滚，退回省略号。 */
+  .pz-mod-preset-item:hover .pz-scroll-label.is-overflowing .pz-scroll-label-text,
+  .pz-mod-preset-apply:focus-visible .pz-scroll-label.is-overflowing .pz-scroll-label-text,
+  .pz-scroll-label.is-overflowing:hover .pz-scroll-label-text {
+    width: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: none;
+  }
 }
 
 /* 全局任务中心：标题栏按钮 + 右上角浮层。 */
