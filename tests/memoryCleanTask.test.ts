@@ -143,6 +143,9 @@ test("激进内存清理是独立开关，落盘后后端立刻生效", () => {
   assert.match(backendSource, /^\s+save_aggressive_memory_clean,$/m);
   assert.match(appSource, /invoke\("save_aggressive_memory_clean", \{ enabled \}\)/);
   assert.match(appSource, /aria-label="激进内存清理"/);
+  // 长说明收进标题旁的问号提示，正文只留非管理员时的阻塞提示。
+  assert.match(appSource, /label="激进内存清理说明"/);
+  assert.doesNotMatch(appSource, /打开后还会多做两步系统级清理/);
   // 报告里带上系统级步骤的结果，界面据此提示权限不足（文案已抽到 memoryClean.ts）。
   assert.match(backendSource, /pub emptied_working_sets: bool,/);
   assert.match(backendSource, /pub flushed_file_cache: bool,/);

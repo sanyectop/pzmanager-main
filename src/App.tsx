@@ -7197,18 +7197,20 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
         <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
           <Box flex="1" minW="240px">
-            <Text color="gray.800" fontSize="sm" fontWeight="700">
-              激进内存清理
-            </Text>
-            <Text color="gray.500" fontSize="xs" mt="1">
-              常规清理只压各进程的工作集（「已提交」是进程持有的提交配额，外部工具无法回收，
-              清理不会让这个数值回落）。打开后追加系统级清理：清空全系统工作集、刷新系统文件缓存、
-              把已修改页写回磁盘，最后把待机缓存（Standby）标成空闲页——任务管理器里「可用内存」变大、
-              「已缓存」下降靠的就是这几步。
-              代价是文件缓存被清掉后，接下来读盘会慢一些，所以只建议内存吃紧时临时打开；
-              系统级步骤需要管理员权限，权限不足时只剩工作集修剪。
-              静默清理在游戏运行时仍只用常规模式，手动清理在游戏运行时也会跳过全系统工作集，避免游戏卡顿。
-            </Text>
+            <HStack gap="2" wrap="wrap">
+              <Text color="gray.800" fontSize="sm" fontWeight="700">
+                激进内存清理
+              </Text>
+              <HintDot
+                label="激进内存清理说明"
+                text={
+                  "常规清理只压各进程的工作集。「已提交」是进程持有的提交配额，外部工具无法回收，清理不会让这个数值回落。\n\n" +
+                  "打开后追加系统级清理：清空全系统工作集、刷新系统文件缓存、把已修改页写回磁盘，最后把待机缓存（Standby）标成空闲页——任务管理器里「可用内存」变大、「已缓存」下降靠的就是这几步。\n\n" +
+                  "代价是文件缓存被清掉后，接下来读盘会慢一些，建议只在内存吃紧时临时打开。系统级步骤需要管理员权限，权限不足时只剩工作集修剪。\n\n" +
+                  "静默清理在游戏运行时仍只用常规模式；手动清理在游戏运行时也会跳过全系统工作集，避免游戏卡顿。"
+                }
+              />
+            </HStack>
             {aggressiveMemoryClean && launcherElevated === false && (
               <HStack gap="2" mt="2" wrap="wrap">
                 <Text color="orange.700" fontSize="xs">

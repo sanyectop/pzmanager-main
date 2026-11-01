@@ -47,7 +47,7 @@ node --test tests/            # 前端：源码/配置契约断言（Node ≥ 22
 | --- | --- | --- |
 | `steam-relay(服务端请勿上传)/` | Steam 网络加速的中转服务器（Node 单文件） | 自有服务器（systemd / Docker，见其 README） |
 | `update-api(服务端请勿上传)/` | 启动器更新源（`api/latest.json` 等） | Cloudflare Pages（Direct Upload，发版时手动更新部署） |
-| `feedback-viewer(开发人员工具请勿上传)/` | 反馈查看器（本地 Flask 页面） | 仅管理员本机运行，不部署 |
+| `feedback-viewer(开发人员工具请勿上传)/` | 反馈查看器（本地 Flask 页面，从 pytools 启动器启动） | 仅管理员本机运行，不部署 |
 
 这些目录的改动不会进入提交历史；若重命名或移动，需同步更新 `.gitignore`。
 
