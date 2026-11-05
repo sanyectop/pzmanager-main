@@ -164,9 +164,22 @@ export function SleepingModRow({
       return;
     }
 
-    const root = element.closest(".pz-lua-mod-list, .pz-jar-mods-body");
+    // 挂载时先同步检查一次：已经滚进视野（含 480px 预备区）的行立刻醒来，
+    // 不等 IO 的首轮异步回调——否则页面刚加载/刚切页时，视野内会短暂甚至
+    // 持续停留一排空占位（is-sleeping）。
+    const margin = 480;
+    const initialRect = element.getBoundingClientRect();
+    if (initialRect.top < window.innerHeight + margin && initialRect.bottom > -margin) {
+      setAwake(true);
+    }
+
+    // 不显式指定 root：IO 会沿祖先裁剪链（滚动容器 overflow）算真实可见性。
+    // 显式指定滚动容器在个别时序下会丢唤醒通知（滚动后可见行仍停留在占位态），
+    // 隐式 viewport 是最稳的路径。
     const observer = new IntersectionObserver(
-      ([entry]) => {
+      (entries) => {
+        // 取最后一条：同一批可能携带多条历史状态，最新的才反映当前可见性。
+        const entry = entries[entries.length - 1];
         const nextAwake = entry?.isIntersecting ?? true;
         if (!nextAwake && shellRef.current) {
           setSleepHeight(shellRef.current.offsetHeight);
@@ -174,7 +187,6 @@ export function SleepingModRow({
         setAwake(nextAwake);
       },
       {
-        root,
         rootMargin: "480px 0px",
       },
     );

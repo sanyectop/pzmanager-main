@@ -1,7 +1,76 @@
 /** 从 src/App.tsx 拆出的类型 / 常量 / 工具 / 独立组件，行为保持不变。 */
 import { Badge, Box, Button, HStack, Text } from "@chakra-ui/react";
+import { useEffect, useRef } from "react";
 import { NotificationEntry, TaskItem, ToastItem } from "../app/types";
 import { formatDownloadSize, notificationKindLabel, notificationKindPalette, taskStatusLabel, taskStatusPalette } from "../app/utils";
+
+/** 飞行全程时长：横纵共用同一段终点时间。 */
+export const TASK_FLIGHT_DURATION_MS = 500;
+
+/**
+ * 任务新增时，从鼠标处飞向标题栏任务中心按钮的计数徽标。
+ *
+ * 运动曲线：横纵都是匀加速直线运动（初速为 0，位移 ∝ t²），同时到达；
+ * 两轴曲线相同，合成一条起步缓、越飞越快的直线，交给合成器动画执行，
+ * 主线程再忙（任务进度、轮询）也不会卡顿。
+ * 起点处有一个先扩散后淡出的圆形（`.pz-task-flight-ripple`），
+ * 徽标落地后由调用方卸载本组件并显示真正的计数气泡。
+ */
+export function TaskArrivalFlight({
+  from,
+  to,
+  count,
+  onArrived,
+}: {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  count: number;
+  onArrived: () => void;
+}) {
+  const badgeRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const badge = badgeRef.current;
+    if (!badge) {
+      onArrived();
+      return;
+    }
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      onArrived();
+      return;
+    }
+    const at = (point: { x: number; y: number }) =>
+      `translate3d(${point.x}px, ${point.y}px, 0) translate(-50%, -50%)`;
+    // 首帧先摆到起点，避免从 (0,0) 闪一下。
+    badge.style.transform = at(from);
+    // 匀加速（位移 ∝ t²）的标准贝塞尔近似：cubic-bezier(0.55, 0, 1, 0.45)。
+    const animation = badge.animate(
+      [{ transform: at(from) }, { transform: at(to) }],
+      { duration: TASK_FLIGHT_DURATION_MS, easing: "cubic-bezier(0.55, 0, 1, 0.45)", fill: "both" },
+    );
+    let settled = false;
+    animation.finished
+      .then(() => {
+        settled = true;
+        onArrived();
+      })
+      .catch(() => {});
+    return () => {
+      if (!settled) {
+        animation.cancel();
+      }
+    };
+    // from/to/onArrived 由调用方用 key 重挂载保证本次飞行的常量性。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return (
+    <>
+      <Box aria-hidden="true" className="pz-task-flight-ripple" style={{ left: from.x, top: from.y }} />
+      <Box aria-hidden="true" className="pz-task-flight-badge" ref={badgeRef}>
+        {count}
+      </Box>
+    </>
+  );
+}
 
 export function ToastViewport({ toasts, onClose }: { toasts: ToastItem[]; onClose: (id: number) => void }) {
   return (

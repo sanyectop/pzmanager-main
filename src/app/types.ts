@@ -226,7 +226,14 @@ export type ModManagementPage = "lua" | "jar";
 
 export type ResourceCenterPage = "workshop" | "shaderDownload" | "developerNews";
 
-export type SettingsPage = "about" | "general" | "toolbox" | "logs" | "modLoader" | "startup";
+export type SettingsPage =
+  | "about"
+  | "general"
+  | "toolbox"
+  | "logs"
+  | "modLoader"
+  | "startup"
+  | "developer";
 
 /** 「版本」页左侧分区：概览（游戏版本）/ 模组版本 / 历史版本，以及并入的支持库、光影包、截图。 */
 export type VersionTab = "game" | "mods" | "history" | "support" | "shaderpacks" | "shots";
@@ -396,6 +403,8 @@ export type AppSettings = {
   shaderDownloadThreads: number | null;
   memoryLimitMb: number | null;
   translationLanguage: string | null;
+  /** 「通用 › 翻译引擎」：auto = 默认链（必应 → Google → MyMemory）；其余为手动指定的优先引擎。 */
+  translationEngine: string | null;
   fontContrast: number | null;
   /** 0–200：毛玻璃 / 亚克力的模糊强度，100 = 设计基准。 */
   blurStrength: number | null;
@@ -406,10 +415,16 @@ export type AppSettings = {
   /** 记住的窗口尺寸（逻辑像素）；null = 使用默认 840×560。 */
   windowWidth: number | null;
   windowHeight: number | null;
+  /** 「窗口 › 原生窗口标题栏」：true = 用系统标题栏，隐藏自绘标题栏两侧的 LOGO 与窗口按钮。 */
+  nativeTitlebar: boolean;
+  /** 「启动详情 › 启动参数」：用户编辑过的 JVM 参数列表；空 = 用默认。 */
+  launchArguments: string[];
   /** 覆盖层背景色（#RRGGBB）；null = 覆盖层默认纯红。 */
   overlayBackgroundColor: string | null;
   modLoaderScheme: string | null;
   fastLaunch: boolean;
+  /** 「启动时保留 JAR 模组启用状态」：true = 以磁盘当前状态为基准，不改写 mod.info。 */
+  jarModUseDiskStateOnStartup: boolean;
   silentMemoryCleanup: boolean;
   silentMemoryCleanupThreshold: number;
   cleanMemoryOnLaunch: boolean;
@@ -439,6 +454,12 @@ export type LauncherLogTail = {
   size: number;
   exists: boolean;
   truncated: boolean;
+};
+
+export type LauncherUserDataClearResult = {
+  path: string;
+  removedEntries: number;
+  freedBytes: number;
 };
 
 export type FastLaunchSaveResult = {

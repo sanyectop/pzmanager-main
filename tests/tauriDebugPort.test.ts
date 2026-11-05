@@ -24,10 +24,13 @@ const debugConfig = JSON.parse(
 };
 
 test("configures the Tauri development WebView remote debugging port as 10001", () => {
+  // tauri:dev 先重建覆盖层 DLL：workspace 产物只在显式构建时更新，
+  // 不挂在 dev 前置的话，注入用的就是旧副本（11-01~11-06 的"改动不生效"即此因）。
   assert.equal(
     packageJson.scripts["tauri:dev"],
-    "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "npm run build:overlay && tauri dev --config src-tauri/tauri.dev.conf.json",
   );
+  assert.equal(packageJson.scripts["build:overlay"], "cargo build --release --target x86_64-pc-windows-msvc --manifest-path overlay-dll/Cargo.toml");
   assert.equal(
     debugConfig.app.windows[0]?.additionalBrowserArgs,
     "--remote-debugging-port=10001",

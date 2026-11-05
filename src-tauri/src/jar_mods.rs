@@ -533,6 +533,64 @@ pub(crate) fn apply_jar_mod_state_to_roots(
     Ok(changed)
 }
 
+/// 「启动时保留 JAR 模组启用状态」是否开启；读设置失败按老行为（把记录套回文件）处理。
+pub(crate) fn jar_mod_use_disk_state_on_startup() -> bool {
+    app_settings_path()
+        .and_then(|path| load_app_settings_at(&path))
+        .is_ok_and(|settings| settings.jar_mod_use_disk_state_on_startup)
+}
+
+/// 以磁盘当前状态为基准：把 `mod.info` / `mod.info.disabled` 的实际启用状态
+/// 回写进 `jar-mod-state.json`，**不改动任何模组文件**。
+///
+/// 返回新增或状态发生变化的条目数。
+pub(crate) fn adopt_jar_mod_state_from_roots(
+    roots: &[PathBuf],
+    state: &mut JarModStateFile,
+) -> usize {
+    let mut changed = 0;
+    for (info_path, info, workshop_id) in jar_scan_candidates(roots) {
+        let entry = JarModStateEntry {
+            mod_dir: mod_dir_string(&info_path),
+            mod_id: info.id,
+            workshop_id,
+            package_name: info.package_name,
+            disabled: !jar_info_is_enabled(&info_path),
+        };
+        // 与 `upsert_jar_mod_state_entry` 用同一套匹配规则，先判断状态是否真的变了。
+        let known = state.mods.iter().find(|existing| {
+            existing.mod_dir.eq_ignore_ascii_case(&entry.mod_dir)
+                || (existing.workshop_id.is_some()
+                    && existing.workshop_id == entry.workshop_id
+                    && existing.mod_id.eq_ignore_ascii_case(&entry.mod_id)
+                    && existing.package_name.eq_ignore_ascii_case(&entry.package_name))
+        });
+        if known.is_none_or(|existing| existing.disabled != entry.disabled) {
+            changed += 1;
+        }
+        upsert_jar_mod_state_entry(state, entry);
+    }
+    changed
+}
+
+/// 启动 / 自动扫描前的 JAR 模组状态处理：
+/// * 默认（设置关闭）：把 `jar-mod-state.json` 的记录套回文件，工坊重下覆盖后仍能恢复用户选择；
+/// * 设置开启：以磁盘当前状态为基准，只回写记录，不碰 `mod.info`。
+pub(crate) fn sync_jar_mod_state_on_startup(
+    roots: &[PathBuf],
+    state: &mut JarModStateFile,
+    state_path: &Path,
+) -> Result<usize, String> {
+    if !jar_mod_use_disk_state_on_startup() {
+        return apply_jar_mod_state_to_roots(roots, state);
+    }
+    let changed = adopt_jar_mod_state_from_roots(roots, state);
+    if changed > 0 {
+        write_jar_mod_state(state_path, state)?;
+    }
+    Ok(changed)
+}
+
 pub(crate) fn jar_scan_candidates(roots: &[PathBuf]) -> Vec<(PathBuf, JavaModInfo, Option<u64>)> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
@@ -649,7 +707,7 @@ pub(crate) fn start_zombie_buddy_jar_scan(
                     return;
                 }
             };
-            let state = match read_jar_mod_state(&state_path) {
+            let mut state = match read_jar_mod_state(&state_path) {
                 Ok(state) => state,
                 Err(error) => {
                     let _ = app.emit(
@@ -666,7 +724,7 @@ pub(crate) fn start_zombie_buddy_jar_scan(
                     return;
                 }
             };
-            if let Err(error) = apply_jar_mod_state_to_roots(&roots, &state) {
+            if let Err(error) = sync_jar_mod_state_on_startup(&roots, &mut state, &state_path) {
                 let _ = app.emit(
                     "jar-mod-scan-update",
                     JarModScanUpdate {
@@ -938,8 +996,9 @@ pub(crate) fn set_zombie_buddy_mods_decisions(
 #[tauri::command(async)]
 pub(crate) fn apply_jar_mod_file_state() -> Result<usize, String> {
     let roots = jar_scan_inputs();
-    let state = read_jar_mod_state(&jar_mod_state_path()?)?;
-    apply_jar_mod_state_to_roots(&roots, &state)
+    let state_path = jar_mod_state_path()?;
+    let mut state = read_jar_mod_state(&state_path)?;
+    sync_jar_mod_state_on_startup(&roots, &mut state, &state_path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

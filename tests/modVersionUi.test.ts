@@ -17,6 +17,10 @@ const cssSource = readFileSync(
   fileURLToPath(new URL("../src/App.css", import.meta.url)),
   "utf8",
 );
+const shellSource = readFileSync(
+  fileURLToPath(new URL("../src/components/shell.tsx", import.meta.url)),
+  "utf8",
+);
 import { rustSource as backendSource } from "./sourceText.ts";
 
 function target(overrides: Partial<ModVersionTarget> = {}): ModVersionTarget {
@@ -99,7 +103,7 @@ test("filters mod version targets by source, isolation and keyword", () => {
   );
 });
 
-test("timeline shows the newest version first with 1-based ordinals", () => {
+test("timeline shows the newest version first with chronological ordinals", () => {
   const versions = [
     record({ id: "v1", createdAt: 1 }),
     record({ id: "v2", createdAt: 2 }),
@@ -111,7 +115,9 @@ test("timeline shows the newest version first with 1-based ordinals", () => {
   );
   // 不改入参
   assert.deepEqual(versions.map((item) => item.id), ["v1", "v2", "v3"]);
-  assert.deepEqual([0, 1, 2].map(versionOrdinal), [1, 2, 3]);
+  // 序号按时间正着数：最旧的是 1，最新的是总数——和版本 ID 的日期方向一致。
+  assert.deepEqual([0, 1, 2].map((index) => versionOrdinal(index, 3)), [3, 2, 1]);
+  assert.deepEqual([0, 1].map((index) => versionOrdinal(index, 2)), [2, 1]);
 });
 
 test("timeline dots shrink with age but never below 10px", () => {
@@ -354,6 +360,24 @@ test("privacy consent modal embeds the online policy at 75% with a browser link"
     /\.pz-privacy-frame \{[\s\S]*?height: 133\.34%;[\s\S]*?transform: scale\(0\.75\);[\s\S]*?transform-origin: 0 0;/,
   );
   assert.match(cssSource, /\.pz-privacy-frame-wrap \{[\s\S]*?height: 40vh;/);
+  // 强制遮罩必须压住自绘标题栏（9999），否则同意框不是真的模态；
+  // 同时关掉标题栏与弹窗的 backdrop-filter——固定层模糊 + 内嵌跨域 iframe
+  // 在 WebView2 上会在重采样时闪白色块（用户反馈的「标题栏白色闪烁」）。
+  assert.match(
+    cssSource,
+    /\.pz-privacy-overlay \{[\s\S]*?z-index: calc\(var\(--pz-z-titlebar\) \+ 1\);/,
+  );
+  assert.doesNotMatch(appSource, /className="pz-privacy-overlay"[\s\S]{0,200}?zIndex="tooltip"/);
+  assert.match(cssSource, /\.pz-privacy-dialog \{[\s\S]*?backdrop-filter: none;/);
+  assert.match(cssSource, /\.pz-window-titlebar\.pz-titlebar-static \{\s*backdrop-filter: none;/);
+  assert.match(appSource, /blockingOverlay=\{showPrivacyConsent\}/);
+  assert.match(shellSource, /blockingOverlay \? " pz-titlebar-static" : ""/);
+  // 遮罩盖住标题栏的拖动区后，由遮罩空白处接管拖动；
+  // 必须只在点到遮罩本身时启动，否则在弹窗里选文本会把窗口拖走。
+  assert.match(
+    appSource,
+    /className="pz-privacy-overlay"[\s\S]{0,500}?event\.target !== event\.currentTarget[\s\S]{0,300}?startDragging\(\)/,
+  );
 });
 
 test("about page shows privacy consent status with a revoke button", () => {
@@ -371,4 +395,83 @@ test("privacy consent status lives on the about page under feedback", () => {
   assert.match(appSource, /已同意 v\{privacyConsentedVersion\}/);
   assert.match(appSource, /disabled=\{!privacyConsentedVersion\}/);
   assert.match(appSource, /onClick=\{\(\) => void revokePrivacyConsent\(\)\}/);
+});
+
+test("versions can be converted into standalone ones and deleted from the middle", () => {
+  // 历史版本和模组版本都能把中间版本转换为独立版本。
+  assert.match(
+    appSource,
+    /startVersionOperation\("start_version_rebase", \{ versionId: record\.id \}, `转换「\$\{record\.label\}」`\)/,
+  );
+  assert.match(
+    appSource,
+    /startModVersionOperation\(\s*"start_mod_version_rebase",\s*rootPath,\s*\{ versionId: record\.id \},\s*`转换「\$\{record\.label\}」`,\s*modName,/,
+  );
+  assert.match(appSource, /转换为独立版本/);
+  // 删除不再只给最新版本，改成按依赖关系判断。
+  assert.match(appSource, /versionCanDelete\(record, versionStatus\.versions\)/);
+  assert.match(appSource, /versionCanDelete\(record, versions\)/);
+  assert.match(rustSource, /后面还有版本依赖它/);
+  // 后端注册了新命令，删除时先重挂依赖版本。
+  assert.match(rustSource, /fn start_version_rebase\(app: tauri::AppHandle, version_id: String\)/);
+  assert.match(rustSource, /fn start_mod_version_rebase\(/);
+  assert.match(rustSource, /delete_version_with_rebase_progress\(/);
+  assert.match(rustSource, /phase: "rebase"\.to_string\(\)/);
+});
+
+test("confirms are in-app dialogs, not native window.confirm", () => {
+  // 原生 confirm 同步阻塞、样式割裂、按钮语义固定：全部换成应用内 ConfirmDialog。
+  assert.ok(!/window\.confirm\(/.test(appSource), "App.tsx 不应再调用 window.confirm");
+  assert.match(rustSource, /fn is_project_zomboid_running\(\)/);
+  // 自动排序是显式三选：备份排序 / 直接排序 / 取消（取消=放弃，不再兼指"直接排序"）。
+  assert.match(appSource, /\{ label: "先备份再排序", value: "backup" \}/);
+  assert.match(appSource, /\{ label: "不备份，直接排序", value: "direct" \}/);
+  assert.match(appSource, /cancelValue: "cancel"/);
+  // 还原确认把「请先关闭游戏」放到第一行，且弹框前先查游戏是否在运行。
+  assert.match(appSource, /请先关闭 Project Zomboid，再还原版本。/);
+  assert.match(appSource, /await gameIsRunning\(\)/);
+  // 还原二次确认不再出现双反斜杠的字面量 \\n（会原样显示成 \n）。
+  assert.ok(!appSource.includes("\\\\n\\\\n"), "不应再有字面量 \\n\\n 写进字符串");
+  // 错误 toast 不再 3 秒自动消失。
+  assert.match(appSource, /if \(kind !== "error"\)/);
+});
+
+test("opening a new confirm cancels the previous one's unmount timer", () => {
+  // 还原版本是两步确认链：第一个弹窗 settle 后 280ms 才卸载，第二个弹窗
+  // （「文件可能被改过 → 继续还原」）在这之前打开。若不撤掉上个定时器，
+  // 它会把第二个弹窗连坐关闭 —— 表现为弹窗闪现 0.x 秒后无法点击确认。
+  assert.match(appSource, /const confirmExitTimerRef = useRef<number \| null>\(null\);/);
+  assert.match(
+    appSource,
+    /function showConfirm\(request: ConfirmRequest\): Promise<string> \{[\s\S]*?window\.clearTimeout\(confirmExitTimerRef\.current\);[\s\S]*?setConfirmClosing\(false\);/,
+  );
+  assert.match(
+    appSource,
+    /function settleConfirm\(value: string\) \{[\s\S]*?confirmExitTimerRef\.current = window\.setTimeout\(/,
+  );
+});
+
+test("memory slider saves on release and rolls back on failure", () => {
+  // 拖动只改本地显示，松手才落盘；失败回滚滑块，保证显示值就是生效值。
+  assert.match(appSource, /onValueChangeEnd=\{\(\{ value \}\) => \{/);
+  assert.match(appSource, /async function commitMemoryLimit\(/);
+  assert.match(appSource, /setMemoryLimitMb\(previous\)/);
+  assert.ok(!appSource.includes("memorySaveTimerRef"), "旧的防抖落盘应已移除");
+});
+
+test("delete affordances explain themselves and support batch cleanup", () => {
+  // 根基准不可删时按钮禁用+原因，而不是凭空消失。
+  assert.match(appSource, /第一个完整备份还被后面的版本依赖，不能删除/);
+  assert.match(appSource, /title="第一个完整备份还被后面的版本依赖，不能删除；先删掉它后面的版本。"/);
+  // 「删除及更早」：一次清掉目标之前的所有版本，后端自动重建成新基准。
+  assert.match(appSource, /deleteVersionThrough\(record\)/);
+  assert.match(appSource, /deleteModVersionThrough\(target\.rootPath, target\.name, record\)/);
+  assert.match(rustSource, /fn delete_version_through\(app: tauri::AppHandle, version_id: String\)/);
+  assert.match(rustSource, /fn delete_mod_version_through\(/);
+  assert.match(rustSource, /fn delete_versions_through_progress\(/);
+  // 删除确认带体量提示。
+  assert.match(appSource, /function deleteSizeLine\(record: VersionRecord\)/);
+  // 中断入口在共用进度面板里（历史页也有），写入/删除阶段禁用并说明。
+  assert.match(appSource, /正在写入\/删除文件，这一步无法中断/);
+  assert.match(appSource, /const \[cancelRequested, setCancelRequested\] = useState/);
 });

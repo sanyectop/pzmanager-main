@@ -259,7 +259,7 @@
 <main>
       <div class="hero-line">
         <h1>隐私协议</h1>
-        <p>生效日期:2026-10-31 · 本协议适用于 PZManager 启动器与官方网站(pzm.sanyec.top)。</p>
+        <p>生效日期:2026-11-04 · 本协议适用于 PZManager 启动器与官方网站(pzm.sanyec.top)。</p>
       </div>
 
       <section class="doc" id="overview">
@@ -279,6 +279,7 @@
 
         <h3>3. Steam 相关请求</h3>
         <p>浏览创意工坊、读取新闻、下载预览图时,请求直连 Steam,或在大陆网络下经 <b>Steam API 中转</b>转发(可在设置中查看与修改)。中转服务器只转发并短期缓存 Steam 公开内容,不涉及你的 Steam 账号凭据;启动器读取本机 Steam 信息(登录用户、库目录)完全在本地进行,不会发送给任何服务器。</p>
+        <p>开发者新闻与创意工坊说明的<b>翻译文本</b>(只含 Steam 公开内容,不含本机信息)在目标语言为中文、英文或俄文时,会经中转服务器的<b>离线翻译接口</b>处理(自建 Argos 模型,不调用第三方在线翻译);目标语言为其它语种时回退 Google / 必应 / MyMemory,届时这段公开文本会发送给对应服务商。设置里的<b>翻译器</b>同样复用这条翻译链路,你输入其中的文本会按上述规则处理。</p>
 
         <h3>4. 问题反馈(你主动提交时)</h3>
         <p>使用 <span class="kbd">设置 › 关于 › 反馈信息</span> 时,启动器会上传<b>日志文件</b>(启动器日志 + 游戏内覆盖层日志 + 游戏控制台日志)和你填写的问题描述,以 JSON 形式存放在中转服务器的反馈目录,用于问题排查:</p>
@@ -311,7 +312,8 @@
           <tr><th>服务</th><th>用途</th><th>说明</th></tr>
           <tr><td>Steam / Valve</td><td>创意工坊、新闻、下载、游戏启动</td><td>请求目标本身,受 Valve 隐私政策约束</td></tr>
           <tr><td>Cloudflare Pages</td><td>官网与更新 API 的静态托管</td><td>平台侧可能记录标准访问日志</td></tr>
-          <tr><td>Steam API 中转(pzmapi / steam-relay)</td><td>大陆网络下的 Steam 请求转发与反馈存储</td><td>作者自维护;转发公开内容,存储你主动提交的反馈</td></tr>
+          <tr><td>Steam API 中转(pzmapi / steam-relay)</td><td>大陆网络下的 Steam 请求转发、离线翻译与反馈存储</td><td>作者自维护;转发公开内容,翻译只处理 Steam 公开文本,存储你主动提交的反馈</td></tr>
+          <tr><td>Google 翻译 / 必应翻译 / MyMemory</td><td>其它语种的在线翻译回退</td><td>只接收待翻译的公开文本或你主动输入到翻译器的文本,受各自服务商隐私政策约束</td></tr>
           <tr><td>GitHub / 123 云盘</td><td>安装包下载渠道</td><td>普通文件下载,无额外数据</td></tr>
         </table>
       </section>

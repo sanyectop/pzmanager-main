@@ -121,7 +121,8 @@ mod imp {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible,
     };
 
     use super::{
@@ -163,11 +164,83 @@ mod imp {
     /// `STILL_ACTIVE`（`GetExitCodeProcess` 的返回值）。
     const STILL_ACTIVE: u32 = 259;
 
+    // ---- 渲染看门狗 -------------------------------------------------------
+    // 与 DLL 约定的渲染采样文件（位于 `%TEMP%`）。有些机器游戏根本不写
+    // console.txt（实测整场只有启动器自己追加的几行），所有基于 `[ZB]` 的完成判定
+    // 都会失效，覆盖层只能等 180 秒兜底——用户看到的就是"加载界面压在已经能玩的游戏上"。
+    const RENDER_REPORT_FILE: &str = "pz_overlay_render.txt";
+    /// 采样新鲜度：DLL 每 500ms 回写一次，2 秒没更新视为已停止。
+    const RENDER_REPORT_STALE: Duration = Duration::from_secs(2);
+    /// 判定「游戏已在持续渲染」的最低速率（hook 调用/秒，约等于 20fps 呈现）。
+    const RENDER_READY_RATE: u64 = 40;
+    /// 持续渲染多久后才允许按渲染收尾（给慢机器留出 console.txt 出现的余量）。
+    const RENDER_READY_HOLD: Duration = Duration::from_secs(10);
+    /// 读取渲染采样的节流间隔（文件只有几十字节，但没必要 40ms 读一次）。
+    const RENDER_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
     struct SessionOutcome {
         reason: String,
         zb_lines: u64,
         pid: u32,
         process_name: String,
+    }
+
+    /// 读取 DLL 回写的渲染速率（hook 调用/秒）。采样过期或不存在时返回 None。
+    fn read_render_rate() -> Option<u64> {
+        let path = std::env::temp_dir().join(RENDER_REPORT_FILE);
+        let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+        if modified.elapsed().ok()? > RENDER_REPORT_STALE {
+            return None;
+        }
+        let content = std::fs::read_to_string(&path).ok()?;
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix("rate=")?.trim().parse().ok())
+    }
+
+    /// 渲染看门狗：连续观察到足够高的换帧速率后才开始计时，任何一次掉下去都重置。
+    struct RenderWatch {
+        ready_since: Option<Instant>,
+        last_poll: Option<Instant>,
+        last_rate: Option<u64>,
+    }
+
+    impl RenderWatch {
+        fn new() -> Self {
+            Self {
+                ready_since: None,
+                last_poll: None,
+                last_rate: None,
+            }
+        }
+
+        /// 每 250ms 采样一次；速率达标才累计，否则清零。
+        fn observe(&mut self, now: Instant) {
+            if self
+                .last_poll
+                .is_some_and(|last| now.duration_since(last) < RENDER_POLL_INTERVAL)
+            {
+                return;
+            }
+            self.last_poll = Some(now);
+            let rate = read_render_rate();
+            self.last_rate = rate;
+            if rate.is_some_and(|value| value >= RENDER_READY_RATE) {
+                self.ready_since.get_or_insert(now);
+            } else {
+                self.ready_since = None;
+            }
+        }
+
+        /// 是否已经持续渲染足够久（`RENDER_READY_HOLD`）。
+        fn sustained(&self, now: Instant) -> bool {
+            self.ready_since
+                .is_some_and(|since| now.duration_since(since) >= RENDER_READY_HOLD)
+        }
+
+        fn rate(&self) -> Option<u64> {
+            self.last_rate
+        }
     }
 
     /// 把加载界面状态写进 `%TEMP%\pz_overlay_status.txt`，由注入的 DLL 在**游戏窗口内部**绘制。
@@ -280,6 +353,11 @@ mod imp {
             let _ = std::fs::remove_file(&self.path);
         }
 
+        /// 当前阶段（诊断日志用）。
+        fn phase(&self) -> &str {
+            &self.phase
+        }
+
         fn flush(&mut self) {
             // 与 DLL 侧界面刷新对齐：40ms ≈ 25fps。
             if self.last_write.elapsed() < Duration::from_millis(40) {
@@ -364,7 +442,7 @@ mod imp {
 
         let deadline = Instant::now() + PROCESS_WAIT_TIMEOUT;
         let (pid, process_name) = loop {
-            if let Some((candidate_pid, candidate_name)) = overlay_imp::find_game_process() {
+            if let Some((candidate_pid, candidate_name)) = find_game_candidate() {
                 // 上一次异常结束（例如被强制结束、弹出崩溃通知）可能留下一个仍加载着
                 // 覆盖层 DLL 的僵尸进程。它会抢占"找到游戏进程"这一步，导致新启动的游戏
                 // 永远等不到注入 —— 这里先把它结束掉，再继续等真正的新进程。
@@ -504,6 +582,43 @@ mod imp {
             Err(error) => crate::launcher_log::warn(&format!("覆盖层会话失败：{error}")),
         }
 
+        // 游戏中途退出 = 闪退：从 console 尾部找已知崩溃签名，把可操作的诊断
+        // 拼进会话结果（启动面板 / 日志 / console 记录都会带上），而不是只说
+        // 「游戏进程已退出」让用户猜。
+        let mut outcome = outcome.map(|mut value| {
+            if value.reason.contains("游戏进程已退出") {
+                if let Some(diagnosis) = diagnose_game_exit_from_console(&console_path) {
+                    value.reason.push(' ');
+                    value.reason.push_str(&diagnosis);
+                }
+            }
+            value
+        });
+
+        // 会话详情：用户反馈"覆盖层不消失 / 闪屏"时，这一行直接给出断点——
+        // 是没有 ZB 输出、分母没解析出来，还是静默兜底。没有它只能靠猜。
+        let advices = expected_advices
+            .lock()
+            .ok()
+            .and_then(|value| *value)
+            .map(|total| total.to_string())
+            .unwrap_or_else(|| "未解析".to_string());
+        let render_rate = read_render_rate()
+            .map(|rate| format!("{rate}/s"))
+            .unwrap_or_else(|| "无采样".to_string());
+        crate::launcher_log::info(&format!(
+            "覆盖层会话详情：ZB 行数={}，阶段={}，advice 分母={}，渲染≈{}，耗时={:.1}s，结果={}",
+            outcome.as_ref().map(|value| value.zb_lines).unwrap_or(0),
+            status.phase(),
+            advices,
+            render_rate,
+            window_detected_at.elapsed().as_secs_f64(),
+            outcome
+                .as_ref()
+                .map(|value| value.reason.as_str())
+                .unwrap_or("失败"),
+        ));
+
         if let Ok(outcome) = &outcome {
             status.set_precise_progress("加载完成", 1.0);
             status.force_flush();
@@ -526,9 +641,18 @@ mod imp {
         // 为什么不在主菜单标记处记：会话通常在 ≥97% advice 或 `[ZB]` 静默 10 秒时就结束了
         // （见 track_console 里的两个提前返回），主菜单标记那一步经常根本走不到。
         // 而"发停止事件"是所有成功注入路径都会经过的地方。
-        let startup_ms = window_detected_at.elapsed().as_millis() as u64;
-        let timing = record_startup_timing(startup_ms);
-        let _ = app.emit(STARTUP_EVENT, timing);
+        //
+        // 例外：游戏中途退出（闪退）不算一次「启动」——把"从窗口出现到崩溃"的时长
+        // 记成启动用时是垃圾数据，用户看到的启动时间对比会失真。崩溃时跳过记录，
+        // 前端保留上一次真实启动的数值。
+        if !outcome
+            .as_ref()
+            .is_ok_and(|value| value.reason.contains("游戏进程已退出"))
+        {
+            let startup_ms = window_detected_at.elapsed().as_millis() as u64;
+            let timing = record_startup_timing(startup_ms);
+            let _ = app.emit(STARTUP_EVENT, timing);
+        }
 
         // 通知 DLL 停止覆盖（无论成功失败都要发信号，避免一直保持红色）。
         unsafe {
@@ -564,7 +688,13 @@ mod imp {
         expected_advices: &Arc<Mutex<Option<usize>>>,
     ) -> Result<SessionOutcome, String> {
         // 等 console.txt 被本次启动重写；迟迟没变化就退化为读取现有内容。
+        //
+        // 有些机器游戏根本不写这个文件（整场只有启动器自己追加的几行），此时旧逻辑
+        // 会干等 180 秒，覆盖层一直压在已经能玩的游戏上。渲染看门狗在这里也生效：
+        // 游戏已经在持续换帧、而 console.txt 仍不更新，说明读不到 [ZB] 进度，
+        // 直接收尾（理由写清楚，日志里能一眼看出是"没有控制台输出"而不是卡死）。
         let fresh_deadline = injected_at + CONSOLE_FRESH_TIMEOUT;
+        let mut early_watch = RenderWatch::new();
         loop {
             // 等文件期间也保持心跳：DLL 不能因为这里暂时没有新日志就误判启动器已关闭。
             status.heartbeat();
@@ -579,6 +709,22 @@ mod imp {
             }
             if !process_alive(pid) {
                 return Ok(outcome("游戏进程已退出。", 0, pid, String::new()));
+            }
+            early_watch.observe(Instant::now());
+            if early_watch.sustained(Instant::now()) {
+                return Ok(outcome(
+                    &format!(
+                        "游戏已持续渲染 {} 秒，但 console.txt 没有更新（读不到 [ZB] 进度），结束覆盖。",
+                        RENDER_READY_HOLD.as_secs()
+                    ),
+                    0,
+                    pid,
+                    format!(
+                        " 渲染≈{}/s，console.txt={}",
+                        early_watch.rate().unwrap_or(0),
+                        console_path.display()
+                    ),
+                ));
             }
             if Instant::now() >= fresh_deadline {
                 break;
@@ -604,12 +750,15 @@ mod imp {
         // "[ZB] java mod list to load:" 之后的 jar 列表（用于计算进度分母）。
         let mut collecting_jars = false;
         let mut pending_jars: Vec<String> = Vec::new();
+        // 主循环里的渲染看门狗：console.txt 有更新但始终没有 [ZB] 行时同样靠它收尾。
+        let mut render_watch = RenderWatch::new();
 
         loop {
             status.heartbeat();
             if !process_alive(pid) {
                 return Ok(outcome("游戏进程已退出。", zb_lines, pid, String::new()));
             }
+            render_watch.observe(Instant::now());
 
             // 只有游戏真正开始换帧（红色已经画出来）之后，才允许做"加载完成"判定。
             if !overlay_started && unsafe { WaitForSingleObject(started_event, 0) } == WAIT_OBJECT_0
@@ -657,6 +806,18 @@ mod imp {
                     zb_lines,
                     pid,
                     String::new(),
+                ));
+            }
+            // 没有 [ZB] 进度可显示、但游戏已经在持续渲染：覆盖层留着只会压住游戏画面。
+            if zb_lines == 0 && render_watch.sustained(Instant::now()) {
+                return Ok(outcome(
+                    &format!(
+                        "游戏已持续渲染 {} 秒（本次没有 [ZB] 输出），结束覆盖。",
+                        RENDER_READY_HOLD.as_secs()
+                    ),
+                    zb_lines,
+                    pid,
+                    format!(" 渲染≈{}/s", render_watch.rate().unwrap_or(0)),
                 ));
             }
 
@@ -809,6 +970,91 @@ mod imp {
         }
     }
 
+    /// 游戏中途退出时，从 console.txt 尾部找已知崩溃签名，给用户一句可操作的诊断。
+    ///
+    /// 只在「游戏进程已退出」的收尾里调用：完成/超时收尾不需要。文件不存在或读不出
+    /// 都返回 None（保持原 reason）。扫整个 64KB 尾部——崩溃栈（uncaughtException →
+    /// NoClassDefFoundError → GameThread exited）按这个顺序落盘，签名在退出标记之前。
+    fn diagnose_game_exit_from_console(console_path: &Path) -> Option<String> {
+        let mut file = std::fs::File::open(console_path).ok()?;
+        let length = file.metadata().ok()?.len();
+        let start = length.saturating_sub(64 * 1024);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut text = String::new();
+        file.read_to_string(&mut text).ok()?;
+
+        for line in text.lines().rev() {
+            let line = line.trim();
+            let missing_class = line
+                .split_once("NoClassDefFoundError")
+                .or_else(|| line.split_once("ClassNotFoundException"))
+                .and_then(|(_, rest)| {
+                    rest.trim_start()
+                        .strip_prefix(':')
+                        .map(|value| value.trim().to_string())
+                });
+            if let Some(class) = missing_class {
+                let class = class.split_whitespace().next().unwrap_or(&class);
+                return Some(format!(
+                    "诊断：游戏缺少类 {class}——几乎总是「游戏版本与模组不匹配」。\
+Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中一边时最容易发生；\
+把游戏和模组更新/回滚到同一时期即可。"
+                ));
+            }
+            if line.contains("OutOfMemoryError") {
+                return Some(
+                    "诊断：游戏内存不足（OutOfMemoryError）。请在设置里调高「游戏内存」上限后重试。"
+                        .to_string(),
+                );
+            }
+        }
+        if text.contains("uncaughtException") || text.contains("Exception thrown") {
+            return Some(
+                "诊断：游戏在加载中抛出未处理异常后退出。常见原因是模组与当前游戏版本不匹配；\
+可先禁用最近新增的模组再试。"
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    #[test]
+    fn diagnoses_known_crash_signatures_from_console_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let console = directory.path().join("console.txt");
+        std::fs::write(
+            &console,
+            "LOG  : early noise\r\n\
+             [ZB] patching zombie.IsoChunk with 2 advice(s)\r\n\
+             ERROR: General      f:0> GameWindow.uncaughtException> Exception thrown\r\n\
+             \tjava.lang.NoClassDefFoundError: zombie/util/list/PZArrayList at Class.getDeclaredFields0\r\n\
+             \tCaused by: java.lang.ClassNotFoundException: zombie.util.list.PZArrayList\r\n\
+             LOG  : GameThread exited.\r\n\
+             [PZManager] 覆盖层已停止：游戏进程已退出。\r\n",
+        )
+        .unwrap();
+
+        let diagnosis = diagnose_game_exit_from_console(&console).unwrap();
+        // 倒序扫描会先命中 "Caused by" 行，类名以点分形式提取。
+        assert!(diagnosis.contains("zombie.util.list.PZArrayList"), "{diagnosis}");
+        assert!(diagnosis.contains("游戏版本与模组不匹配"));
+
+        // 内存不足有独立提示。
+        std::fs::write(
+            &console,
+            "ERROR: java.lang.OutOfMemoryError: Java heap space\r\nGameThread exited.\r\n",
+        )
+        .unwrap();
+        let diagnosis = diagnose_game_exit_from_console(&console).unwrap();
+        assert!(diagnosis.contains("内存不足"));
+
+        // 没有崩溃签名（正常完成）返回 None，不影响正常收尾。
+        std::fs::write(&console, "LOG  : all good\r\n").unwrap();
+        assert!(diagnose_game_exit_from_console(&console).is_none());
+        // 文件不存在也返回 None。
+        assert!(diagnose_game_exit_from_console(&directory.path().join("missing.txt")).is_none());
+    }
+
     /// 是否可以因为 `[ZB]` 静默而判定加载完成。
     ///
     /// 两个前提（都是踩过的坑）：
@@ -922,6 +1168,63 @@ mod imp {
         search.found
     }
 
+    /// 游戏主窗口标题（精确匹配，忽略大小写与首尾空白）。
+    ///
+    /// 必须是**精确**匹配而不是包含：Steam 内嵌浏览器窗口的标题同样包含
+    /// "Project Zomboid"（商店页 / 创意工坊页），包含匹配会把 Steam 客户端进程
+    /// 误当成游戏并往里注入。
+    const GAME_WINDOW_TITLE: &str = "project zomboid";
+
+    /// 进程名兜底识别时的展示名（会话消息里用）。
+    const WINDOW_TITLE_MATCH_LABEL: &str = "按窗口标题识别的游戏进程";
+
+    fn is_game_window_title(title: &str) -> bool {
+        title.trim().eq_ignore_ascii_case(GAME_WINDOW_TITLE)
+    }
+
+    /// 枚举顶层窗口，找标题恰好是游戏名的可见窗口，返回所属进程 PID。
+    ///
+    /// 进程名识别（ProjectZomboid64.exe / javaw.exe）的兜底：部分机器上游戏进程
+    /// 不叫这两个名字 —— 实测没有 Xbox 服务的机器上，任务管理器里游戏显示为
+    /// wsappx（pz 是它的子进程），按进程名永远找不到，覆盖层 / 启动计时全部失效。
+    pub(super) fn game_window_pid() -> Option<u32> {
+        struct Search {
+            found: Option<u32>,
+        }
+
+        unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let search = unsafe { &mut *(lparam.0 as *mut Search) };
+            if !unsafe { IsWindowVisible(hwnd).as_bool() } {
+                return TRUE;
+            }
+            let mut buffer = [0u16; 128];
+            let length = unsafe { GetWindowTextW(hwnd, &mut buffer) } as usize;
+            let title = String::from_utf16_lossy(&buffer[..length.min(buffer.len())]);
+            if !is_game_window_title(&title) {
+                return TRUE;
+            }
+            let mut window_pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
+            if window_pid != 0 {
+                search.found = Some(window_pid);
+                return FALSE;
+            }
+            TRUE
+        }
+
+        let mut search = Search { found: None };
+        // SAFETY: 回调只在本次调用期间借用 search，EnumWindows 返回后不再引用。
+        let _ = unsafe { EnumWindows(Some(callback), LPARAM(&mut search as *mut Search as isize)) };
+        search.found
+    }
+
+    /// 找正在运行的游戏：优先按进程名，找不到再按窗口标题兜底。
+    /// 返回 (pid, 展示用进程名)。
+    pub(super) fn find_game_candidate() -> Option<(u32, &'static str)> {
+        crate::overlay::imp::find_game_process()
+            .or_else(|| game_window_pid().map(|pid| (pid, WINDOW_TITLE_MATCH_LABEL)))
+    }
+
     /// 往游戏控制台输出文件追加一条记录（失败不致命）。
     fn append_console_record(path: &Path, record: &str) {
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
@@ -954,11 +1257,46 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::{
-            completion_marker, extract_jar_path, idle_completion, on_game_init_complete,
-            parse_advice_count, zb_phase, StatusFile, COMPLETION_HOLD,
+            completion_marker, extract_jar_path, idle_completion, is_game_window_title,
+            on_game_init_complete, parse_advice_count, zb_phase, RenderWatch, StatusFile,
+            COMPLETION_HOLD, RENDER_READY_HOLD, RENDER_READY_RATE,
         };
         use overlay_core::{ZB_IDLE_TIMEOUT, ZB_IDLE_TIMEOUT_ANY_PHASE};
         use std::time::{Duration, Instant};
+
+        #[test]
+        fn game_window_title_is_an_exact_match() {
+            // 游戏自己的窗口标题。
+            assert!(is_game_window_title("Project Zomboid"));
+            assert!(is_game_window_title("  project zomboid  "));
+            // 必须精确匹配：Steam 内嵌浏览器窗口（商店页/创意工坊页）的标题
+            // 同样包含这段文字，包含匹配会把 Steam 进程误当成游戏并注入。
+            assert!(!is_game_window_title("Project Zomboid on Steam"));
+            assert!(!is_game_window_title("Project Zomboid - 创意工坊"));
+            assert!(!is_game_window_title(""));
+        }
+
+        #[test]
+        fn render_watch_requires_sustained_frames() {
+            let now = Instant::now();
+            let mut watch = RenderWatch::new();
+            // 还没开始渲染：不能收尾。
+            assert!(!watch.sustained(now));
+
+            // 渲染刚好持续到阈值：可以收尾。
+            watch.ready_since = Some(now - RENDER_READY_HOLD);
+            watch.last_rate = Some(RENDER_READY_RATE + 60);
+            assert!(watch.sustained(now));
+
+            // 只持续了 1 秒：还不够（慢机器可能还没写出 console.txt）。
+            watch.ready_since = Some(now - Duration::from_secs(1));
+            assert!(!watch.sustained(now));
+
+            // 中途掉速：计时清零。
+            watch.ready_since = None;
+            assert!(!watch.sustained(now));
+            assert_eq!(watch.rate(), Some(RENDER_READY_RATE + 60));
+        }
 
         #[test]
         fn parses_advice_counts_from_console_lines() {
@@ -1071,7 +1409,7 @@ mod imp {
             // 00:31 的真实故障：ZB 在"校验模组来源"阶段联网静默 10.4 秒 →
             // 绝不能判定完成（游戏还在加载，判定完成会把覆盖层提前摘掉）。
             assert!(!idle_completion(true, "校验模组来源", Some(old), now));
-            // 同一个阶段静默超过 120 秒才兜底结束。
+            // 同一个阶段静默超过 60 秒才兜底结束（联网静默实测最长 41 秒）。
             assert!(idle_completion(true, "校验模组来源", Some(ancient), now));
         }
 
@@ -1190,7 +1528,7 @@ pub struct GameProcessStatus {
 #[cfg(windows)]
 #[tauri::command]
 pub fn check_game_process() -> GameProcessStatus {
-    match crate::overlay::imp::find_game_process() {
+    match imp::find_game_candidate() {
         Some((pid, name)) => GameProcessStatus {
             running: true,
             pid: Some(pid),
@@ -1204,6 +1542,19 @@ pub fn check_game_process() -> GameProcessStatus {
             window_ready: false,
         },
     }
+}
+
+/// 按窗口标题找游戏窗口所属进程（进程名识别的兜底，见 `imp::game_window_pid`）。
+/// `project_zomboid_running`（版本操作的「请先关闭游戏」判断）也用它，
+/// 否则无 Xbox 服务的机器上游戏开着、版本操作却检测不到。
+#[cfg(windows)]
+pub fn game_window_pid() -> Option<u32> {
+    imp::game_window_pid()
+}
+
+#[cfg(not(windows))]
+pub fn game_window_pid() -> Option<u32> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -1221,7 +1572,7 @@ pub fn check_game_process() -> GameProcessStatus {
 #[cfg(windows)]
 #[tauri::command]
 pub fn stop_game_process() -> Result<String, String> {
-    let Some((pid, name)) = crate::overlay::imp::find_game_process() else {
+    let Some((pid, name)) = imp::find_game_candidate() else {
         return Err("没有找到正在运行的游戏进程。".to_string());
     };
     let output = std::process::Command::new("taskkill")

@@ -192,6 +192,9 @@
   --pz-font-lg: 1rem;
   --pz-font-xl: 1.3rem;
   --pz-titlebar-height: 50px;
+  /* 自绘标题栏单个窗口按钮的宽度；「原生标题栏」模式下任务中心按钮
+     要平移过三个按钮的空间，滑距由它参与计算。 */
+  --pz-window-control-width: 46px;
   /* 导航已嵌入标题栏，不再占用内容区顶部空间（两项置 0 使依赖它们的 calc 同步收缩）。 */
   --pz-sidebar-top: 0;
   /* 控件统一高度：取自资源中心「标签 › 包含/排除」两个下拉（26px）。
@@ -591,7 +594,7 @@ body {
 
 .pz-window-control {
   display: grid;
-  width: 46px;
+  width: var(--pz-window-control-width);
   height: var(--pz-titlebar-height);
   padding: 0;
   border: 0;
@@ -4499,6 +4502,91 @@ body {
   line-height: 1;
 }
 
+/* 徽标飞入期间的预留态：绝对定位且不可见，不占布局 —— 任务中心按钮在
+   飞行全程保持原宽度；宽度在落地前 0.2s 才渐变到目标值（见 shell.tsx）。 */
+.pz-task-trigger-badge.is-reserved {
+  position: absolute;
+  top: 50%;
+  right: 0.55rem;
+  transform: translateY(-50%);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 徽标出现/数字变化时的弹跳（飞入落地、计数增加都会重播）。 */
+.pz-task-trigger-badge.pz-badge-pop {
+  animation: pz-badge-pop 0.3s var(--pz-ease-out);
+}
+
+@keyframes pz-badge-pop {
+  0% {
+    transform: scale(0.4);
+  }
+
+  60% {
+    transform: scale(1.18);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* 任务新增的飞入动画（TaskArrivalFlight）：从鼠标处飞向任务中心。 */
+.pz-task-flight-badge {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: calc(var(--pz-z-titlebar) + 3);
+  display: inline-grid;
+  min-width: 1rem;
+  height: 1rem;
+  place-items: center;
+  padding: 0 0.18rem;
+  border-radius: var(--pz-radius-pill);
+  background: var(--pz-accent);
+  color: var(--pz-text-inverse);
+  font-size: 0.58rem;
+  line-height: 1;
+  box-shadow: 0 2px 8px rgb(var(--pz-accent-rgb) / 35%);
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* 起点圆形：在鼠标处扩散后淡出，交给飞行徽标接力。 */
+.pz-task-flight-ripple {
+  position: fixed;
+  z-index: calc(var(--pz-z-titlebar) + 2);
+  width: 2.6rem;
+  height: 2.6rem;
+  /* left/top 由内联样式给圆心，这里负 margin 居中自身。 */
+  margin: -1.3rem 0 0 -1.3rem;
+  border: 2px solid var(--pz-accent-line-strong);
+  border-radius: 50%;
+  background: rgb(var(--pz-accent-rgb) / 16%);
+  pointer-events: none;
+  animation: pz-task-flight-ripple 0.6s var(--pz-ease-out) both;
+}
+
+@keyframes pz-task-flight-ripple {
+  from {
+    transform: scale(0.35);
+    opacity: 0.9;
+  }
+
+  to {
+    transform: scale(1.3);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-task-flight-ripple {
+    animation: none;
+    opacity: 0;
+  }
+}
+
 .pz-task-panel {
   position: fixed;
   top: calc(var(--pz-titlebar-height) + 0.5rem);
@@ -4559,6 +4647,30 @@ body {
 .pz-task-slot.is-closing {
   grid-template-rows: 0fr;
 }
+
+/* 新任务入列：从上方轻轻落下淡入，与移除的收拢动画呼应。 */
+.pz-task-slot > .pz-task-row {
+  animation: pz-task-row-in 0.32s var(--pz-ease-out);
+}
+
+@keyframes pz-task-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.4rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pz-task-slot > .pz-task-row {
+    animation: none;
+  }
+}
+
 
 .pz-task-slot.is-closing > .pz-task-row {
   overflow: hidden;
@@ -5061,9 +5173,12 @@ body {
   border-radius: var(--pz-radius-sm);
 }
 
-/* 隐私协议同意框：启动 / 更新后强制展示，不可点遮罩关闭。 */
+/* 隐私协议同意框：启动 / 更新后强制展示，不可点遮罩关闭。
+   z-index 必须高于自绘标题栏（9999）：强制同意时标题栏也要被遮罩压住，
+   否则导航/窗口按钮仍可点击；遮罩下方的标题栏会关掉模糊（见 .pz-titlebar-static）。 */
 .pz-privacy-overlay {
   align-items: center;
+  z-index: calc(var(--pz-z-titlebar) + 1);
   background: rgba(6, 8, 12, 0.72);
   display: flex;
   inset: 0;
@@ -5074,6 +5189,16 @@ body {
 
 .pz-privacy-dialog {
   width: min(640px, 100%);
+  /* 内嵌跨域 iframe + 亚克力 backdrop-filter 在 WebView2 上会出现重采样白块；
+     隐私框改用近乎实底、不做整层模糊，并允许纵向滚动（矮窗口下按钮不能被裁掉）。 */
+  background-color: rgba(255, 255, 255, 0.97);
+  backdrop-filter: none;
+  overflow-y: auto;
+}
+
+/* 强制遮罩（隐私协议）打开时标题栏被压暗，不再需要实时背景模糊。 */
+.pz-window-titlebar.pz-titlebar-static {
+  backdrop-filter: none;
 }
 
 .pz-privacy-frame-wrap {
@@ -5106,4 +5231,63 @@ body {
 .pz-hint-positioner,
 .pz-hint-tooltip {
   pointer-events: none !important;
+}
+
+/* 应用内确认对话框：比资源弹窗窄，正文多行时限制最大高度滚动。 */
+.pz-confirm-dialog {
+  width: min(480px, 100%);
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+}
+
+/* 「窗口 › 原生窗口标题栏」：开启后系统标题栏接管拖动与窗口按钮，
+   自绘栏两侧随之滑出隐藏（左侧向左、右侧向右），中间的导航保留。
+   关闭时反向滑入，动画时长跟随全局 --pz-dur-base，方向由 transform 表达。 */
+.pz-window-titlebar .pz-sidebar-brand {
+  transition:
+    opacity var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) ease;
+}
+
+.pz-window-controls {
+  transition:
+    opacity var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) ease;
+}
+
+.pz-window-titlebar.pz-titlebar-native .pz-sidebar-brand {
+  opacity: 0;
+  transform: translateX(-1rem);
+  pointer-events: none;
+}
+
+.pz-window-titlebar.pz-titlebar-native .pz-window-controls {
+  opacity: 0;
+  transform: translateX(1rem);
+  pointer-events: none;
+}
+
+/* 原生标题栏模式下，任务中心按钮从窗口按钮左侧平移到右侧
+   （补上窗口按钮让出的三个宽度 + 自己的右边距，再往回收 0.75rem 留出呼吸位，
+   别贴着窗口边缘），跟随按钮一起向右滑动。
+   按钮只是 transform 出局，仍占布局空间，所以这里平移同样的距离补位。 */
+.pz-window-titlebar .pz-task-trigger {
+  transition:
+    opacity var(--pz-dur-base) ease,
+    transform var(--pz-dur-base) ease;
+}
+
+.pz-window-titlebar.pz-titlebar-native .pz-task-trigger {
+  transform: translateX(calc(3 * var(--pz-window-control-width) + 0.5rem - 0.75rem));
+}
+
+/* 原生标题栏模式下，按钮的位置就是这条 translateX。全局的
+   `.pz-app-shell button:active` 会用 translateY(1px) scale(0.98) 整条覆盖 transform，
+   按住「任务」时按钮会先弹回自绘标题栏的位置、松手再滑回来。这里把平移量带上，
+   保留按下的下沉/缩放反馈。 */
+.pz-window-titlebar.pz-titlebar-native
+  .pz-task-trigger:not(:disabled):active {
+  transform: translateX(calc(3 * var(--pz-window-control-width) + 0.5rem - 0.75rem))
+    translateY(1px)
+    scale(0.98);
 }

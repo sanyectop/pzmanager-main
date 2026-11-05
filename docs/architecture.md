@@ -163,8 +163,8 @@ pzm/
 | [resource.rs](../src-tauri/src/resource.rs) | Modrinth + CurseForge 光影资源检索 | 注释明确对齐 PCL2 的 `DlSourceModGet` |
 | [downloader.rs](../src-tauri/src/downloader.rs) | 多线程分块 HTTP 下载（`RANGE`/`CONTENT-RANGE`）+ 进度事件 | 供光影下载器使用 |
 | [news.rs](../src-tauri/src/news.rs) | Steam 新闻 API + 正文清洗，切分成可翻译片段 | 夹具 `tests/fixtures/news_split_cases.json` |
-| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（15 条/批，单条 ≤2000 字），引擎 Google `translate_a/single` → 失败回退 MyMemory（按文字系统猜源语言），Google 失败后熔断 10 分钟直接走 MyMemory；`engine == "none"` 视为失败触发逐句重试，`none` 结果不进缓存 | 带内存缓存 |
-| [overlay.rs](../src-tauri/src/overlay.rs) | 注入入口：路径校验、进程轮询（优先 `ProjectZomboid64.exe`，其次 `javaw.exe`）、重复注入检测 | 编译期二选一注入后端 |
+| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（15 条/批，单条 ≤2000 字），默认引擎链：必应（手机版 `cn.bing.com` 页取 IG/IID/token，再 POST `ttranslatev3`，单段 ≤1000 字自动切分）→ Google `translate_a/single` → MyMemory（按文字系统猜源语言）；「通用 › 翻译引擎」可手动指定优先引擎（`translationEngine`：auto/bing/google/mymemory/relay），指定引擎排链首、失败后按默认链回退；relay（`steam-relay` 的 `/translate` → 本机 Argos，只接 zh/en/ru）仅在手动指定时在批级先试。必应走**独立的 no-proxy 客户端**（系统代理/境外出口会被必应判成机房 IP 直接 401，参考实现也是直连），失败只静默 60 秒（切换引擎会立即解除）；Google / relay 失败熔断 10 分钟。译文缓存键 = (原文, 语言, 引擎偏好)：切换引擎后会重新翻译，不会拿旧引擎结果冒充。`engine == "none"` 视为失败触发逐句重试，`none` 结果不进缓存 | 带内存缓存 |
+| [overlay.rs](../src-tauri/src/overlay.rs) | 注入入口：路径校验、进程轮询（优先 `ProjectZomboid64.exe`，其次 `javaw.exe`，都找不到时按窗口标题 `Project Zomboid` **精确匹配**兜底——无 Xbox 服务的机器上游戏进程显示为 wsappx，按进程名找不到）、重复注入检测 | 编译期二选一注入后端 |
 | `overlay_inject_win32.rs` / `overlay_inject_dll_syringe.rs` | 两套等价后端，对外都是 `inject_dll(pid, dll_path)` | 后者需 nightly |
 | [overlay_session.rs](../src-tauri/src/overlay_session.rs) | 会话编排：等窗口 → 注入 → 解析控制台 → 写状态文件 → 判定完成 → 发停止事件；并提供游戏进程查询/停止命令；顺带记录「检测到窗口 → 移除覆盖层」的启动时长（落盘 `startup-timing.json`，发 `startup-timing` 事件，`startup_timing` 命令读回） | ⚠️ 正在大改 |
 | [memclean.rs](../src-tauri/src/memclean.rs) | 系统内存状态（`GlobalMemoryStatusEx`）与工作集清理（`SetProcessWorkingSetSizeEx(-1,-1)`，等价 `EmptyWorkingSet`）；激进模式追加系统级四步（`MemoryEmptyWorkingSets` / `SetSystemFileCacheSize(-1,-1,0)` / `MemoryFlushModifiedList` / `MemoryPurgeStandbyList`）；静默清理后台线程；`is_elevated` / `restart_as_admin` 管提权 | 形态对齐 PCL2 的「内存优化」；清理**跳过游戏进程与自身** |
@@ -280,7 +280,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 
 * 扫描工坊与本地模组根，读 `Mod.info`（或 `Mod.info.disabled` 作为回退）定位 jar 与海报；
 * 用 `java-class-rs` 解析 class 字节，识别 `@Patch` / `@Exposer$LuaClass` 与具体注入注解，产出 `patchMethods` 供冲突分析；
-* 审批决策与文件态持久化在 `%USERPROFILE%\Zomboid\.pzmanager\jar-mod-state.json`：工坊重下覆盖了 `Mod.info` 后，启动器仍能把用户选择**重新套用**回文件（`apply_jar_mod_file_state`）；
+* 审批决策与文件态持久化在 `%USERPROFILE%\Zomboid\.pzmanager\jar-mod-state.json`：设置「模组加载器 › 启动时保留 JAR 模组启用状态」（`settings.json` 的 `jarModUseDiskStateOnStartup`，**默认开启**）开启时，启动 / 自动扫描不改写 `mod.info`，而是把磁盘当前状态读作基准并回写记录（`sync_jar_mod_state_on_startup`）；关闭后则把记录**重新套用**回文件（`apply_jar_mod_file_state`），工坊重下覆盖后仍能恢复启动器里的选择。显式「启用 / 禁用」与套用模组预设不受该设置影响，仍会写文件；
 * 扫描是后台任务：`start_zombie_buddy_jar_scan` 返回 id，逐条 emit 进度与结果；注解统计也用于覆盖层的"真实注入进度"分母。
 
 ### 6.5 资源中心、下载器与新闻
@@ -288,7 +288,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 * 工坊浏览：`browse_workshop`（排序/必需与排除标签/分页/搜索词），`workshop_options` 返回可选项（含标签表），结果 5 分钟内存缓存。
 * 工坊详情（列表项右键 →「在窗口内打开」）：`fetch_workshop_item_detail` 调 `ISteamRemoteStorage/GetPublishedFileDetails`，取 `description`（新版接口叫 `file_description`，两个都认）里的 BBCode 原文走 `bbcode_to_html` + `add_translation_spans` 切段，前端再复用 `translate_developer_news_batch` 分批翻译、按 `sid` 回填 HTML（`replaceNewsTranslation`）。标题和正文共用一套 sid 方案（`w<id>_title` / `w<id>_t<node>_s<idx>`），所以标题会跟着一起翻译；工坊标题是纯文本，**不做** BBCode 剥离，否则 `[B42]` 这类后缀会被吃掉。
 * 光影下载：`fetch_shader_resources` / `fetch_shader_resource_files` 走 Modrinth 优先、CurseForge 兜底；`download_shader_file` 多线程下载到 `%USERPROFILE%\Zomboid\viewpoint-shaderpacks`，进度用事件推送。
-* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。
+* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。翻译引擎可在「通用 › 翻译引擎」（`settings.json` 的 `translationEngine`）手动指定；默认链是**必应 → Google → MyMemory**：必应走手机版 `cn.bing.com` 的 `ttranslatev3`（国内直连、质量好于 MyMemory；单次文本按 900 字切段，令牌过期/401 自动刷新重试一次，失败熔断 10 分钟），Google 不可用时同样落到 MyMemory。手动指定某个引擎时它排链首，失败后按默认链回退其余引擎；「中转翻译」（relay，`{relay}/translate` → 本机 Argos，一次翻整批、失败熔断 10 分钟）只接 `zh-CN`/`en`/`ru`，仅在选择它时在批级先试。翻译来源在新闻卡片上按占比显示（`relay` 标为「中转翻译」，`bing` 标为「必应」）。
 
 ### 6.6 背景图与截图/光影
 
@@ -300,7 +300,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 
 | 域 | 命令 |
 | --- | --- |
-| 环境/设置/启动（17） | `detect_project_zomboid`、`get_system_memory_mb`、`get_app_settings`、`save_memory_limit`、`save_developer_mode`、`save_steam_account_hidden`、`save_translation_language`、`save_font_contrast`、`save_mod_loader_scheme`、`save_fast_launch`、`set_background_path`、`save_shader_download_settings`、`launch_project_zomboid` |
+| 环境/设置/启动（18） | `detect_project_zomboid`、`get_system_memory_mb`、`get_app_settings`、`save_memory_limit`、`save_developer_mode`、`save_steam_account_hidden`、`save_translation_language`、`save_font_contrast`、`save_mod_loader_scheme`、`save_fast_launch`、`set_background_path`、`save_shader_download_settings`、`launch_project_zomboid`、`save_native_titlebar` |
 | 内存清理（7） | `save_silent_memory_cleanup`、`save_clean_memory_on_launch`、`save_aggressive_memory_clean`、`get_memory_status`、`clean_memory_now`、`is_launcher_elevated`、`restart_as_admin` |
 | 一键安装/配置（3） | `install_zombie_buddy`、`install_pz_optimization`、`configure_viewpoint_three_d` |
 | 模组管理（8） | `start_zombie_buddy_jar_scan`、`list_lua_mods`、`set_lua_mod_enabled`、`set_lua_mods_enabled`、`save_lua_mod_order`、`set_zombie_buddy_mod_decision`、`set_zombie_buddy_mods_decisions`、`apply_jar_mod_file_state` |
@@ -311,7 +311,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | 下载器（1） | `download_shader_file` |
 | 新闻（2） | `fetch_developer_news`、`translate_developer_news_batch` |
 | 覆盖层（4） | `overlay::inject_overlay`、`overlay_session::start_overlay_session`、`overlay_session::check_game_process`、`overlay_session::stop_game_process` |
-| 版本隔离（9） | `get_version_status`、`save_version_store_path`、`save_version_parallel`、`start_version_snapshot`、`start_version_capture`、`start_version_restore`、`start_version_verify`、`cancel_version_operation`、`delete_version` |
+| 版本隔离（12） | `get_version_status`、`save_version_store_path`、`save_version_parallel`、`start_version_snapshot`、`start_version_capture`、`start_version_restore`、`start_version_verify`、`start_version_rebase`、`cancel_version_operation`、`delete_version`、`delete_version_through`、`is_project_zomboid_running` |
 | 启动器日志（4） | `read_launcher_log`、`clear_launcher_log`、`open_launcher_log_folder`、`log_frontend_message` |
 | 启动时长（1） | `startup_timing`（最近一次「窗口 → 主菜单」时长 + 上一次，供右下角对比显示） |
 
@@ -354,8 +354,8 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | `%USERPROFILE%\Zomboid\console.txt` | 游戏 | 启动器（tail） | `[ZB]` 进度与完成标记的唯一来源；启动器只**追加**自己的 `[PZManager]` 记录 |
 | `%USERPROFILE%\Zomboid\mods\default.txt` | 游戏/启动器 | 启动器 | Lua 模组启用列表与顺序；启动器只替换 `mods{}` 块 |
 | `%USERPROFILE%\Zomboid\viewpoint-shaderpacks\` | 启动器 | 启动器 | 光影包托管目录（下载与导入都落这里） |
-| `%USERPROFILE%\Zomboid\.pzmanager\settings.json` | 启动器 | 启动器 | 内存上限、背景图、开发模式、账户隐藏、下载器设置 |
-| `%USERPROFILE%\Zomboid\.pzmanager\jar-mod-state.json` | 启动器 | 启动器 | JAR 模组审批决策，工坊重下后可重新套用 |
+| `%USERPROFILE%\Zomboid\.pzmanager\settings.json` | 启动器 | 启动器 | 内存上限、背景图、开发模式、账户隐藏、下载器设置；设置 › 开发者选项的「清除启动器用户数据」会删除整个 `.pzmanager` 目录后重建 |
+| `%USERPROFILE%\Zomboid\.pzmanager\jar-mod-state.json` | 启动器 | 启动器 | JAR 模组审批决策；默认以磁盘当前状态为基准，关闭「启动时保留 JAR 模组启用状态」后改为重新套用记录 |
 | `%USERPROFILE%\Zomboid\.pzmanager\backgrounds\<kind>\` | 启动器 | 启动器 | 导入/合成的背景图 |
 | `<游戏目录>\.pzmanager-backups\<时间戳>\` | 启动器 | 人 | 改写 `ProjectZomboid64.json`/`.bat` 前的备份 |
 | `%TEMP%\pz_overlay_status.txt` | 启动器 | **DLL** | 阶段文字 + 进度 + 控制台尾部 + 背景色 `bgcolor=` + 心跳 `beat=` + `console=`/`session=`（覆盖层界面数据源）；心跳超时后 DLL 自读 `console.txt` |
@@ -373,7 +373,8 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | `steamcommunity.com/workshop/browse/` | 工坊浏览（HTML 解析，5 分钟缓存） | [workshop.rs](../src-tauri/src/workshop.rs) |
 | `api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1` | 工坊项目详情（正文 BBCode 与标签） | [workshop.rs](../src-tauri/src/workshop.rs) |
 | `api.steampowered.com/ISteamNews/GetNewsForApp/v2` + `store.steampowered.com` | 开发者新闻 | [news.rs](../src-tauri/src/news.rs) |
-| `translate.googleapis.com`、`translate.yandex.net` | 新闻翻译 | [news_translation.rs](../src-tauri/src/news_translation.rs) |
+| `translate.googleapis.com`、`cn.bing.com`（手机版翻译页 + `/ttranslatev3`）、`translate.yandex.net` | 新闻 / 创意工坊 / 翻译器翻译（中转不可用 / 语种不支持时的回退） | [news_translation.rs](../src-tauri/src/news_translation.rs) |
+| 中转地址的 `/translate`（relay → 本机 Argos） | 中 / 英 / 俄离线翻译 | [news_translation.rs](../src-tauri/src/news_translation.rs)、[steam_relay.rs](../src-tauri/src/steam_relay.rs)、`steam-relay/translate/` |
 | `api.modrinth.com/v2`、`api.curseforge.com/v1` | 光影资源检索 | [resource.rs](../src-tauri/src/resource.rs) |
 
 ## 10. 测试

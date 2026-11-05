@@ -322,6 +322,9 @@ export function ResourceDownloadBrowser({
       resourceDialogCloseTimer.current = null;
     }
     setClosingResourceDialog(false);
+    // 请求序号守卫：A 的请求慢/超时几秒，用户已关掉它去点 B —— A 的响应晚到时
+    // 绝不能把 A 的文件列表写进 B 的弹窗（那会照着 A 的下载直链下错文件）。
+    const requestIdForThisOpen = ++requestId.current;
     setSelectedResource(resource);
     setVersionPacks([]);
     setLoadingFiles(true);
@@ -330,11 +333,19 @@ export function ResourceDownloadBrowser({
         resourceId: resource.id,
         downloadSource: resource.source,
       });
+      if (requestId.current !== requestIdForThisOpen) {
+        return;
+      }
       setVersionPacks(files);
     } catch (error: unknown) {
+      if (requestId.current !== requestIdForThisOpen) {
+        return;
+      }
       onToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
-      setLoadingFiles(false);
+      if (requestId.current === requestIdForThisOpen) {
+        setLoadingFiles(false);
+      }
     }
   }
 

@@ -500,11 +500,17 @@ pub(crate) fn save_fast_launch(enabled: bool) -> Result<FastLaunchSaveResult, St
         ),
     };
     if !restored {
+        // 这里要传的是 agent 字面量（-agentlib:zbNative=policy=allow-all），不是方案名。
+        // 曾经直接把 normalize_mod_loader_scheme 的结果（"zombieBuddy"/"none"）当
+        // policy_agent 传下去，JSON/BAT 的 vmArgs 里会被写成裸的方案名 —— 那不是
+        // 合法的 JVM 参数，游戏直接起不来。必须再映射成对应的 agent 字符串。
         let policy_agent = settings
             .mod_loader_scheme
             .as_deref()
-            .and_then(normalize_mod_loader_scheme);
-        if let Err(error) = apply_launch_loader(None, policy_agent.as_deref(), None) {
+            .and_then(normalize_mod_loader_scheme)
+            .as_deref()
+            .and_then(mod_loader_policy_agent);
+        if let Err(error) = apply_launch_loader(None, policy_agent, None) {
             eprintln!("关闭极速启动后清理 -agentpath 失败（不影响设置已保存）: {error}");
         }
     }

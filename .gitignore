@@ -53,3 +53,14 @@ feedback-viewer(开发人员工具请勿上传)/
 
 # 本地发布产物(F:\pzmanager\release),不进仓库
 release/
+
+# 本地内部工具与文档：不随仓库推送
+pytools(开发人员工具请勿上传)/
+python/
+.zcode/
+.claude/
+UI_AUDIT_REPORT.md
+
+# 临时导出与内部修复日志
+pzm.txt
+docs/fix-log.md

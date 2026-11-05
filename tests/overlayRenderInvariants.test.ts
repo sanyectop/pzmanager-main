@@ -11,6 +11,14 @@ const overlayUi = readFileSync(
   fileURLToPath(new URL("../overlay-dll/src/ui.rs", import.meta.url)),
   "utf8",
 );
+const overlaySession = readFileSync(
+  fileURLToPath(new URL("../src-tauri/src/overlay_session.rs", import.meta.url)),
+  "utf8",
+);
+const overlayCore = readFileSync(
+  fileURLToPath(new URL("../overlay-core/src/lib.rs", import.meta.url)),
+  "utf8",
+);
 
 /**
  * 这两条不变量是"红屏无字"事故的直接产物，回归代价很高，因此用测试锁住：
@@ -72,14 +80,44 @@ test("forced-present mechanism stays removed", () => {
   assert.match(overlayLib, /install_gdi_swap_hook\(\);/);
 });
 
-test("paint dedup is per-HDC and per-GL-context", () => {
-  // 42.22 加载屏同时走 wgl/gdi 两条 swap：旧的全局 5ms 去重会把真正呈现到窗口的
-  // 那一路当成重复帧跳过，游戏画面/黑块因此露出。现在只对同一 HDC + 同一上下文去重。
-  assert.match(overlayLib, /static LAST_PAINT_HDC: AtomicU64/);
-  assert.match(overlayLib, /static LAST_PAINT_CONTEXT: AtomicU64/);
-  assert.match(overlayLib, /fn should_paint_for\(/);
-  assert.match(overlayLib, /last_hdc == hdc/);
-  assert.match(overlayLib, /last_context == context/);
+test("every presented frame is painted; only nested swaps are skipped", () => {
+  // 旧实现按「同一 HDC+上下文、5ms 内」去重：帧间隔短于 5ms 时（高帧率加载屏）
+  // 会把真正要呈现的独立帧当成重复帧跳过，游戏画面/黑块因此漏出 = 用户看到的闪屏。
+  // 现在唯一允许跳过的是「外层 swap 调用的原始实现又走了另一条被挂钩的 swap」。
+  assert.match(overlayLib, /fn skip_paint_for_nested_swap\(nested: bool\) -> bool/);
+  assert.match(overlayLib, /INSIDE_OUTER_SWAP/);
+  assert.match(overlayLib, /fn paint_red_while_active\(\)/);
+  // 不再有时间窗去重。
+  assert.doesNotMatch(overlayLib, /LAST_PAINT_MS/);
+  assert.doesNotMatch(overlayLib, /fn should_paint_for\(/);
+  // 外层 wglSwapBuffers 调用原始函数期间打标记，结束后恢复。
+  assert.match(overlayLib, /flag\.replace\(true\)/);
+  assert.match(overlayLib, /flag\.set\(previous\)/);
   // UI 心跳同时报告换帧/绘制，便于判断是否漏掉某条呈现路径。
   assert.match(overlayUi, /绘制=\{\}/);
+});
+
+test("render watchdog ends the overlay when the game renders but console.txt stays stale", () => {
+  // 有些机器游戏根本不写 console.txt：所有 [ZB] 判定都会失效，必须靠渲染速率收尾。
+  assert.match(overlayUi, /pub const RENDER_REPORT_FILE: &str = "pz_overlay_render.txt"/);
+  assert.match(overlayUi, /pub fn report_render_activity\(\)/);
+  assert.match(overlayUi, /report_render_activity\(\);/);
+  assert.match(overlaySession, /const RENDER_READY_RATE: u64 = 40/);
+  assert.match(
+    overlaySession,
+    /const RENDER_READY_HOLD: Duration = Duration::from_secs\(10\)/,
+  );
+  // console.txt 迟迟不更新（等待阶段）和「有更新但没有 ZB 行」（主循环）都要能收尾。
+  assert.match(overlaySession, /但 console\.txt 没有更新（读不到 \[ZB\] 进度）/);
+  assert.match(overlaySession, /游戏已持续渲染 \{\} 秒（本次没有 \[ZB\] 输出）/);
+  // 会话结束打一行诊断，反馈里能直接看出断点。
+  assert.match(overlaySession, /覆盖层会话详情：ZB 行数=\{\}，阶段=\{\}，advice 分母=\{\}，渲染≈\{\}/);
+});
+
+test("any-phase silence fallback is 60 seconds", () => {
+  // 联网静默实测最长 41 秒；旧的 120 秒会让加载界面多压 1 分钟。
+  assert.match(
+    overlayCore,
+    /ZB_IDLE_TIMEOUT_ANY_PHASE: Duration = Duration::from_secs\(60\)/,
+  );
 });

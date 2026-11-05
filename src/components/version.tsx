@@ -20,8 +20,10 @@ import {
   shortVersionHash,
   sortVersionsNewestFirst,
   versionBaseTypeLabel,
+  versionCanDelete,
   versionChangeSummary,
   versionDotSize,
+  versionIsStandalone,
   versionMatchLabel,
   versionOrdinal,
 } from "../versioning";
@@ -32,13 +34,17 @@ import { useEffect, useRef, useState } from "react";
 export function ModVersionTimeline({
   busy,
   currentMatch,
+  onConvert,
   onDelete,
+  onDeleteThrough,
   onRestore,
   versions,
 }: {
   busy: boolean;
   currentMatch?: VersionCurrentMatch | null;
+  onConvert: (record: VersionRecord) => void;
   onDelete: (record: VersionRecord) => void;
+  onDeleteThrough: (record: VersionRecord) => void;
   onRestore: (record: VersionRecord) => void;
   versions: VersionRecord[];
 }) {
@@ -61,7 +67,7 @@ export function ModVersionTimeline({
                 className={`pz-version-timeline-dot${index === 0 ? " is-latest" : ""}`}
                 style={{ width: `${dotSize}px`, height: `${dotSize}px`, fontSize: `${Math.max(9, dotSize - 7)}px` }}
               >
-                {versionOrdinal(index)}
+                {versionOrdinal(index, ordered.length)}
               </Box>
               {index < ordered.length - 1 ? <Box className="pz-version-timeline-line" /> : null}
             </Box>
@@ -95,7 +101,18 @@ export function ModVersionTimeline({
                 >
                   还原到这个版本
                 </Button>
-                {index === 0 ? (
+                {record.baseType === "delta" && !versionIsStandalone(record, versions) ? (
+                  <Button
+                    disabled={busy}
+                    onClick={() => onConvert(record)}
+                    size="xs"
+                    title="和最近的完整备份重新比对、重写增量包；之后可删除它之前的旧版本"
+                    variant="ghost"
+                  >
+                    转换为独立版本
+                  </Button>
+                ) : null}
+                {versionCanDelete(record, versions) ? (
                   <Button
                     colorPalette="red"
                     disabled={busy}
@@ -105,7 +122,27 @@ export function ModVersionTimeline({
                   >
                     删除
                   </Button>
-                ) : null}
+                ) : (
+                  <Button
+                    colorPalette="red"
+                    disabled
+                    size="xs"
+                    title="第一个完整备份还被后面的版本依赖，不能删除；先删掉它后面的版本。"
+                    variant="ghost"
+                  >
+                    删除
+                  </Button>
+                )}
+                <Button
+                  colorPalette="red"
+                  disabled={busy}
+                  onClick={() => onDeleteThrough(record)}
+                  size="xs"
+                  title="删除这个版本和它之前的所有版本；之后的版本会重建成新的独立基准"
+                  variant="ghost"
+                >
+                  删除及更早
+                </Button>
               </HStack>
             </Box>
           </Box>
@@ -243,7 +280,9 @@ export function ModVersionDialog({
   loading,
   name,
   onClose,
+  onConvert,
   onDelete,
+  onDeleteThrough,
   onRecord,
   onRestore,
   onVerify,
@@ -253,7 +292,9 @@ export function ModVersionDialog({
   loading: boolean;
   name: string;
   onClose: () => void;
+  onConvert: (record: VersionRecord) => void;
   onDelete: (record: VersionRecord) => void;
+  onDeleteThrough: (record: VersionRecord) => void;
   onRecord: () => void;
   onRestore: (record: VersionRecord) => void;
   onVerify: () => void;
@@ -336,7 +377,9 @@ export function ModVersionDialog({
                 <ModVersionTimeline
                   busy={busy}
                   currentMatch={status.currentMatch}
+                  onConvert={onConvert}
                   onDelete={onDelete}
+                  onDeleteThrough={onDeleteThrough}
                   onRestore={onRestore}
                   versions={status.versions}
                 />

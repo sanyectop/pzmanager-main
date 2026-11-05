@@ -20,7 +20,10 @@ pub const SILENCE_COMPLETION_PHASES: [&str; 2] = ["注册 Lua 接口", "初始�
 /// 收尾阶段的 `[ZB]` 静默阈值。
 pub const ZB_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 其它阶段的静默兜底阈值（ZB 中途联网/ClassGraph 扫描会长时间无输出）。
-pub const ZB_IDLE_TIMEOUT_ANY_PHASE: Duration = Duration::from_secs(120);
+///
+/// 实测联网（Authors list fetch）最长静默 41 秒，60 秒留了余量；再长就会让
+/// 加载界面压在已经能玩的游戏上（42.22 上实测到过 2 分钟仍未收尾）。
+pub const ZB_IDLE_TIMEOUT_ANY_PHASE: Duration = Duration::from_secs(60);
 
 /// 覆盖层左下角保留的控制台行数。
 pub const MAX_CONSOLE_LINES: usize = 6;

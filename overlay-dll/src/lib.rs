@@ -26,6 +26,7 @@ mod ui;
 
 #[cfg(windows)]
 mod overlay {
+    use std::cell::Cell;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
@@ -115,16 +116,17 @@ mod overlay {
     /// （实测有机器 40 秒加载里 opengl32 换帧数为 0、游戏却正常渲染）。
     static GDI_SWAP_TARGET: AtomicU64 = AtomicU64::new(0);
     static ORIGINAL_GDI_SWAP: AtomicU64 = AtomicU64::new(0);
-    /// 最近一次覆盖绘制的时间 / HDC / GL 上下文。
-    ///
-    /// 只有「同一 HDC + 同一 GL 上下文」在 5ms 内的重复触发才算同一帧；
-    /// 不同 swap 路径/上下文必须各自绘制，否则被跳过的那一路会把没有覆盖层的
-    /// 游戏画面呈现出来（42.22 加载期闪屏/黑块的直接嫌疑）。
-    static LAST_PAINT_MS: AtomicU64 = AtomicU64::new(0);
-    static LAST_PAINT_HDC: AtomicU64 = AtomicU64::new(0);
-    static LAST_PAINT_CONTEXT: AtomicU64 = AtomicU64::new(0);
     /// 覆盖绘制次数（和换帧数对比，判断是否漏掉某个呈现路径）。
     static PAINT_COUNT: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        /// 是否正处在「外层 swap hook 调用原始实现」的过程中。
+        ///
+        /// 某些驱动的 `opengl32!wglSwapBuffers` 内部会再调 `gdi32!SwapBuffers`，
+        /// 两条 hook 会为**同一次呈现**各触发一次；内层只需要跳过这一次重复绘制。
+        /// 绝不能按时间窗猜测：高帧率下 5ms 去重会真的丢掉独立帧，
+        /// 被丢掉的帧呈现的就是没有覆盖层的游戏画面 —— 也就是用户看到的闪屏。
+        static INSIDE_OUTER_SWAP: Cell<bool> = const { Cell::new(false) };
+    }
     /// `glBindFramebuffer` 地址缓存（GL 3.0 函数，opengl32.dll 不导出，只能运行时解析）。
     static BIND_FRAMEBUFFER: AtomicU64 = AtomicU64::new(PTR_UNRESOLVED);
     /// 界面纹理与版本（内容变化才重新上传）。
@@ -355,7 +357,7 @@ mod overlay {
         }
 
         crate::ui::note_started();
-        paint_red_while_active(hdc);
+        paint_red_while_active();
 
         if original == 0 {
             // 理论上不会发生（enable 之前一定先写入原始地址）。
@@ -366,7 +368,13 @@ mod overlay {
         // SAFETY: original 由 MinHook 提供，指向未打补丁的原始 wglSwapBuffers。
         let original_fn: WglSwapBuffersFn =
             unsafe { std::mem::transmute(original as usize as *const c_void) };
-        unsafe { original_fn(hdc) }
+        // 原始 wglSwapBuffers 在部分驱动里会再调 gdi32!SwapBuffers（那条也被我们挂钩）；
+        // 标记外层调用，内层就只补画一次，避免同一次呈现重复绘制。
+        // `try_with`：线程销毁阶段 TLS 可能不可用，绝不能在这里 panic 穿越 extern "system"。
+        let previous = INSIDE_OUTER_SWAP.try_with(|flag| flag.replace(true)).unwrap_or(false);
+        let result = unsafe { original_fn(hdc) };
+        let _ = INSIDE_OUTER_SWAP.try_with(|flag| flag.set(previous));
+        result
     }
 
     /// `gdi32!SwapBuffers` 的 hook 回调：与 wglSwapBuffers 完全同构。
@@ -393,7 +401,12 @@ mod overlay {
         }
 
         crate::ui::note_started();
-        paint_red_while_active(hdc);
+        // 外层 wglSwapBuffers 调用的原始实现可能再走到这里：同一次呈现无需重画。
+        // 游戏直接调用 gdi32!SwapBuffers 时 nested=false，照常绘制。
+        let nested = INSIDE_OUTER_SWAP.try_with(|flag| flag.get()).unwrap_or(false);
+        if !skip_paint_for_nested_swap(nested) {
+            paint_red_while_active();
+        }
 
         if original == 0 {
             return 1;
@@ -408,7 +421,7 @@ mod overlay {
     /// 额外 Hook `gdi32!SwapBuffers`：SwapBuffers 本来就是 GDI 导出，
     /// 部分 LWJGL 胶水直接调它（这类机器上 opengl32!wglSwapBuffers 的换帧数为 0，
     /// 覆盖层永远出不来——见 docs/overlay-injection.md §7 的兜底方案）。
-    /// 两条路径同帧都触发时由 should_paint_this_frame 去重，不会画两遍。
+    /// 两条路径同一次呈现都触发时，只有内层（外层调用原始实现期间）跳过绘制。
     ///
     /// （`wglMakeCurrent` 强制呈现机制已整体下线：它会在主菜单等场景周期性闪出
     /// 覆盖层帧，且在游戏加载期几乎不呈现的机器上画出的经常是视口未就绪的纯红——
@@ -528,52 +541,22 @@ mod overlay {
         log("已摘除全部 Hook，覆盖层代码停止（DLL 保持驻留以避免卸载风险）。");
     }
 
-    /// 覆盖绘制闸门：只做一次原子读，停止后完全不再碰 GL；同一帧的重复触发直接跳过。
-    fn paint_red_while_active(hdc: *mut c_void) {
+    /// 覆盖绘制闸门：停止后完全不再碰 GL；除此之外**每一次 swap 调用都绘制**，
+    /// 包括同一帧里两条 swap 路径先后触发的情况（重复绘制只是多一次全屏四边形，
+    /// 漏绘制则会把没有覆盖层的游戏画面呈现出来）。
+    fn paint_red_while_active() {
         if !OVERLAY_ACTIVE.load(Ordering::Acquire) {
             return;
         }
-        if !should_paint_this_frame(hdc) {
-            return;
-        }
-        // SAFETY: 该回调由 wglSwapBuffers 触发，调用线程上一定有当前 GL 上下文。
+        PAINT_COUNT.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: 该回调由 wglSwapBuffers / SwapBuffers 触发，调用线程上一定有当前 GL 上下文。
         unsafe { paint_red_frame() };
     }
 
-    /// 同一 HDC + 同一 GL 上下文、5ms 内的重复触发才是同一帧。
-    fn should_paint_for(
-        last_ms: u64,
-        last_hdc: u64,
-        last_context: u64,
-        now_ms: u64,
-        hdc: u64,
-        context: u64,
-    ) -> bool {
-        !(last_ms != 0
-            && now_ms.saturating_sub(last_ms) < 5
-            && last_hdc == hdc
-            && last_context == context)
-    }
-
-    fn should_paint_this_frame(hdc: *mut c_void) -> bool {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|value| value.as_millis() as u64)
-            .unwrap_or(0);
-        let hdc = hdc as usize as u64;
-        let context = unsafe { wglGetCurrentContext() } as usize as u64;
-        let last_ms = LAST_PAINT_MS.load(Ordering::Acquire);
-        let last_hdc = LAST_PAINT_HDC.load(Ordering::Acquire);
-        let last_context = LAST_PAINT_CONTEXT.load(Ordering::Acquire);
-        if !should_paint_for(last_ms, last_hdc, last_context, now, hdc, context) {
-            return false;
-        }
-        LAST_PAINT_MS.store(now, Ordering::Release);
-        LAST_PAINT_HDC.store(hdc, Ordering::Release);
-        LAST_PAINT_CONTEXT.store(context, Ordering::Release);
-        PAINT_COUNT.fetch_add(1, Ordering::Relaxed);
-        true
+    /// 内层 swap（外层 hook 调用的原始实现又走了另一条被挂钩的 swap）只补画一次。
+    /// 这是唯一允许跳过绘制的场景；任何真实的呈现都必须画，否则游戏画面会漏出来。
+    fn skip_paint_for_nested_swap(nested: bool) -> bool {
+        nested
     }
 
     /// 诊断用：覆盖层实际绘制了多少帧（UI 心跳日志里和「换帧」对比）。
@@ -583,20 +566,14 @@ mod overlay {
 
     #[cfg(test)]
     mod paint_tests {
-        use super::should_paint_for;
+        use super::skip_paint_for_nested_swap;
 
         #[test]
-        fn dedupes_only_the_same_hdc_and_context() {
-            // 同一 HDC + 同一上下文、5ms 内：同一帧，跳过。
-            assert!(!should_paint_for(1_000, 11, 22, 1_004, 11, 22));
-            // 同一 HDC 但不同 GL 上下文：必须各自绘制。
-            assert!(should_paint_for(1_000, 11, 22, 1_004, 11, 33));
-            // 同一上下文但不同 HDC（两条 swap 路径）：必须各自绘制。
-            assert!(should_paint_for(1_000, 11, 22, 1_004, 33, 22));
-            // 超过 5ms：允许重绘。
-            assert!(should_paint_for(1_000, 11, 22, 1_006, 11, 22));
-            // 第一次绘制永远放行。
-            assert!(should_paint_for(0, 0, 0, 1_004, 11, 22));
+        fn skips_only_the_nested_duplicate_swap() {
+            // 外层 swap 调用原始实现期间，内层那条 swap 路径再去画一遍没有意义。
+            assert!(skip_paint_for_nested_swap(true));
+            // 独立的呈现（游戏直接调这条 swap）必须绘制，一帧都不能漏。
+            assert!(!skip_paint_for_nested_swap(false));
         }
     }
 

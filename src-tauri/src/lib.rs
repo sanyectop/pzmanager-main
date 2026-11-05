@@ -205,6 +205,10 @@ struct AppSettings {
     shader_download_threads: Option<usize>,
     memory_limit_mb: Option<u64>,
     translation_language: Option<String>,
+    /// 「通用 › 翻译引擎」：auto = 默认链（必应 → Google → MyMemory）；其余为手动指定的
+    /// 优先引擎（bing / google / mymemory / relay），失败后仍按默认顺序回退其余引擎。
+    #[serde(default)]
+    translation_engine: Option<String>,
     font_contrast: Option<u8>,
     /// 「模糊度」百分比：0 = 关掉模糊，100 = 设计基准，上限 200。没写过按 100 处理。
     blur_strength: Option<u8>,
@@ -215,6 +219,15 @@ struct AppSettings {
     /// 记住的窗口尺寸（逻辑像素）。缺失 = 用 tauri.conf.json 的默认 840×560。
     window_width: Option<u32>,
     window_height: Option<u32>,
+    /// 「窗口 › 原生窗口标题栏」：开启后交给系统画标题栏（decorations），
+    /// 作为自绘标题栏在个别设备 / WebView 上拖不动的兜底。缺失 = 关（自绘）。
+    #[serde(default)]
+    native_titlebar: bool,
+    /// 「启动详情 › 启动参数」：用户在启动详情里编辑的 JVM 参数（逐条存放）。
+    /// 缺失 / 空 = 用前端的默认列表（`-agentlib:zbNative` + `--`）。
+    /// 只存用户填的内容；「方案不使用加载器」时的 agent 摘除在启动时做，不改这份记录。
+    #[serde(default)]
+    launch_arguments: Vec<String>,
     /// 覆盖层背景色（`#RRGGBB`）。缺失 = 默认纯红；启动器写状态文件时下发给 DLL。
     overlay_background_color: Option<String>,
     /// 「模组加载器方案」（`zombieBuddy` / `none`），决定启动前要不要挂加载器 agent。
@@ -223,6 +236,11 @@ struct AppSettings {
     /// 短路它内部的 ClassGraph 扫描。只在方案 = zombieBuddy 时生效；任何失败都回退原生扫描。
     #[serde(default)]
     fast_launch: bool,
+    /// 「启动时保留 JAR 模组启用状态」：开启后启动 / 自动扫描不再把
+    /// `jar-mod-state.json` 的记录套回 `mod.info`，而是把磁盘上当前的启用状态
+    /// 读作基准（只回写记录，不改动模组文件）。默认开启。
+    #[serde(default = "default_jar_mod_use_disk_state_on_startup")]
+    jar_mod_use_disk_state_on_startup: bool,
     #[serde(default)]
     developer_mode: bool,
     #[serde(default)]
@@ -266,6 +284,11 @@ struct AppSettings {
 }
 
 fn default_version_parallel_enabled() -> bool {
+    true
+}
+
+/// 新装 / 老设置文件缺少该字段时，默认「启动时保留 JAR 模组启用状态」。
+pub(crate) fn default_jar_mod_use_disk_state_on_startup() -> bool {
     true
 }
 
@@ -402,8 +425,9 @@ fn scan_zombie_buddy_jar_mods() -> Result<Vec<ScannedJarMod>, String> {
     #[cfg(windows)]
     {
         let roots = jar_scan_inputs();
-        let state = read_jar_mod_state(&jar_mod_state_path()?)?;
-        apply_jar_mod_state_to_roots(&roots, &state)?;
+        let state_path = jar_mod_state_path()?;
+        let mut state = read_jar_mod_state(&state_path)?;
+        sync_jar_mod_state_on_startup(&roots, &mut state, &state_path)?;
         Ok(scan_jar_mods_at(&roots))
     }
 }
@@ -624,6 +648,13 @@ fn project_zomboid_running() -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+    // 部分机器（如无 Xbox 服务的机器）上游戏进程名不是 ProjectZomboid64.exe /
+    // javaw.exe（任务管理器里显示为 wsappx），tasklist 按映像名过滤会漏 ——
+    // 先按窗口标题兜底识别一次。
+    if overlay_session::game_window_pid().is_some() {
+        return true;
+    }
+
     std::process::Command::new("tasklist")
         .args(["/FI", "IMAGENAME eq ProjectZomboid64.exe", "/NH"])
         .creation_flags(CREATE_NO_WINDOW)
@@ -646,6 +677,13 @@ fn ensure_game_closed() -> Result<(), String> {
         return Err("请先关闭 Project Zomboid，再执行版本操作。".to_string());
     }
     Ok(())
+}
+
+/// 前端在弹确认框**之前**先用它挡一手：游戏开着时还原必然失败，
+/// 与其让用户读完确认文案再吃错误，不如直接提示。
+#[tauri::command]
+fn is_project_zomboid_running() -> Result<bool, String> {
+    Ok(project_zomboid_running())
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,6 +1163,13 @@ fn version_step_for(operation: &str, phase: &str) -> u32 {
             _ => 0,
         },
         "verify" | "modVerify" => 1,
+        // 转换独立版本：重写增量包一步，按文件/字节上报。
+        "rebase" | "modRebase" => 1,
+        // 删除旧版本时可能先重挂后续版本（phase = rebase），再删文件（phase = deleting）。
+        "delete" | "modDelete" => match phase {
+            "rebase" | "deleting" => 1,
+            _ => 0,
+        },
         // 一键保存 / 还原整套模组：只有一步（进度按模组等分）。
         "modSaveAll" | "modRestorePack" => match phase {
             "preparing" | "scanning" | "hashing" | "mods" => 1,
@@ -1378,10 +1423,8 @@ fn get_version_store_path() -> Result<String, String> {
 
 #[tauri::command(async)]
 fn save_version_system_drive_notice_dismissed(dismissed: bool) -> Result<(), String> {
-    let settings_path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&settings_path)?;
-    settings.version_system_drive_notice_dismissed = dismissed;
-    save_app_settings_at(&settings_path, &settings)
+    update_app_settings(|settings| settings.version_system_drive_notice_dismissed = dismissed)?;
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -1407,18 +1450,16 @@ fn save_version_store_path(path: String) -> Result<(), String> {
         Some(candidate)
     };
 
-    let settings_path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&settings_path)?;
-    settings.version_store_path = next.map(|value| value.to_string_lossy().into_owned());
-    save_app_settings_at(&settings_path, &settings)
+    update_app_settings(|settings| {
+        settings.version_store_path = next.map(|value| value.to_string_lossy().into_owned());
+    })?;
+    Ok(())
 }
 
 #[tauri::command(async)]
 fn save_version_parallel(enabled: bool) -> Result<(), String> {
-    let settings_path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&settings_path)?;
-    settings.version_parallel = enabled;
-    save_app_settings_at(&settings_path, &settings)
+    update_app_settings(|settings| settings.version_parallel = enabled)?;
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -1652,6 +1693,14 @@ fn start_version_verify(app: tauri::AppHandle) -> Result<u64, String> {
     })
 }
 
+#[tauri::command(async)]
+fn start_version_rebase(app: tauri::AppHandle, version_id: String) -> Result<u64, String> {
+    let store_path = configured_version_store_path()?;
+    spawn_version_operation(app, "rebase", 1, move |progress| {
+        versioning::rebase_version_progress(&store_path, &version_id, progress)
+    })
+}
+
 #[tauri::command]
 fn cancel_version_operation() -> Result<(), String> {
     if VERSION_OPERATION_ACTIVE.load(Ordering::SeqCst) {
@@ -1663,23 +1712,45 @@ fn cancel_version_operation() -> Result<(), String> {
 #[tauri::command(async)]
 fn delete_version(app: tauri::AppHandle, version_id: String) -> Result<u64, String> {
     let store_path = configured_version_store_path()?;
-    // 删除量可能上 GB：走后台操作上报进度（进度回调吞掉取消请求——
-    // meta 已先落盘，中途停止只会留下孤儿文件，删完为止反而更可控）。
+    // 删除量可能上 GB：走后台操作上报进度。删除阶段吞掉取消请求——
+    // meta 已先落盘，中途停止只会留下孤儿文件，删完为止反而更可控；
+    // 删旧版本前的「转换为独立版本」仍允许取消。
     spawn_version_operation(app, "delete", 1, move |progress| {
-        let mut non_cancellable = |event: versioning::ProgressEvent| {
-            let _ = progress(event);
-            Ok(())
+        let mut guarded = |event: versioning::ProgressEvent| {
+            if event.phase == "deleting" {
+                let _ = progress(event);
+                Ok(())
+            } else {
+                progress(event)
+            }
         };
-        versioning::delete_version_progress(&store_path, &version_id, &mut non_cancellable)
+        versioning::delete_version_with_rebase_progress(&store_path, &version_id, &mut guarded)
+    })
+}
+
+#[tauri::command(async)]
+fn delete_version_through(app: tauri::AppHandle, version_id: String) -> Result<u64, String> {
+    let store_path = configured_version_store_path()?;
+    // 删除量可能上 GB：走后台操作上报进度。删除阶段吞掉取消请求——
+    // meta 已先落盘，中途停止只会留下孤儿文件，删完为止反而更可控；
+    // 重建新基准（copying）与重挂（rebase）阶段仍允许取消。
+    spawn_version_operation(app, "delete", 1, move |progress| {
+        let mut guarded = |event: versioning::ProgressEvent| {
+            if event.phase == "deleting" {
+                let _ = progress(event);
+                Ok(())
+            } else {
+                progress(event)
+            }
+        };
+        versioning::delete_versions_through_progress(&store_path, &version_id, &mut guarded)
     })
 }
 
 #[tauri::command(async)]
 fn save_version_include_mods(enabled: bool) -> Result<(), String> {
-    let settings_path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&settings_path)?;
-    settings.version_include_mods = enabled;
-    save_app_settings_at(&settings_path, &settings)
+    update_app_settings(|settings| settings.version_include_mods = enabled)?;
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -1841,12 +1912,59 @@ fn delete_mod_version(
     let store = mod_version_store(&root, &store_base)?;
     let target = mod_operation_root(&root);
     spawn_version_operation_with(app, "mod-version-progress", "modDelete", target, 1, move |progress| {
-        let mut non_cancellable = |event: versioning::ProgressEvent| {
-            let _ = progress(event);
-            Ok(())
+        let mut guarded = |event: versioning::ProgressEvent| {
+            if event.phase == "deleting" {
+                let _ = progress(event);
+                Ok(())
+            } else {
+                progress(event)
+            }
         };
-        versioning::delete_version_progress(&store, &version_id, &mut non_cancellable)
+        versioning::delete_version_with_rebase_progress(&store, &version_id, &mut guarded)
     })
+}
+
+#[tauri::command(async)]
+fn delete_mod_version_through(
+    app: tauri::AppHandle,
+    root_path: String,
+    version_id: String,
+) -> Result<u64, String> {
+    let root = resolve_mod_root(&root_path)?;
+    let store_base = configured_version_store_path()?;
+    let store = mod_version_store(&root, &store_base)?;
+    let target = mod_operation_root(&root);
+    spawn_version_operation_with(app, "mod-version-progress", "modDelete", target, 1, move |progress| {
+        let mut guarded = |event: versioning::ProgressEvent| {
+            if event.phase == "deleting" {
+                let _ = progress(event);
+                Ok(())
+            } else {
+                progress(event)
+            }
+        };
+        versioning::delete_versions_through_progress(&store, &version_id, &mut guarded)
+    })
+}
+
+#[tauri::command(async)]
+fn start_mod_version_rebase(
+    app: tauri::AppHandle,
+    root_path: String,
+    version_id: String,
+) -> Result<u64, String> {
+    let root = resolve_mod_root(&root_path)?;
+    let store_base = configured_version_store_path()?;
+    let store = mod_version_store(&root, &store_base)?;
+    let target = mod_operation_root(&root);
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modRebase",
+        target,
+        1,
+        move |progress| versioning::rebase_version_progress(&store, &version_id, progress),
+    )
 }
 
 #[tauri::command(async)]
@@ -2028,20 +2146,20 @@ fn save_shader_download_settings(
     if !(1..=16).contains(&threads) {
         return Err("下载线程数必须在 1 到 16 之间".to_string());
     }
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.shader_download_url = if url.trim().is_empty() {
-        None
-    } else {
-        Some(url.trim().to_string())
-    };
-    settings.shader_download_directory = if directory.trim().is_empty() {
-        None
-    } else {
-        Some(directory.trim().to_string())
-    };
-    settings.shader_download_threads = Some(threads);
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| {
+        settings.shader_download_url = if url.trim().is_empty() {
+            None
+        } else {
+            Some(url.trim().to_string())
+        };
+        settings.shader_download_directory = if directory.trim().is_empty() {
+            None
+        } else {
+            Some(directory.trim().to_string())
+        };
+        settings.shader_download_threads = Some(threads);
+    })?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2076,11 +2194,12 @@ async fn download_shader_file(
 fn save_steam_relay_settings(mode: String, base: String) -> Result<(), String> {
     let mode = steam_relay::normalize_relay_mode(&mode)
         .ok_or_else(|| format!("不支持的 Steam 网络加速模式: {mode}"))?;
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.steam_relay_mode = Some(mode);
-    settings.steam_relay_base = Some(steam_relay::normalize_relay_base(&base));
-    save_app_settings_at(&path, &settings)
+    let normalized_base = steam_relay::normalize_relay_base(&base);
+    update_app_settings(|settings| {
+        settings.steam_relay_mode = Some(mode);
+        settings.steam_relay_base = Some(normalized_base);
+    })?;
+    Ok(())
 }
 
 /// 设置页「本地代理」：空串 = 清空（退回系统代理）。填了但不合法时明确报错，
@@ -2094,10 +2213,8 @@ fn save_steam_proxy(proxy: String) -> Result<(), String> {
             format!("代理地址无效: {proxy}（示例：http://127.0.0.1:7897 或 socks5://127.0.0.1:1080）")
         })?)
     };
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.steam_proxy = normalized;
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.steam_proxy = normalized)?;
+    Ok(())
 }
 
 /// 设置页「自动检测本地代理」：探常见 HTTP/SOCKS 端口，返回真能访问 Steam 的。
@@ -2198,11 +2315,10 @@ fn restore_fast_launch_backup() -> Result<bool, String> {
 #[tauri::command]
 fn save_silent_memory_cleanup(enabled: bool, threshold_percent: u8) -> Result<(), String> {
     let threshold = memclean::normalize_threshold(threshold_percent);
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.silent_memory_cleanup = enabled;
-    settings.silent_memory_cleanup_threshold = threshold;
-    save_app_settings_at(&path, &settings)?;
+    update_app_settings(|settings| {
+        settings.silent_memory_cleanup = enabled;
+        settings.silent_memory_cleanup_threshold = threshold;
+    })?;
     memclean::set_silent_cleanup(enabled, threshold);
     Ok(())
 }
@@ -2210,19 +2326,14 @@ fn save_silent_memory_cleanup(enabled: bool, threshold_percent: u8) -> Result<()
 /// 保存「启动时清理内存」开关；真正的清理发生在 [`launch_project_zomboid`] 里。
 #[tauri::command]
 fn save_clean_memory_on_launch(enabled: bool) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.clean_memory_on_launch = enabled;
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.clean_memory_on_launch = enabled)?;
+    Ok(())
 }
 
 /// 保存「激进内存清理」开关；后端立刻同步给 memclean，下一次清理就按新模式跑。
 #[tauri::command]
 fn save_aggressive_memory_clean(enabled: bool) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.aggressive_memory_clean = enabled;
-    save_app_settings_at(&path, &settings)?;
+    update_app_settings(|settings| settings.aggressive_memory_clean = enabled)?;
     memclean::set_aggressive_cleanup(enabled);
     Ok(())
 }
@@ -2269,13 +2380,18 @@ fn patch_steam_launch_options_at_paths(
     config_paths: &[PathBuf],
     memory_mb: Option<u64>,
     extra_args: &[String],
+    policy_agent: Option<&str>,
 ) -> Result<bool, String> {
     let mut changed_files = Vec::new();
     for path in config_paths {
         let content =
             fs::read_to_string(path).map_err(|error| format!("读取 Steam 配置失败: {error}"))?;
-        let (patched, changed) =
-            patch_steam_launch_options_content_with_memory(&content, memory_mb, extra_args)?;
+        let (patched, changed) = patch_steam_launch_options_content_with_memory(
+            &content,
+            memory_mb,
+            extra_args,
+            policy_agent,
+        )?;
         if changed {
             changed_files.push((path.clone(), patched.into_bytes()));
         }
@@ -2560,6 +2676,7 @@ fn launch_project_zomboid(
             &steam_configs,
             Some(memory_mb),
             &effective_launch_args,
+            policy_agent,
         )?;
 
         // 再改写游戏自带的启动文件：内存上限始终写（与加载器无关，否则 JSON 里旧的 -Xmx
@@ -2681,6 +2798,15 @@ pub fn run() {
             // 恢复上一次记住的窗口尺寸（拖动窗口边缘调整后会自动记住）。
             // 默认 840×560 由 tauri.conf.json 提供，这里只在有有效记录时覆盖。
             if let Some(settings) = loaded_settings.as_ref() {
+                // 原生标题栏开关在窗口内容出现前应用，避免先画出自绘栏再跳一次。
+                if settings.native_titlebar {
+                    use tauri::Manager;
+                    if let Some(window) = app.get_webview_window("main") {
+                        if let Err(error) = window.set_decorations(true) {
+                            launcher_log::error(&format!("启用原生标题栏失败：{error}"));
+                        }
+                    }
+                }
                 if let (Some(width), Some(height)) = (settings.window_width, settings.window_height) {
                     let width = clamp_window_width(width);
                     let height = clamp_window_height(height);
@@ -2711,6 +2837,7 @@ pub fn run() {
             save_developer_mode,
             save_steam_account_hidden,
             save_translation_language,
+            save_translation_engine,
             save_font_contrast,
             save_blur_strength,
             save_font_scale,
@@ -2718,7 +2845,10 @@ pub fn run() {
             save_overlay_background_color,
             save_window_size,
             restore_default_window_size,
+            save_native_titlebar,
+            save_launch_arguments,
             save_mod_loader_scheme,
+            save_jar_mod_use_disk_state_on_startup,
             save_fast_launch,
             save_silent_memory_cleanup,
             save_clean_memory_on_launch,
@@ -2735,8 +2865,10 @@ pub fn run() {
             start_version_capture,
             start_version_restore,
             start_version_verify,
+            start_version_rebase,
             cancel_version_operation,
             delete_version,
+            delete_version_through,
             save_version_include_mods,
             list_mod_version_targets,
             get_mod_version_status,
@@ -2744,7 +2876,9 @@ pub fn run() {
             start_mod_version_capture,
             start_mod_version_restore,
             start_mod_version_verify,
+            start_mod_version_rebase,
             delete_mod_version,
+            delete_mod_version_through,
             list_mod_version_packs,
             delete_mod_version_pack,
             rename_mod_version_pack,
@@ -2756,6 +2890,7 @@ pub fn run() {
             get_memory_status,
             clean_memory_now,
             is_launcher_elevated,
+            is_project_zomboid_running,
             restart_as_admin,
             fast_launch_cache_status,
             startup_timing,
@@ -2780,6 +2915,7 @@ pub fn run() {
             auto_sort_lua_mods,
             save_privacy_consent,
             clear_privacy_consent,
+            clear_launcher_user_data,
             save_mod_preset,
             apply_mod_preset,
             delete_mod_preset,

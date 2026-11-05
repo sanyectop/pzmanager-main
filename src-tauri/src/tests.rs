@@ -1,5 +1,6 @@
 use super::{
-    apply_file_transaction, apply_jar_mod_state_to_roots, apply_launch_loader_at_paths,
+    adopt_jar_mod_state_from_roots, apply_file_transaction, apply_jar_mod_state_to_roots,
+    apply_launch_loader_at_paths,
     build_fast_launch_cache, class_annotations, compose_title_background_at,
     configure_viewpoint_three_d_at_paths, create_fast_launch_backup_at, delete_shaderpack_at,
     discover_mod_info_files, fast_launch_cache_matches, fast_launch_cache_mods_at,
@@ -11,7 +12,8 @@ use super::{
     load_app_settings_at, merge_lua_mod_entry, mod_inner_event, mod_jar_path,
     mod_loader_policy_agent, mod_marker_event, mod_poster_path, mod_progress_units,
     normalize_blur_strength, normalize_font_contrast, normalize_font_family,
-    normalize_font_scale, normalize_mod_loader_scheme, normalize_translation_language,
+    normalize_font_scale, normalize_mod_loader_scheme, normalize_translation_engine,
+    normalize_translation_language,
     clamp_window_height, clamp_window_width, order_mod_ids_by_requires,
     normalize_overlay_background_color,
     parse_default_mod_ids, parse_java_mod_info, parse_lua_mod_info, parse_lua_sorting_rules,
@@ -19,6 +21,7 @@ use super::{
     patch_json_launcher_content, patch_json_launcher_content_with_memory,
     patch_json_launcher_with_agent, patch_steam_launch_options_content,
     patch_steam_launch_options_content_with_memory, pick_lua_mod_id, plan_lua_mod_enable,
+    quoted_key, replace_vdf_value,
     pz_optimization_status, read_default_mod_ids, read_fast_launch_cache_at,
     read_jar_mod_state, read_viewpoint_shot_at, restore_fast_launch_backup_at,
     save_app_settings_at, scan_jar_mods_at_with_callback, set_jar_mod_info_enabled,
@@ -154,15 +157,19 @@ fn persists_background_and_memory_settings() {
         shader_download_threads: None,
         memory_limit_mb: Some(8192),
         translation_language: Some("ja".to_string()),
+        translation_engine: Some("bing".to_string()),
         font_contrast: Some(45),
         blur_strength: Some(120),
         font_family: Some("\"Microsoft YaHei UI\", sans-serif".to_string()),
         font_scale: Some(110),
         window_width: Some(970),
         window_height: Some(600),
+        native_titlebar: true,
+        launch_arguments: vec!["-agentlib:zbNative".to_string(), "--".to_string()],
         overlay_background_color: Some("#1E90FF".to_string()),
         mod_loader_scheme: Some("none".to_string()),
         fast_launch: false,
+        jar_mod_use_disk_state_on_startup: true,
         developer_mode: true,
         steam_account_hidden: true,
         silent_memory_cleanup: true,
@@ -183,6 +190,26 @@ fn persists_background_and_memory_settings() {
     save_app_settings_at(&path, &settings).unwrap();
 
     assert_eq!(load_app_settings_at(&path).unwrap(), settings);
+}
+
+#[test]
+fn jar_mod_disk_state_defaults_to_enabled_for_new_or_old_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    // 没有设置文件（新安装）。
+    let missing = load_app_settings_at(&temp.path().join("settings.json")).unwrap();
+    assert!(missing.jar_mod_use_disk_state_on_startup);
+
+    // 老设置文件（没有这个字段）。
+    let path = temp.path().join("legacy-settings.json");
+    fs::write(&path, "{}\n").unwrap();
+    let legacy = load_app_settings_at(&path).unwrap();
+    assert!(legacy.jar_mod_use_disk_state_on_startup);
+
+    // 用户显式关闭后要能读回 false。
+    let mut settings = legacy;
+    settings.jar_mod_use_disk_state_on_startup = false;
+    save_app_settings_at(&path, &settings).unwrap();
+    assert!(!load_app_settings_at(&path).unwrap().jar_mod_use_disk_state_on_startup);
 }
 
 #[test]
@@ -533,6 +560,24 @@ fn normalizes_translation_language_setting() {
     // 设置页没提供的语言和空值不能被悄悄当成 English，交给默认值处理。
     assert_eq!(normalize_translation_language("de"), None);
     assert_eq!(normalize_translation_language(""), None);
+}
+
+#[test]
+fn normalizes_translation_engine_setting() {
+    assert_eq!(normalize_translation_engine("auto").as_deref(), Some("auto"));
+    assert_eq!(normalize_translation_engine("Bing").as_deref(), Some("bing"));
+    assert_eq!(
+        normalize_translation_engine(" Google ").as_deref(),
+        Some("google")
+    );
+    assert_eq!(
+        normalize_translation_engine("MyMemory").as_deref(),
+        Some("mymemory")
+    );
+    assert_eq!(normalize_translation_engine("RELAY").as_deref(), Some("relay"));
+    // 设置页没提供的引擎和空值交给默认值（auto）处理。
+    assert_eq!(normalize_translation_engine("yandex"), None);
+    assert_eq!(normalize_translation_engine(""), None);
 }
 
 #[test]
@@ -1673,6 +1718,7 @@ fn writes_memory_and_extra_arguments_to_steam_launch_options() {
         content,
         Some(8192),
         &["-debug".to_string()],
+        Some(ZOMBIE_BUDDY_POLICY_AGENT),
     )
     .unwrap();
 
@@ -1681,8 +1727,13 @@ fn writes_memory_and_extra_arguments_to_steam_launch_options() {
         r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -Xmx8192m -- -novid -debug""#
     ));
 
-    let (patched_again, changed_again) =
-        patch_steam_launch_options_content_with_memory(&patched, Some(16384), &[]).unwrap();
+    let (patched_again, changed_again) = patch_steam_launch_options_content_with_memory(
+        &patched,
+        Some(16384),
+        &[],
+        Some(ZOMBIE_BUDDY_POLICY_AGENT),
+    )
+    .unwrap();
     assert!(changed_again);
     assert!(patched_again
         .contains(r#""-agentlib:zbNative=policy=allow-all -Xmx16384m -- -novid -debug""#));
@@ -2452,6 +2503,39 @@ fn reapplies_user_state_after_mod_info_is_redownloaded() {
 }
 
 #[test]
+fn adopts_disk_state_as_baseline_without_touching_mod_info() {
+    let temp = tempfile::tempdir().unwrap();
+    let mods_root = temp.path().join("mods");
+    let mod_root = mods_root.join("Example");
+    fs::create_dir_all(&mod_root).unwrap();
+    // 磁盘上是禁用态（只有 mod.info.disabled），记录里却写着启用。
+    fs::write(
+        mod_root.join("mod.info.disabled"),
+        "name=Example Mod\nid=Example\njavaJarFile=Example.jar\njavaPkgName=example.patch\n",
+    )
+    .unwrap();
+    fs::write(mod_root.join("Example.jar"), b"jar").unwrap();
+    let mut state = JarModStateFile {
+        format_version: 1,
+        mods: vec![JarModStateEntry {
+            mod_dir: mod_root.to_string_lossy().into_owned(),
+            mod_id: "Example".to_string(),
+            workshop_id: None,
+            package_name: "example.patch".to_string(),
+            disabled: false,
+        }],
+    };
+
+    let changed = adopt_jar_mod_state_from_roots(std::slice::from_ref(&mods_root), &mut state);
+
+    assert_eq!(changed, 1);
+    assert!(state.mods[0].disabled);
+    // 以磁盘为基准：文件保持原样，不能被改回启用。
+    assert!(!mod_root.join("mod.info").exists());
+    assert!(mod_root.join("mod.info.disabled").exists());
+}
+
+#[test]
 fn persists_jar_mod_state_in_user_data_file() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("jar-mod-state.json");
@@ -2472,4 +2556,82 @@ fn persists_jar_mod_state_in_user_data_file() {
     assert_eq!(loaded.mods.len(), 1);
     assert_eq!(loaded.mods[0].mod_id, "Example");
     assert!(loaded.mods[0].disabled);
+}
+
+/// LaunchOptions 值里带转义引号（Steam 里写过带引号的路径参数）时，
+/// 按值重写不能把原文尾巴拼回闭引号后面 —— 那会让整个 localconfig.vdf 从这行起解析错乱。
+#[test]
+fn replaces_vdf_value_respecting_escaped_quotes() {
+    let line = r#"					"LaunchOptions" "\"C:\my dir\a.jar\" -novid""#;
+    let patched =
+        replace_vdf_value(line, "-agentlib:zbNative=policy=allow-all -- -novid").unwrap();
+    assert_eq!(
+        patched,
+        r#"					"LaunchOptions" "-agentlib:zbNative=policy=allow-all -- -novid""#
+    );
+
+    // 无转义的普通值行为不变。
+    let plain = "\t\t\"LaunchOptions\" \"-novid\"";
+    let patched = replace_vdf_value(plain, "-Xmx4096m").unwrap();
+    assert_eq!(patched, "\t\t\"LaunchOptions\" \"-Xmx4096m\"");
+    // 行尾的其它键值对不能被吃掉（old.txt 那种多键行）。
+    let multi = "\"LaunchOptions\" \"-novid\" \"SomeKey\" \"1\"";
+    let patched = replace_vdf_value(multi, "-debug").unwrap();
+    assert_eq!(patched, "\"LaunchOptions\" \"-debug\" \"SomeKey\" \"1\"");
+}
+
+/// Steam 写出的 localconfig.vdf 存在 "apps"（全小写）拼写：
+/// 首次插入 108600 条目时必须同样能找到节点，否则报"找不到 Apps 节点"。
+#[test]
+fn matches_app_and_launch_options_keys_case_insensitively() {
+    assert!(quoted_key("\t\t\"apps\"", "Apps"));
+    assert!(quoted_key("\t\t\"Apps\"", "apps"));
+    assert!(quoted_key("\t\t\t\"LaunchOptions\" \"-novid\"", "launchoptions"));
+    assert!(!quoted_key("\t\t\"app\"", "Apps"));
+}
+
+/// 方案 = 「不使用加载器」时，Steam 启动项里的加载器 agent 必须被摘掉，
+/// 而不是每次改内存上限/启动时又被写回去。
+#[test]
+fn none_scheme_strips_loader_agent_from_steam_launch_options() {
+    let content = r#""UserLocalConfigStore"
+{
+"apps"
+{
+    "108600"
+    {
+        "LaunchOptions" "-agentlib:zbNative=policy=allow-all -Xmx8192m -- -novid"
+    }
+}
+}"#;
+
+    let (patched, changed) =
+        patch_steam_launch_options_content_with_memory(&content, Some(4096), &[], None).unwrap();
+
+    assert!(changed);
+    // agent 被摘掉、内存照写、其余参数保留；apps（小写）节点也能被识别。
+    assert!(!patched.contains("zbNative"));
+    assert!(patched.contains(r#""LaunchOptions" "-Xmx4096m -- -novid""#));
+}
+
+/// 旧版本把含转义引号的 LaunchOptions 行写坏（闭引号后残留原文尾巴）时，
+/// 新版在下次写入时整行重建，残留垃圾随之清除——用户无需手动去 Steam 清理。
+#[test]
+fn repairs_corrupted_launch_options_line_on_rewrite() {
+    // 旧 bug 的产物形状：正确值闭引号之后紧跟原值的残余（转义引号被截断处开始）。
+    let corrupted = concat!(
+        r#""UserLocalConfigStore""#,
+        "\n{\n\"apps\"\n{\n    \"108600\"\n    {\n",
+        r#"        "LaunchOptions" "-agentlib:zbNative=policy=allow-all -- -novid""C:\my dir\a.jar\" -novid""#,
+        "\n    }\n}\n}\n",
+    );
+
+    let (patched, changed) =
+        patch_steam_launch_options_content(&corrupted).unwrap();
+
+    assert!(changed);
+    assert!(patched.contains(
+        r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -- -novid""#
+    ));
+    assert!(!patched.contains("my dir"));
 }

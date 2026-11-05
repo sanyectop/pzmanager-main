@@ -33,7 +33,7 @@ import {
   STEAM_RELAY_MODE_OPTIONS,
   previewImageFallbackUrl,
 } from "./steamRelay";
-import { filterModVersionTargets, formatVersionBytes, formatVersionElapsed, formatVersionEta, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionChangeSummary, versionDeltaChainDepth, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, compareVersionStrings, parseDevBuildVersion, createVersionEtaTracker, updateVersionEta, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
+import { filterModVersionTargets, formatVersionBytes, formatVersionElapsed, formatVersionEta, formatVersionTime, modSourceLabel, shouldWarnVersionStoreOnSystemDrive, shortVersionHash, versionBaseTypeLabel, versionCanDelete, versionChangeSummary, versionDeltaChainDepth, versionHasDependent, versionIsStandalone, versionMatchLabel, versionPhaseLabel, versionProgressPercent, versionStepLabel, versionStoreOnSystemDrive, versionLabelById, compareVersionStrings, parseDevBuildVersion, createVersionEtaTracker, updateVersionEta, type ModVersionFilter, type ModVersionOperationUpdate, type ModVersionStatus, type ModVersionTarget, type ModPackRecord, type VersionOperationUpdate, type VersionRecord, type VersionStatus, type VersionVerifyResult } from "./versioning";
 import { DEV_OVERLAY_DLL_PATH } from "./overlayInjection";
 import { DEFAULT_SEASON_FEATURES, DEFAULT_WALLPAPER_EFFECT, normalizeWallpaperEffectSettings, wallpaperEffectAt, type SeasonFeatures, type WallpaperEffectSettings } from "./builtinWallpaper";
 import { SeasonalWallpaper, loadSeasonFeatures } from "./SeasonalWallpaper";
@@ -70,6 +70,7 @@ import {
   JarModBatchDecisionResult,
   JarModScanUpdate,
   LauncherLogTail,
+  LauncherUserDataClearResult,
   LauncherUpdateStatus,
   AutoSortLuaModsResult,
   LuaModBatchToggleResult,
@@ -119,6 +120,7 @@ import {
   DEFAULT_MOD_LOADER_SCHEME,
   DEFAULT_OVERLAY_BACKGROUND_COLOR,
   DEFAULT_SILENT_MEMORY_PERCENT,
+  DEFAULT_TRANSLATION_ENGINE,
   DEFAULT_TRANSLATION_LANGUAGE,
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -140,6 +142,7 @@ import {
   RESOURCE_DIALOG_EXIT_MS,
   SILENT_MEMORY_PERCENT_STEP,
   TASK_REMOVE_EXIT_MS,
+  TRANSLATION_ENGINE_OPTIONS,
   TRANSLATION_LANGUAGE_OPTIONS,
   VERSION_DIFF_EXIT_MS,
   ZOMBIE_BUDDY_WORKSHOP_ID,
@@ -190,9 +193,10 @@ import {
   translateInBatches,
 } from "./app/utils";
 import { BackgroundMenu } from "./components/backgrounds";
+import { ConfirmDialog, type ConfirmRequest } from "./components/confirm";
 import { FastLaunchCacheStatusLine, FastLaunchWarningDialog } from "./components/fastLaunch";
 import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWarningDialog, VersionStoreDriveDialog } from "./components/version";
-import { NotificationConsole, TaskCenterPanel, ToastViewport } from "./components/tasks";
+import { NotificationConsole, TaskArrivalFlight, TaskCenterPanel, ToastViewport } from "./components/tasks";
 import { ResourceDownloadBrowser, WorkshopDropdown, WorkshopTagPicker, WorkshopTagSelectionSummary } from "./components/workshop";
 import { WindowTitlebar, useDialogAutoHeight } from "./components/shell";
 
@@ -219,6 +223,12 @@ function App() {
   const [detection, setDetection] = useState<DetectionState>({ status: "checking" });
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastIdRef = useRef(0);
+  // 应用内确认弹窗（替代 window.confirm）：一次一个，Promise 拿到点击的动作值。
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  const [confirmClosing, setConfirmClosing] = useState(false);
+  const confirmResolveRef = useRef<((value: string) => void) | null>(null);
+  // settle 后延迟卸载弹窗的定时器；新弹窗打开时要撤掉它（见 showConfirm）。
+  const confirmExitTimerRef = useRef<number | null>(null);
   const [notificationHistory, setNotificationHistory] = useState<NotificationEntry[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   /** 正在播移除动画的任务 id；动画走完才真正从 tasks 里删掉。 */
@@ -228,6 +238,24 @@ function App() {
   const [taskPanelClosing, setTaskPanelClosing] = useState(false);
   const taskPanelCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const taskIdRef = useRef(0);
+  // 进行中的任务数：徽标显示它，也是飞入动画的触发源。
+  const taskRunningCount = tasks.filter((task) => task.status === "running").length;
+  // 新增任务时，计数徽标不从鼠标处直接显示，而是先飞过去（见 TaskArrivalFlight）；
+  // 飞行期间真实徽标以「预留态」挂在按钮上（绝对定位隐藏，不影响按钮宽度），
+  // 落地时才转入文档流并弹跳出现。
+  const [taskFlight, setTaskFlight] = useState<{
+    key: number;
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+    count: number;
+  } | null>(null);
+  const taskFlightKeyRef = useRef(0);
+  const taskFlightFallbackRef = useRef<number | null>(null);
+  const prevTaskRunningRef = useRef(0);
+  // 最近一次指针位置：任务由哪个点击/操作产生，徽标就从哪里起飞。
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   const [installing, setInstalling] = useState(false);
   const [installingPzOptimization, setInstallingPzOptimization] = useState(false);
   const [uninstallingPzOptimization, setUninstallingPzOptimization] = useState(false);
@@ -239,6 +267,12 @@ function App() {
   const [watchingGame, setWatchingGame] = useState(false);
   /** 游戏窗口是否已就绪（决定按钮左滑 + 停止按钮划入） */
   const [gameWindowReady, setGameWindowReady] = useState(false);
+  // 实时镜像：事件监听器（挂载时注册、闭包不更新）用它判断窗口是否已就绪，
+  // 避免闭包捕获到旧值导致重复起表 / 漏起表。
+  const gameWindowReadyRef = useRef(false);
+  useEffect(() => {
+    gameWindowReadyRef.current = gameWindowReady;
+  }, [gameWindowReady]);
   const [gamePid, setGamePid] = useState<number | null>(null);
   const [stoppingGame, setStoppingGame] = useState(false);
   const [injectingOverlay, setInjectingOverlay] = useState(false);
@@ -260,6 +294,9 @@ function App() {
   // 全局翻译语言（设置 › 通用）：开发者新闻和创意工坊详情都读这一份。
   const [translationLanguage, setTranslationLanguage] = useState(DEFAULT_TRANSLATION_LANGUAGE);
   const [translationLanguageSaving, setTranslationLanguageSaving] = useState(false);
+  // 翻译引擎（设置 › 通用）：auto = 默认链（必应 → Google → MyMemory）；手动指定时该引擎优先。
+  const [translationEngine, setTranslationEngine] = useState(DEFAULT_TRANSLATION_ENGINE);
+  const [translationEngineSaving, setTranslationEngineSaving] = useState(false);
   // 设置 › 翻译器：自定义文本翻译，默认跟随通用里的翻译语言。
   const [translatorLanguage, setTranslatorLanguage] = useState(DEFAULT_TRANSLATION_LANGUAGE);
   const [translatorSource, setTranslatorSource] = useState("");
@@ -291,9 +328,15 @@ function App() {
   // 记住的窗口尺寸（仅用于设置页展示；启动时的实际恢复由后端 setup 完成）。
   const [savedWindowSize, setSavedWindowSize] = useState<[number, number] | null>(null);
   const windowSizeSaveTimerRef = useRef<number | null>(null);
+  // 「窗口 › 原生窗口标题栏」：自绘标题栏在个别设备 / WebView 上拖不动时兜底。
+  const [nativeTitlebar, setNativeTitlebar] = useState(false);
+  const [nativeTitlebarSaving, setNativeTitlebarSaving] = useState(false);
   // 模组加载器方案（设置 › 模组加载器）：启动时按它决定要不要挂加载器 agent。
   const [modLoaderScheme, setModLoaderScheme] = useState(DEFAULT_MOD_LOADER_SCHEME);
   const [modLoaderSchemeSaving, setModLoaderSchemeSaving] = useState(false);
+  // 「启动时保留 JAR 模组启用状态」：开启后启动/自动扫描以磁盘当前状态为基准，不改写 mod.info。
+  const [jarModUseDiskStateOnStartup, setJarModUseDiskStateOnStartup] = useState(true);
+  const [jarModUseDiskStateOnStartupSaving, setJarModUseDiskStateOnStartupSaving] = useState(false);
   // 极速启动（实验性，设置 › 启动）：只在方案 = ZombieBuddy 时有意义。
   const [fastLaunch, setFastLaunch] = useState(false);
   const [fastLaunchSaving, setFastLaunchSaving] = useState(false);
@@ -373,9 +416,9 @@ function App() {
     "forward",
   );
   const pageTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const memorySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [launchArguments, setLaunchArguments] = useState<string[]>(defaultLaunchArguments);
-  const updateLaunchArguments = (next: string[]) => setLaunchArguments(next); void updateLaunchArguments;
+  // 启动参数落盘的防抖计时器；上一份值用于保存失败时回滚。
+  const launchArgumentsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [launchSettingsOpen, setLaunchSettingsOpen] = useState(false);
   const [launchDetailsOpen, setLaunchDetailsOpen] = useState(false);
   const launchCommandRef = useRef<HTMLDivElement | null>(null);
@@ -399,6 +442,8 @@ function App() {
     etaSeconds: null,
   });
   const [versionOperationRunning, setVersionOperationRunning] = useState(false);
+  // 「中断」已点过但操作还没结束：按钮变成「正在中断…」，操作终结时复位。
+  const [cancelRequested, setCancelRequested] = useState(false);
   const [versionVerified, setVersionVerified] = useState<VersionVerifyResult | null>(null);
   const [versionLabelDraft, setVersionLabelDraft] = useState("");
   const [versionStoreDraft, setVersionStoreDraft] = useState("");
@@ -451,6 +496,8 @@ function App() {
   const [launcherLogTail, setLauncherLogTail] = useState<LauncherLogTail | null>(null);
   const [launcherLogLoading, setLauncherLogLoading] = useState(false);
   const [launcherLogError, setLauncherLogError] = useState<string | null>(null);
+  // 「设置 › 开发者选项」：清除启动器用户数据的进行状态。
+  const [launcherDataClearing, setLauncherDataClearing] = useState(false);
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateStatus | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
@@ -584,6 +631,8 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   const [workshopDetailClosing, setWorkshopDetailClosing] = useState(false);
   const [workshopDetailProgress, setWorkshopDetailProgress] = useState({ completed: 0, total: 0 });
   const workshopDetailCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 工坊详情弹窗的请求序号：A 慢响应晚到时不能盖进 B 的弹窗。
+  const workshopDetailRequestId = useRef(0);
   // 「加载中 → 正文就绪」会把弹窗撑高，量出高度后做过渡（见 useDialogAutoHeight）。
   const workshopDetailDialogRef = useRef<HTMLDivElement | null>(null);
   const workshopDetailDialogHeightRef = useRef<number | null>(null);
@@ -681,7 +730,67 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
     const visibleMessage = conciseNotification(message, developerModeRef.current);
     setToasts((current) => [...current.slice(-3), { id, message: visibleMessage, kind }]);
-    window.setTimeout(() => dismissToast(id), 3000);
+    // 错误必须由用户确认后消失（3 秒一闪而过容易错过）；提示/成功仍自动退场。
+    if (kind !== "error") {
+      window.setTimeout(() => dismissToast(id), 3000);
+    }
+  }
+
+  /** 弹应用内确认框并等待用户选择；返回被点动作的 value（Esc/遮罩返回 cancelValue）。 */
+  function showConfirm(request: ConfirmRequest): Promise<string> {
+    // 理论上调用方都会 await，不会叠加；万一叠加，把上一个先按取消结算掉。
+    if (confirmResolveRef.current) {
+      const previous = confirmResolveRef.current;
+      confirmResolveRef.current = null;
+      previous(request.cancelValue ?? "cancel");
+    }
+    // 上一轮 settle 留下的「280ms 后卸载弹窗」定时器在此作废：两步确认链
+    // （还原版本 → 「文件可能被改过 → 继续还原」）里，第二个弹窗在该定时器
+    // 到期前打开，不撤掉它就会把新弹窗连坐关闭 —— 表现为弹窗闪现后无法点击。
+    if (confirmExitTimerRef.current !== null) {
+      window.clearTimeout(confirmExitTimerRef.current);
+      confirmExitTimerRef.current = null;
+    }
+    return new Promise((resolve) => {
+      confirmResolveRef.current = resolve;
+      setConfirmClosing(false);
+      setConfirmRequest(request);
+    });
+  }
+
+  /** 常规二选一：确定（可标红）/取消。 */
+  async function askConfirm(
+    title: string,
+    body: string,
+    options: { danger?: boolean; okLabel?: string; cancelLabel?: string } = {},
+  ): Promise<boolean> {
+    const answer = await showConfirm({
+      title,
+      body,
+      actions: [
+        { label: options.okLabel ?? "确定", value: "ok", danger: options.danger },
+        { label: options.cancelLabel ?? "取消", value: "cancel" },
+      ],
+    });
+    return answer === "ok";
+  }
+
+  function settleConfirm(value: string) {
+    const resolve = confirmResolveRef.current;
+    if (!resolve) {
+      return;
+    }
+    confirmResolveRef.current = null;
+    resolve(value);
+    setConfirmClosing(true);
+    if (confirmExitTimerRef.current !== null) {
+      window.clearTimeout(confirmExitTimerRef.current);
+    }
+    confirmExitTimerRef.current = window.setTimeout(() => {
+      confirmExitTimerRef.current = null;
+      setConfirmRequest(null);
+      setConfirmClosing(false);
+    }, RESOURCE_DIALOG_EXIT_MS);
   }
 
   function clearNotificationHistory() {
@@ -796,12 +905,32 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     setDeveloperModeSaving(true);
     try {
       await invoke("save_developer_mode", { enabled });
+      // 关掉开发者模式时「开发者选项」页会从侧栏消失，停在那一页会变成空白。
+      if (!enabled) {
+        setSettingsPage((current) => (current === "developer" ? "general" : current));
+      }
     } catch (error: unknown) {
       developerModeRef.current = previous;
       setDeveloperMode(previous);
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setDeveloperModeSaving(false);
+    }
+  }
+
+  /** 「窗口 › 原生窗口标题栏」：交给系统画标题栏；后端先切换 decorations 再落盘。 */
+  async function updateNativeTitlebar(enabled: boolean) {
+    const previous = nativeTitlebar;
+    setNativeTitlebar(enabled);
+    setNativeTitlebarSaving(true);
+    try {
+      await invoke("save_native_titlebar", { enabled });
+      showToast(enabled ? "已切换为原生标题栏。" : "已恢复自绘标题栏。", "success");
+    } catch (error: unknown) {
+      setNativeTitlebar(previous);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setNativeTitlebarSaving(false);
     }
   }
 
@@ -835,13 +964,33 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
-  /** 设置页「通用 › Steam 网络加速」：模式与中转地址的保存、测试连接。 */
+  /** 设置页「通用 › 翻译引擎」：只影响之后的翻译；已翻好的内容保持原引擎结果。 */
+  async function updateTranslationEngine(engine: string) {
+    const previous = translationEngine;
+    setTranslationEngine(engine);
+    setTranslationEngineSaving(true);
+    try {
+      await invoke("save_translation_engine", { engine });
+    } catch (error: unknown) {
+      setTranslationEngine(previous);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setTranslationEngineSaving(false);
+    }
+  }
+
+  /** 设置页「通用 › Steam 网络加速」：模式与中转地址的保存、测试连接。
+      保存失败时回滚界面状态——显示的模式必须和后端实际生效的一致。 */
   async function saveSteamRelaySettings(mode: string, base: string) {
+    const previousMode = steamRelayMode;
+    const previousBase = steamRelayBase;
     setSteamRelaySaving(true);
     try {
       await invoke("save_steam_relay_settings", { mode, base });
       setSteamRelayPing(null);
     } catch (error: unknown) {
+      setSteamRelayMode(previousMode);
+      setSteamRelayBase(previousBase);
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setSteamRelaySaving(false);
@@ -873,11 +1022,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
   /** 本地代理：空串 = 清空（退回系统代理）。后端会校验格式并明确报错。 */
   async function saveSteamProxy(proxy: string) {
+    const previous = steamProxy;
     setSteamProxySaving(true);
     try {
       await invoke("save_steam_proxy", { proxy });
       setSteamProxyHint(null);
     } catch (error: unknown) {
+      setSteamProxy(previous);
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setSteamProxySaving(false);
@@ -898,8 +1049,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         return;
       }
       const best = found[0];
-      setSteamProxy(best.proxy);
       await invoke("save_steam_proxy", { proxy: best.proxy });
+      // 保存成功后才把检测到的代理写进输入框；先写后存会在失败时显示没存上的值。
+      setSteamProxy(best.proxy);
       setSteamProxyHint(
         `已选用 ${best.proxy}（往返 ${best.latencyMs} ms）${found.length > 1 ? `，共发现 ${found.length} 个可用代理` : ""}`,
       );
@@ -1018,17 +1170,54 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
+  /** 拖动只改本地显示；松手（onValueChangeEnd）才落盘，失败回滚滑块，
+   *  保证「界面显示的内存上限 = 实际生效值」。 */
+  const lastSavedMemoryMbRef = useRef<number | null>(null);
+
+  /** 启动参数：立即更新界面，落盘防抖 500ms；保存失败回滚到上一份并提示。
+      启动时后端读不到这个设置就用默认列表，所以失败必须让界面回到已保存的值。 */
+  function updateLaunchArguments(next: string[]) {
+    const previous = launchArguments;
+    setLaunchArguments(next);
+    if (launchArgumentsSaveTimerRef.current !== null) {
+      clearTimeout(launchArgumentsSaveTimerRef.current);
+    }
+    launchArgumentsSaveTimerRef.current = setTimeout(() => {
+      launchArgumentsSaveTimerRef.current = null;
+      const trimmed = next.map((argument) => argument.trim()).filter(Boolean);
+      void invoke<string[]>("save_launch_arguments", { arguments: trimmed })
+        .then((saved) => {
+          // 后端会裁剪空白/空条目，以它返回的为准对齐界面。
+          setLaunchArguments(saved);
+        })
+        .catch((error: unknown) => {
+          setLaunchArguments(previous);
+          showToast(error instanceof Error ? error.message : String(error), "error");
+        });
+    }, 500);
+  }
+
   function updateMemoryLimit(nextValue: number) {
     setMemoryLimitMb(nextValue);
-    if (memorySaveTimerRef.current !== null) {
-      window.clearTimeout(memorySaveTimerRef.current);
+  }
+
+  async function commitMemoryLimit(nextValue: number) {
+    if (nextValue === lastSavedMemoryMbRef.current) {
+      return;
     }
-    memorySaveTimerRef.current = window.setTimeout(() => {
-      memorySaveTimerRef.current = null;
-      void invoke("save_memory_limit", { memoryMb: nextValue }).catch((error: unknown) => {
-        showToast(error instanceof Error ? error.message : String(error), "error");
-      });
-    }, 250);
+    const previous = lastSavedMemoryMbRef.current;
+    try {
+      await invoke("save_memory_limit", { memoryMb: nextValue });
+      lastSavedMemoryMbRef.current = nextValue;
+    } catch (error: unknown) {
+      if (previous !== null) {
+        setMemoryLimitMb(previous);
+      }
+      showToast(
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
+    }
   }
 
   function jarConflictRiskLabel(risk: JarModConflictRisk): string {
@@ -1052,12 +1241,6 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         return "blue";
     }
   }
-
-  useEffect(() => () => {
-    if (memorySaveTimerRef.current !== null) {
-      window.clearTimeout(memorySaveTimerRef.current);
-    }
-  }, []);
 
   useEffect(() => {
     developerModeRef.current = developerMode;
@@ -1092,7 +1275,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   function switchSettingsPage(nextPage: SettingsPage) {
     setSettingsPage((current) => {
       if (current !== nextPage) {
-        const order: SettingsPage[] = ["about", "general", "toolbox", "logs", "modLoader", "startup"];
+        const order: SettingsPage[] = ["about", "general", "toolbox", "logs", "modLoader", "startup", "developer"];
         setSettingsTransitionDirection(
           order.indexOf(nextPage) >= order.indexOf(current) ? "forward" : "backward",
         );
@@ -1235,6 +1418,53 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     };
     // closeTaskPanel 是稳定的普通函数声明，这里只关心开关状态。
   }, [taskPanelOpen, taskPanelClosing]);
+
+  // 记录指针位置：任务由哪个点击产生，飞入徽标就从哪里起飞。
+  useEffect(() => {
+    const trackPointer = (event: PointerEvent) => {
+      lastPointerRef.current = { x: event.clientX, y: event.clientY };
+    };
+    window.addEventListener("pointerdown", trackPointer, true);
+    window.addEventListener("pointermove", trackPointer, { passive: true });
+    return () => {
+      window.removeEventListener("pointerdown", trackPointer, true);
+      window.removeEventListener("pointermove", trackPointer);
+    };
+  }, []);
+
+  // 进行中任务数增加 → 触发「鼠标处 → 任务中心」的徽标飞入；减少或不变 → 徽标立即如实显示。
+  useEffect(() => {
+    const previous = prevTaskRunningRef.current;
+    prevTaskRunningRef.current = taskRunningCount;
+    if (taskRunningCount <= previous) {
+      return;
+    }
+    const trigger = document.querySelector(".pz-task-trigger");
+    const pointer = lastPointerRef.current;
+    // 拿不到按钮 / 指针位置（如自动触发的任务）或用户偏好减少动效：跳过飞行直接显示。
+    if (!trigger || !pointer || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) {
+      return;
+    }
+    setTaskFlight({
+      key: ++taskFlightKeyRef.current,
+      fromX: pointer.x,
+      fromY: pointer.y,
+      // 飞到按钮的徽标一侧（右端），而不是按钮几何中心。
+      toX: rect.right - 14,
+      toY: rect.top + rect.height / 2,
+      count: taskRunningCount,
+    });
+    // 兜底：飞入动画意外中断（如 finished 事件丢失）也强制收尾，
+    // 让预留徽标转正、按钮宽度解锁。
+    if (taskFlightFallbackRef.current !== null) {
+      window.clearTimeout(taskFlightFallbackRef.current);
+    }
+    taskFlightFallbackRef.current = window.setTimeout(() => setTaskFlight(null), 1500);
+  }, [taskRunningCount]);
 
   useEffect(() => {
     if (!jarModsLoading) {
@@ -1586,13 +1816,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   /** 「自动排序」：按依赖与分类重排全部已启用 Lua 模组的加载顺序，可选先备份预设。 */
   async function autoSortLuaMods() {
     if (luaModBatchAction) return;
-    const proceed = window.confirm(
-      "自动排序会按依赖与分类重排所有已启用 Lua 模组的加载顺序（参考 Mod Load Order Sorter 的规则：加载器最前 → loadFirst → 分类归堆 → loadLast → 依赖拓扑）。\n\n确定继续吗？",
-    );
-    if (!proceed) return;
-    const backup = window.confirm(
-      "是否先备份当前预设？\n\n备份会把当前的启用列表与顺序保存成一个预设，之后可随时一键切回。\n\n[确定] 先备份再排序　[取消] 不备份直接排序",
-    );
+    // 三个选项必须显式可点：不能用「取消」兼指"不备份直接排序"，那等于没有放弃出口。
+    const choice = await showConfirm({
+      title: "自动排序模组加载顺序",
+      body: "会按依赖与分类重排所有已启用 Lua 模组的加载顺序（参考 Mod Load Order Sorter 的规则：加载器最前 → loadFirst → 分类归堆 → loadLast → 依赖拓扑）。\n\n要不要先把当前顺序备份成一个预设？备份后可随时一键切回。",
+      actions: [
+        { label: "先备份再排序", value: "backup" },
+        { label: "不备份，直接排序", value: "direct" },
+        { label: "取消", value: "cancel" },
+      ],
+      cancelValue: "cancel",
+    });
+    if (choice === "cancel") return;
+    const backup = choice === "backup";
     setLuaModBatchAction("sort");
     try {
       const backupName = backup
@@ -1649,6 +1885,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   async function deleteModPreset(preset: ModPreset) {
+    // 预设删除不可恢复，全应用唯一的"一次点击立即删除"；和其它破坏性操作对齐加确认。
+    const confirmed = await askConfirm(
+      "删除模组预设",
+      `确定删除预设「${preset.name}」吗？\n\n预设里保存的模组启用状态与顺序会被删除，当前列表不受影响。`,
+      { danger: true, okLabel: "删除" },
+    );
+    if (!confirmed) return;
     try {
       await invoke("delete_mod_preset", { id: preset.id });
       setModPresets((current) => current.filter((item) => item.id !== preset.id));
@@ -2306,6 +2549,27 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
+  /** 「启动时保留 JAR 模组启用状态」：只落盘，下一次启动 / 自动扫描时生效。 */
+  async function updateJarModUseDiskStateOnStartup(enabled: boolean) {
+    const previous = jarModUseDiskStateOnStartup;
+    setJarModUseDiskStateOnStartup(enabled);
+    setJarModUseDiskStateOnStartupSaving(true);
+    try {
+      await invoke("save_jar_mod_use_disk_state_on_startup", { enabled });
+      showToast(
+        enabled
+          ? "启动器不再改写 JAR 模组启用状态，将以当前状态为基准。"
+          : "启动器会按上次记录的启用状态同步 JAR 模组。",
+        "success",
+      );
+    } catch (error: unknown) {
+      setJarModUseDiskStateOnStartup(previous);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setJarModUseDiskStateOnStartupSaving(false);
+    }
+  }
+
   /** 字体对比度：拖动时只改状态（CSS 变量立刻生效），落盘做 250ms 防抖。 */
   function updateFontContrast(nextValue: number) {
     setFontContrast(nextValue);
@@ -2559,6 +2823,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           const loadedTranslationLanguage = settingsResult.value.translationLanguage ?? DEFAULT_TRANSLATION_LANGUAGE;
           setTranslationLanguage(loadedTranslationLanguage);
           setTranslatorLanguage(loadedTranslationLanguage);
+          setTranslationEngine(
+            settingsResult.value.translationEngine ?? DEFAULT_TRANSLATION_ENGINE,
+          );
           setFontContrast(settingsResult.value.fontContrast ?? 0);
           setBlurStrength(settingsResult.value.blurStrength ?? DEFAULT_BLUR_STRENGTH);
           setFontScale(settingsResult.value.fontScale ?? DEFAULT_FONT_SCALE);
@@ -2578,6 +2845,17 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             ]);
           }
           setModLoaderScheme(settingsResult.value.modLoaderScheme ?? DEFAULT_MOD_LOADER_SCHEME);
+          setNativeTitlebar(Boolean(settingsResult.value.nativeTitlebar));
+          // 启动参数从设置里恢复；没存过（旧版本升级）保持默认列表。
+          setLaunchArguments(
+            Array.isArray(settingsResult.value.launchArguments) &&
+              settingsResult.value.launchArguments.length > 0
+              ? settingsResult.value.launchArguments
+              : defaultLaunchArguments,
+          );
+          setJarModUseDiskStateOnStartup(
+            Boolean(settingsResult.value.jarModUseDiskStateOnStartup),
+          );
           setFastLaunch(Boolean(settingsResult.value.fastLaunch));
           setSilentMemoryCleanup(Boolean(settingsResult.value.silentMemoryCleanup));
           silentMemoryCleanupRef.current = Boolean(settingsResult.value.silentMemoryCleanup);
@@ -2617,14 +2895,15 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         const settings = settingsResult.status === "fulfilled" ? settingsResult.value : null;
         const defaultMemoryMb = defaultMemoryLimitMb(totalMemoryMb);
         setSystemMemoryMb(totalMemoryMb);
-        setMemoryLimitMb(
+        const nextMemoryMb =
           settings?.memoryLimitMb !== null &&
             settings?.memoryLimitMb !== undefined &&
             settings.memoryLimitMb >= MIN_MEMORY_MB &&
             settings.memoryLimitMb <= totalMemoryMb
             ? settings.memoryLimitMb
-            : defaultMemoryMb,
-        );
+            : defaultMemoryMb;
+        setMemoryLimitMb(nextMemoryMb);
+        lastSavedMemoryMbRef.current = nextMemoryMb;
         setMemoryError(null);
       })
 
@@ -2893,8 +3172,22 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     let unlistenProgress: (() => void) | undefined;
     void listen<OverlaySessionUpdate>("overlay-session", (event) => {
       setOverlaySession(event.payload);
-      if (event.payload.phase === "error") {
-        showToast(event.payload.message, "error");
+      const update = event.payload;
+      // 后端会话检测到窗口（准备注入/已注入）是「窗口已出现」的权威信号：
+      // 它直接驱动 DLL 注入，比前端 0.3s 轮询可靠 —— 轮询漏检时计时也不能丢
+      // （11-06 用户反馈：游戏进程出来了但计时没弹）。计时从这里起算。
+      if (
+        (update.phase === "injecting" || update.phase === "loading") &&
+        !gameWindowReadyRef.current
+      ) {
+        gameWindowReadyRef.current = true;
+        setGameWindowReady(true);
+        setStartupResult(null);
+        setStartupStartedAt(Date.now());
+        setStartupClock(Date.now());
+      }
+      if (update.phase === "error") {
+        showToast(update.message, "error");
       }
     }).then((cleanup) => { unlistenSession = cleanup; }).catch(() => undefined);
     void listen<OverlayZbProgress>("overlay-zb-progress", (event) => {
@@ -3003,9 +3296,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       }
       if (update.status === "started" || update.status === "progress") {
         setVersionOperationRunning(true);
+        if (update.status === "started") {
+          setCancelRequested(false);
+        }
         return;
       }
       setVersionOperationRunning(false);
+      setCancelRequested(false);
       // 任何会改变游戏目录的操作完成后，之前那次“已校验”结论就作废了。
       if (update.status === "completed" && update.operation !== "verify") {
         setVersionVerified(null);
@@ -3063,9 +3360,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       }
       if (update.status === "started" || update.status === "progress") {
         setModVersionOperationRunning(true);
+        if (update.status === "started") {
+          setCancelRequested(false);
+        }
         return;
       }
       setModVersionOperationRunning(false);
+      setCancelRequested(false);
       const rootPath = update.rootPath ?? null;
       if (rootPath) {
         void loadModVersionStatus(rootPath);
@@ -3403,6 +3704,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     let unlisten: (() => void) | undefined;
     let unlistenClose: (() => void) | undefined;
     void unlistenClose;
+    // StrictMode 下 effect 会跑两遍：cleanup 先于 listen promise resolve 时
+    // 直接丢弃 cleanup，监听器就会注册两份 —— 一次拖放触发两次导入。
+    let disposed = false;
 
     getCurrentWebview()
       .onDragDropEvent((event) => {
@@ -3434,13 +3738,17 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         }
       })
       .then((cleanup) => {
-        unlisten = cleanup;
+        if (disposed) {
+          cleanup();
+        } else {
+          unlisten = cleanup;
+        }
       })
       .catch(() => undefined);
 
     return () => {
+      disposed = true;
       unlisten?.();
-
     };
   }, [navActivePage, versionTab]);
 
@@ -3484,8 +3792,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   async function uninstallPzOptimization() {
-    const confirmed = window.confirm(
-      "确定卸载 PZ Optimization 吗？卸载会自动还原被替换的游戏文件，游戏本体不受影响。",
+    const confirmed = await askConfirm(
+      "卸载 PZ Optimization",
+      "确定卸载吗？卸载会自动还原被替换的游戏文件，游戏本体不受影响。",
+      { danger: true, okLabel: "卸载" },
     );
     if (!confirmed) {
       return;
@@ -3527,6 +3837,11 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       return;
     }
     let active = true;
+    // 本轮启动是否真的见过游戏进程：用于区分「Steam 还在拉起游戏」（running=false
+    // 是正常状态，必须继续轮询）和「游戏出现过又退了」（可以停轮询）。缺了它，
+    // 点下启动的第一拍就会把轮询停掉——窗口永远检测不到，启动计时不会弹出。
+    let sawRunning = false;
+    const watchStart = Date.now();
     const poll = async () => {
       try {
         const status = await invoke<{
@@ -3539,9 +3854,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           return;
         }
         if (status.running) {
+          sawRunning = true;
           setGamePid(status.pid ?? null);
         }
-        if (status.windowReady && !gameWindowReady) {
+        // 窗口就绪的 false→true 跳变用 ref 判断：覆盖层会话事件可能已经把
+        // gameWindowReady 置真（权威信号），这里重复起表会把计时起点往后推。
+        if (status.windowReady && !gameWindowReadyRef.current) {
+          gameWindowReadyRef.current = true;
           setGameWindowReady(true);
           setWatchingGame(false);
           // 启动时长从"检测到窗口"起算：先清掉上一次的结果，显示实时计时。
@@ -3550,10 +3869,26 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           setStartupClock(Date.now());
           return;
         }
-        // 游戏自己退出了：把按钮滑回原位
+        // 游戏出现过又退出：把按钮滑回原位。
+        // 崩溃不是一次「启动」：清掉进行中的启动计时，显示回落到上一次真实启动用时。
+        if (!status.running && sawRunning && !gameWindowReady) {
+          gameWindowReadyRef.current = false;
+          setWatchingGame(false);
+          setGamePid(null);
+          setStartupStartedAt(null);
+          return;
+        }
         if (!status.running && gameWindowReady) {
+          gameWindowReadyRef.current = false;
           setGameWindowReady(false);
           setGamePid(null);
+          setWatchingGame(false);
+          setStartupStartedAt(null);
+          return;
+        }
+        // 游戏一直没出现（Steam 启动失败 / 被拦截）：90 秒兜底，别让轮询空转；
+        // 正常路径下覆盖层会话 60 秒就会先报「等待游戏进程超时」。
+        if (!sawRunning && Date.now() - watchStart > 90_000) {
           setWatchingGame(false);
         }
       } catch {
@@ -3575,15 +3910,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       showToast(gamePid === null ? message : `${message}`, "success");
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
-    } finally {
+      // 杀进程失败时游戏多半还在跑：保持"游戏运行中"的状态与轮询，
+      // 不能把界面滑回"启动游戏"——那会让用户以为已经停干净了。
       setStoppingGame(false);
-      setGameWindowReady(false);
-      setGamePid(null);
-      setWatchingGame(false);
-      setOverlaySession(null);
-      setOverlayZbProgress(null);
-      setStartupStartedAt(null);
+      return;
     }
+    setStoppingGame(false);
+    gameWindowReadyRef.current = false;
+    setGameWindowReady(false);
+    setGamePid(null);
+    setWatchingGame(false);
+    setOverlaySession(null);
+    setOverlayZbProgress(null);
+    setStartupStartedAt(null);
   }
 
   async function launchProjectZomboid() {
@@ -3608,6 +3947,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       // 点击后禁用 3 秒，并开始每 0.3s 轮询游戏进程/窗口（复用注入 DLL 的检测逻辑）。
       setLaunchCooldown(true);
       window.setTimeout(() => setLaunchCooldown(false), 3000);
+      gameWindowReadyRef.current = false;
       setGameWindowReady(false);
       setGamePid(null);
       setWatchingGame(true);
@@ -3742,7 +4082,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   async function disagreePrivacyPolicy() {
-    if (!window.confirm("确定不同意并退出 PZManager 吗？")) {
+    if (!(await askConfirm("不同意隐私协议", "确定不同意并退出 PZManager 吗？", {
+      danger: true,
+      okLabel: "不同意并退出",
+    }))) {
       return;
     }
     await exit(0);
@@ -3750,8 +4093,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
   /** 撤销隐私协议同意：清空记录，重新弹出同意框（必须重新同意或退出）。 */
   async function revokePrivacyConsent() {
-    const confirmed = window.confirm(
-      "确定撤销隐私协议同意吗？\n\n撤销后会立即重新弹出同意框，需要重新同意才能继续使用。",
+    const confirmed = await askConfirm(
+      "撤销隐私协议同意",
+      "确定撤销吗？\n\n撤销后会立即重新弹出同意框，需要重新同意才能继续使用。",
+      { danger: true, okLabel: "撤销同意" },
     );
     if (!confirmed) {
       return;
@@ -4200,10 +4545,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     const versions = versionStatus?.versions ?? [];
     const latestBytes = versions.length > 0 ? versions[versions.length - 1].totalBytes : 0;
     const sizeNote = latestBytes > 0 ? `（约 ${formatVersionBytes(latestBytes)}）` : "";
-    const confirmed = window.confirm(
+    const confirmed = await askConfirm(
+      "完整保存",
       existing > 0
         ? `一般完整保存一份母版本就够了，日常改动用「保存变化」只记录差异、省空间。\n\n再完整保存一份会把整个游戏目录${sizeNote}原样再复制一份，占用大量空间。${modNote}\n\n确定继续吗？`
         : `这是第一次保存：会把整个游戏目录${sizeNote}完整复制一份作为母版本。${modNote}\n\n确定继续吗？`,
+      { okLabel: "完整保存" },
     );
     if (!confirmed) return;
     startVersionOperation(
@@ -4225,20 +4572,38 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     startVersionOperation("start_version_verify", {}, "检查当前版本");
   }
 
-  function restoreVersion(record: VersionRecord) {
+  /** 游戏开着时还原/快照必失败：先挡在确认框之前，别让用户读完长文案才吃错误。 */
+  async function gameIsRunning(): Promise<boolean> {
+    try {
+      return await invoke<boolean>("is_project_zomboid_running");
+    } catch {
+      // 探测失败不拦流程，后端执行时仍会把关。
+      return false;
+    }
+  }
+
+  async function restoreVersion(record: VersionRecord) {
     const unknown = versionStatus?.currentMatch.kind === "unknown";
+    if (await gameIsRunning()) {
+      showToast("请先关闭 Project Zomboid，再还原版本。", "error");
+      return;
+    }
     const modCount = record.modVersions?.length ?? 0;
     const modNote =
       modCount > 0
         ? `\n\n这个版本连同 ${modCount} 个模组一起保存过，模组也会一起还原；已经卸载的会跳过。`
         : "";
-    const confirmed = window.confirm(
-      `确定还原到「${record.label}」吗？\n\n游戏文件会被换成这个版本的内容，当前没保存过的修改会丢失。${modNote}\n\n装了 PZ Optimization 的话，还原前会自动卸载、完成后重新安装；想保留原版状态请先到「支持库」卸载。\n请先关闭游戏。`,
+    const confirmed = await askConfirm(
+      `还原到「${record.label}」`,
+      `请先关闭 Project Zomboid。\n\n游戏文件会被换成这个版本的内容，当前没保存过的修改会丢失。${modNote}\n\n装了 PZ Optimization 的话，还原前会自动卸载、完成后重新安装；想保留原版状态请先到「支持库」卸载。`,
+      { danger: true, okLabel: "还原" },
     );
     if (!confirmed) return;
     if (unknown) {
-      const forced = window.confirm(
-        "当前游戏文件可能被 Steam 更新或手动修改过。\\n\\n继续还原会覆盖这些内容，确定吗？",
+      const forced = await askConfirm(
+        "当前文件可能被改过",
+        "当前游戏文件可能被 Steam 更新或手动修改过。\n\n继续还原会覆盖这些内容，确定吗？",
+        { danger: true, okLabel: "继续还原" },
       );
       if (!forced) return;
     }
@@ -4250,16 +4615,58 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     );
   }
 
-  async function deleteVersion(record: VersionRecord) {
-    const confirmed = window.confirm(
-      `确定删除「${record.label}」吗？
+  async function convertVersion(record: VersionRecord) {
+    const confirmed = await askConfirm(
+      "转换为独立版本",
+      `确定把「${record.label}」转换为独立版本吗？\n\n会和最近的完整备份重新比对、重写增量包；转换后可以删除它之前的旧版本。这一步不会改动游戏文件。`,
+      { okLabel: "转换为独立版本" },
+    );
+    if (!confirmed) return;
+    startVersionOperation("start_version_rebase", { versionId: record.id }, `转换「${record.label}」`);
+  }
 
-只能删除最新的版本，删掉后不能恢复。`,
+  /** 删除确认的体量提示：完整备份删的是整个目录副本，增量版本只删自己的增量包。 */
+  function deleteSizeLine(record: VersionRecord): string {
+    return record.baseType === "full"
+      ? `这是完整备份，会释放约 ${formatVersionBytes(record.totalBytes)}（整个游戏目录的副本）。`
+      : "这是增量版本，只删除它自己的增量包与清单，占用很小。";
+  }
+
+  async function deleteVersion(record: VersionRecord) {
+    const versions = versionStatus?.versions ?? [];
+    const hasDependent = versionHasDependent(record, versions);
+    const dependentNote = hasDependent
+      ? "\n\n它后面的版本会先自动转换为独立版本，可能需要一些时间。"
+      : "";
+    const confirmed = await askConfirm(
+      "删除版本",
+      `确定删除「${record.label}」吗？删掉后不能恢复。\n\n${deleteSizeLine(record)}${dependentNote}`,
+      { danger: true, okLabel: "删除" },
     );
     if (!confirmed) return;
     setVersionVerified(null);
     // 删除可能上 GB：走后台操作，进度进任务中心与概览的进度面板。
     startVersionOperation("delete_version", { versionId: record.id }, `删除「${record.label}」`);
+  }
+
+  /** 「删除及更早」：删除这个版本和它之前的所有版本，之后的版本重建成新的独立基准。 */
+  async function deleteVersionThrough(record: VersionRecord) {
+    const versions = versionStatus?.versions ?? [];
+    const index = versions.findIndex((version) => version.id === record.id);
+    if (index < 0) return;
+    const count = index + 1;
+    const confirmed = await askConfirm(
+      "删除该版本及更早",
+      `确定删除「${record.label}」和它之前的 ${count} 个版本吗？删掉后不能恢复。\n\n它后面的版本会重建成新的完整基准，可能需要较长时间和临时空间。`,
+      { danger: true, okLabel: `删除 ${count} 个版本` },
+    );
+    if (!confirmed) return;
+    setVersionVerified(null);
+    startVersionOperation(
+      "delete_version_through",
+      { versionId: record.id },
+      `删除「${record.label}」及更早`,
+    );
   }
 
   async function saveVersionStore() {
@@ -4298,6 +4705,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
   function cancelVersionOperation() {
     void invoke("cancel_version_operation").catch(() => undefined);
+    setCancelRequested(true);
     showToast("正在中断…", "info");
   }
 
@@ -4484,9 +4892,11 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
-  function restoreModVersionPack(pack: ModPackRecord) {
-    const confirmed = window.confirm(
-      `确定还原整合包「${pack.label}」吗？\n\n会把包里的 ${pack.mods.length} 个模组都换成记录时的版本，当前没保存过的修改会丢失；找不到的模组会跳过。\n请先关闭游戏。`,
+  async function restoreModVersionPack(pack: ModPackRecord) {
+    const confirmed = await askConfirm(
+      `还原整合包「${pack.label}」`,
+      `请先关闭 Project Zomboid。\n\n会把包里的 ${pack.mods.length} 个模组都换成记录时的版本，当前没保存过的修改会丢失；找不到的模组会跳过。`,
+      { danger: true, okLabel: "还原" },
     );
     if (!confirmed) return;
     void startModPackOperation(
@@ -4498,8 +4908,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   async function deleteModVersionPack(pack: ModPackRecord) {
-    const confirmed = window.confirm(
+    const confirmed = await askConfirm(
+      "删除整合包",
       `确定删除整合包「${pack.label}」吗？\n\n只删这条记录，各模组自己的版本历史会保留。`,
+      { danger: true, okLabel: "删除" },
     );
     if (!confirmed) return;
     try {
@@ -4592,16 +5004,18 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
-  function recordModVersion(target: {
+  async function recordModVersion(target: {
     rootPath: string;
     name: string;
     versionCount: number;
   }) {
     const first = target.versionCount === 0;
-    const confirmed = window.confirm(
+    const confirmed = await askConfirm(
+      first ? `完整保存「${target.name}」` : `保存「${target.name}」的变化`,
       first
-        ? `第一次保存「${target.name}」：会把整个模组目录复制一份。\n\n确定继续吗？`
-        : `保存「${target.name}」的当前变化：只记录和上次不同的文件。\n\n确定继续吗？`,
+        ? `第一次保存：会把整个模组目录复制一份。\n\n确定继续吗？`
+        : `只记录和上次不同的文件。\n\n确定继续吗？`,
+      { okLabel: first ? "完整保存" : "保存变化" },
     );
     if (!confirmed) return;
     void startModVersionOperation(
@@ -4613,9 +5027,15 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     );
   }
 
-  function restoreModVersion(rootPath: string, name: string, record: VersionRecord) {
-    const confirmed = window.confirm(
-      `确定把「${name}」还原到「${record.label}」吗？\n\n模组文件会被换成这个版本的内容，当前没保存过的修改会丢失。\n创意工坊的模组可能被 Steam 校验或更新覆盖掉。\n请先关闭游戏。`,
+  async function restoreModVersion(rootPath: string, name: string, record: VersionRecord) {
+    if (await gameIsRunning()) {
+      showToast("请先关闭 Project Zomboid，再还原模组版本。", "error");
+      return;
+    }
+    const confirmed = await askConfirm(
+      `还原「${name}」到「${record.label}」`,
+      "请先关闭 Project Zomboid。\n\n模组文件会被换成这个版本的内容，当前没保存过的修改会丢失。\n创意工坊的模组可能被 Steam 校验或更新覆盖掉。",
+      { danger: true, okLabel: "还原" },
     );
     if (!confirmed) return;
     void startModVersionOperation(
@@ -4627,11 +5047,32 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     );
   }
 
-  async function deleteModVersion(rootPath: string, modName: string, record: VersionRecord) {
-    const confirmed = window.confirm(
-      `确定删除「${record.label}」吗？
+  async function convertModVersion(rootPath: string, modName: string, record: VersionRecord) {
+    const confirmed = await askConfirm(
+      "转换为独立版本",
+      `确定把「${record.label}」转换为独立版本吗？\n\n会和最近的完整备份重新比对、重写增量包；转换后可以删除它之前的旧版本。这一步不会改动模组文件。`,
+      { okLabel: "转换为独立版本" },
+    );
+    if (!confirmed) return;
+    startModVersionOperation(
+      "start_mod_version_rebase",
+      rootPath,
+      { versionId: record.id },
+      `转换「${record.label}」`,
+      modName,
+    );
+  }
 
-只能删除最新的版本，删掉后不能恢复。`,
+  async function deleteModVersion(rootPath: string, modName: string, record: VersionRecord) {
+    const versions = modVersionStatuses[rootPath]?.versions ?? [];
+    const hasDependent = versionHasDependent(record, versions);
+    const dependentNote = hasDependent
+      ? "\n\n它后面的版本会先自动转换为独立版本，可能需要一些时间。"
+      : "";
+    const confirmed = await askConfirm(
+      "删除版本",
+      `确定删除「${record.label}」吗？删掉后不能恢复。\n\n${deleteSizeLine(record)}${dependentNote}`,
+      { danger: true, okLabel: "删除" },
     );
     if (!confirmed) return;
     // 删除走后台操作：进度进任务中心与模组版本进度面板，完成后监听器自动刷新列表。
@@ -4640,6 +5081,31 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       rootPath,
       { versionId: record.id },
       `删除「${record.label}」`,
+      modName,
+    );
+  }
+
+  /** 「删除及更早」（模组）：删这个版本和它之前的所有版本，之后的版本重建成新基准。 */
+  async function deleteModVersionThrough(
+    rootPath: string,
+    modName: string,
+    record: VersionRecord,
+  ) {
+    const versions = modVersionStatuses[rootPath]?.versions ?? [];
+    const index = versions.findIndex((version) => version.id === record.id);
+    if (index < 0) return;
+    const count = index + 1;
+    const confirmed = await askConfirm(
+      "删除该版本及更早",
+      `确定删除「${record.label}」和它之前的 ${count} 个版本吗？删掉后不能恢复。\n\n它后面的版本会重建成新的完整基准，可能需要较长时间和临时空间。`,
+      { danger: true, okLabel: `删除 ${count} 个版本` },
+    );
+    if (!confirmed) return;
+    startModVersionOperation(
+      "delete_mod_version_through",
+      rootPath,
+      { versionId: record.id },
+      `删除「${record.label}」及更早`,
       modName,
     );
   }
@@ -4715,7 +5181,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   async function clearLauncherLog() {
-    if (!window.confirm("确定清空启动器日志吗？历史记录会被删除。")) {
+    if (!(await askConfirm("清空启动器日志", "确定清空启动器日志吗？历史记录会被删除。", {
+      danger: true,
+      okLabel: "清空",
+    }))) {
       return;
     }
     try {
@@ -4724,6 +5193,34 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       await refreshLauncherLog();
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }
+
+  /** 设置 › 开发者选项 › 清除启动器用户数据：删除 `.pzmanager` 下的全部启动器数据，重启后恢复默认。 */
+  async function clearLauncherUserData() {
+    if (
+      !(await askConfirm(
+        "清除启动器用户数据",
+        "将删除 %USERPROFILE%\\Zomboid\\.pzmanager 下的全部启动器数据：设置、JAR 模组状态、模组预设、日志、背景图、反馈记录、极速启动备份和版本备份。\n\n此操作不可恢复，不会影响游戏本体、存档和模组文件。如果开启过极速启动，建议先在「设置 › 启动」里关闭，以便恢复游戏启动配置。",
+        { danger: true, okLabel: "清除" },
+      ))
+    ) {
+      return;
+    }
+    setLauncherDataClearing(true);
+    try {
+      const result = await invoke<LauncherUserDataClearResult>("clear_launcher_user_data");
+      setLauncherLogTail(null);
+      showToast(
+        result.removedEntries > 0
+          ? `已清除 ${result.removedEntries} 项启动器数据（${formatVersionBytes(result.freedBytes)}），重启启动器后恢复默认设置。`
+          : "启动器数据目录本来就是空的。",
+        "success",
+      );
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setLauncherDataClearing(false);
     }
   }
 
@@ -4848,6 +5345,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   /** 右键「窗口内打开」：抓详情 → 在模态框里按开发者新闻那条翻译管线翻译。
       语言取设置里的全局翻译语言（设置 › 通用）。 */
   async function openWorkshopItemInWindow(item: WorkshopItem) {
+    // 请求序号守卫：A 的详情走中转加载慢/超时几秒，用户已关掉它去点 B ——
+    // A 的响应晚到时不能把 A 的标题/正文/翻译任务盖进 B 的弹窗。
+    const detailRequestId = ++workshopDetailRequestId.current;
     setWorkshopDetailTarget(item);
     setWorkshopDetail(null);
     setWorkshopDetailClosing(false);
@@ -4858,13 +5358,21 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         id: item.id,
         language: translationLanguage,
       });
+      if (workshopDetailRequestId.current !== detailRequestId) {
+        return;
+      }
       setWorkshopDetail(detail);
     } catch (error: unknown) {
+      if (workshopDetailRequestId.current !== detailRequestId) {
+        return;
+      }
       // 抓不到就别留一个空弹窗：收起并报错。
       setWorkshopDetailTarget(null);
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
-      setWorkshopDetailLoading(false);
+      if (workshopDetailRequestId.current === detailRequestId) {
+        setWorkshopDetailLoading(false);
+      }
     }
   }
 
@@ -5002,7 +5510,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               <Button
                 aria-label="新增启动参数"
                 className="pz-launch-argument-action"
-                onClick={() => setLaunchArguments((current) => [...current, ""])}
+                onClick={() => updateLaunchArguments([...launchArguments, ""])}
                 size="xs"
                 title="新增启动参数"
                 variant="ghost"
@@ -5020,8 +5528,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                       fontFamily="mono"
                       onChange={(event) => {
                         const nextValue = event.currentTarget.value;
-                        setLaunchArguments((current) =>
-                          current.map((item, itemIndex) => (itemIndex === index ? nextValue : item)),
+                        updateLaunchArguments(
+                          launchArguments.map((item, itemIndex) =>
+                            itemIndex === index ? nextValue : item,
+                          ),
                         );
                       }}
                       placeholder={`参数 ${index + 1}`}
@@ -5032,7 +5542,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                       aria-label={`删除启动参数 ${index + 1}`}
                       className="pz-launch-argument-action"
                       onClick={() =>
-                        setLaunchArguments(launchArguments.filter((_, itemIndex) => itemIndex !== index))
+                        updateLaunchArguments(
+                          launchArguments.filter((_, itemIndex) => itemIndex !== index),
+                        )
                       }
                       size="xs"
                       title="删除启动参数"
@@ -5112,6 +5624,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                       const nextValue = value[0];
                       if (nextValue !== undefined) {
                         updateMemoryLimit(nextValue);
+                      }
+                    }}
+                    onValueChangeEnd={({ value }) => {
+                      const nextValue = value[0];
+                      if (nextValue !== undefined) {
+                        void commitMemoryLimit(nextValue);
                       }
                     }}
                   >
@@ -6459,6 +6977,23 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       </HStack>
       <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
         <Box flex="1" minW="240px">
+          <Text color="gray.800" fontSize="sm" fontWeight="700">翻译引擎</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            优先使用所选引擎翻译开发者新闻、创意工坊详情与翻译器文本，失败时自动回退其余引擎。
+            默认顺序：必应 → Google → MyMemory；「中转翻译」是中转服务器上的离线翻译，只支持中文 / 英语 / 俄语。
+          </Text>
+        </Box>
+        <WorkshopDropdown
+          ariaLabel="翻译引擎"
+          disabled={translationEngineSaving}
+          onChange={(value) => void updateTranslationEngine(value)}
+          options={TRANSLATION_ENGINE_OPTIONS}
+          value={translationEngine}
+          width="11rem"
+        />
+      </HStack>
+      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
+        <Box flex="1" minW="240px">
           <Text color="gray.800" fontSize="sm" fontWeight="700">字体对比度</Text>
           <Text color="gray.500" fontSize="xs" mt="1">
             觉得文字和背景颜色太接近、看不清楚时往右拉：文字会变得更深，最左端保持默认配色。
@@ -6659,6 +7194,27 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       </HStack>
       <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
         <Box flex="1" minW="240px">
+          <Text color="gray.800" fontSize="sm" fontWeight="700">原生窗口标题栏</Text>
+          <Text color="gray.500" fontSize="xs" mt="1">
+            改用系统自带的标题栏：自绘标题栏在某些设备 / WebView 上无法拖动时用它兜底。
+            开启后自绘标题栏两侧的 LOGO 与窗口按钮会滑出隐藏，中间的导航保留；
+            立即生效，下次启动按这个设置打开。
+          </Text>
+        </Box>
+        <Switch.Root
+          aria-label="原生窗口标题栏"
+          checked={nativeTitlebar}
+          disabled={nativeTitlebarSaving}
+          onCheckedChange={(details) => void updateNativeTitlebar(details.checked)}
+        >
+          <Switch.HiddenInput />
+          <Switch.Control>
+            <Switch.Thumb />
+          </Switch.Control>
+        </Switch.Root>
+      </HStack>
+      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
+        <Box flex="1" minW="240px">
           <Text color="gray.800" fontSize="sm" fontWeight="700">覆盖层背景色</Text>
           <Text color="gray.500" fontSize="xs" mt="1">
             游戏加载时覆盖层的底色（默认纯红）。文字会自动按背景深浅换成白字或深色字，
@@ -6818,7 +7374,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     <Box className="pz-panel pz-translator-settings-panel">
       <Text color="gray.900" fontSize="lg" fontWeight="700">翻译器</Text>
       <Text color="gray.500" fontSize="sm" mt="1">
-        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（Google 优先，失败自动换用 MyMemory）。
+        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（默认必应优先，失败自动回退；可在 设置 › 通用 › 翻译引擎 里手动指定）。
       </Text>
 
       <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
@@ -6964,6 +7520,41 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           width="11rem"
         />
       </HStack>
+
+      <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
+        <HStack align="center" gap="4" justify="space-between" wrap="wrap">
+          <Box flex="1" minW="240px">
+            <HStack gap="2" wrap="wrap">
+              <Text color="gray.800" fontSize="sm" fontWeight="700">
+                启动时保留 JAR 模组启用状态
+              </Text>
+              <HintDot
+                label="启动时保留 JAR 模组启用状态说明"
+                text={
+                  "默认开启：启动器启动 / 扫描 JAR 列表时不再改动 mod.info / mod.info.disabled，而是把磁盘上当前的启用状态读作基准并更新记录。适合在游戏内或其它工具里直接管理 JAR 模组的情况。\n\n" +
+                  "关闭后：启动器会把上次记录的启用状态重新套用到 mod.info，保证工坊重新下载覆盖后仍能恢复你在启动器里的选择。"
+                }
+              />
+            </HStack>
+            <Text color="gray.500" fontSize="xs" mt="1">
+              开启时读取当前启用状态作为基准，不会再用启动器的记录改写模组文件。
+            </Text>
+          </Box>
+          <Switch.Root
+            aria-label="启动时保留 JAR 模组启用状态"
+            checked={jarModUseDiskStateOnStartup}
+            disabled={jarModUseDiskStateOnStartupSaving}
+            onCheckedChange={(details) =>
+              void updateJarModUseDiskStateOnStartup(details.checked)
+            }
+          >
+            <Switch.HiddenInput />
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Root>
+        </HStack>
+      </Box>
 
       {detection.status === "found" && (
         <Stack gap="2" mt="5">
@@ -7238,6 +7829,36 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               <Switch.Thumb />
             </Switch.Control>
           </Switch.Root>
+        </HStack>
+      </Box>
+    </Box>
+  );
+
+  /** 设置 › 开发者选项：仅在开发者模式下显示的危险操作入口。 */
+  const developerSettingsContent = (
+    <Box className="pz-panel pz-developer-settings-panel">
+      <Text color="gray.900" fontSize="lg" fontWeight="700">开发者选项</Text>
+      <Text color="gray.500" fontSize="sm" mt="1">
+        面向调试与排障的破坏性操作，仅在开发者模式下显示。
+      </Text>
+      <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
+        <HStack align="center" gap="4" justify="space-between" wrap="wrap">
+          <Box flex="1" minW="240px">
+            <Text color="gray.800" fontSize="sm" fontWeight="700">清除启动器用户数据</Text>
+            <Text color="gray.500" fontSize="xs" mt="1">
+              删除 %USERPROFILE%\Zomboid\.pzmanager 下的全部启动器数据：设置、JAR 模组状态、模组预设、日志、背景图、反馈记录、极速启动备份和版本备份。
+              不会影响游戏本体、存档和模组文件；清除后重启启动器恢复默认设置。
+            </Text>
+          </Box>
+          <Button
+            colorPalette="red"
+            loading={launcherDataClearing}
+            onClick={() => void clearLauncherUserData()}
+            size="sm"
+            variant="outline"
+          >
+            清除用户数据
+          </Button>
         </HStack>
       </Box>
     </Box>
@@ -7538,6 +8159,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     (versionStatus?.operationRunning ?? false) ||
     versionParallelSaving;
   const versionChainDepth = versionStatus ? versionDeltaChainDepth(versionStatus.versions) : 0;
+  /** 写入/删除阶段引擎不再响应取消；按钮禁用并说明原因，别让用户点了没反应。 */
+  const versionCancelUnavailable =
+    versionOperation?.phase === "restoring" || versionOperation?.phase === "deleting";
   /** 版本操作进度：游戏版本页和历史版本页共用，从历史页还原时也能看到。 */
   const versionOperationProgressContent = versionOperation ? (
     <Box className="pz-version-section">
@@ -7549,12 +8173,30 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               ? "上次操作失败"
               : "正在处理…"}
         </Text>
-        <Text color="gray.500" fontSize="xs">
-          {versionOperation.phase !== "mods" && versionOperation.totalFiles > 0
-            ? `${versionOperation.processedFiles} / ${versionOperation.totalFiles} 个文件 · `
-            : ""}
-          {versionProgressPercent(versionOperation)}%{versionStepLabel(versionOperation)}
-        </Text>
+        <HStack gap="2">
+          <Text color="gray.500" fontSize="xs">
+            {versionOperation.phase !== "mods" && versionOperation.totalFiles > 0
+              ? `${versionOperation.processedFiles} / ${versionOperation.totalFiles} 个文件 · `
+              : ""}
+            {versionProgressPercent(versionOperation)}%{versionStepLabel(versionOperation)}
+          </Text>
+          {versionOperation.status === "started" || versionOperation.status === "progress" ? (
+            <Button
+              colorPalette="red"
+              disabled={versionCancelUnavailable}
+              onClick={cancelVersionOperation}
+              size="xs"
+              title={
+                versionCancelUnavailable
+                  ? "正在写入/删除文件，这一步无法中断"
+                  : "中断当前版本操作"
+              }
+              variant="outline"
+            >
+              {cancelRequested ? "正在中断…" : "中断"}
+            </Button>
+          ) : null}
+        </HStack>
       </HStack>
       <Box bg="gray.200" borderRadius="full" h="2" mt="2" overflow="hidden">
         <Box
@@ -7719,11 +8361,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               >
                 检查当前版本
               </Button>
-              {versionBusy ? (
-                <Button colorPalette="red" onClick={cancelVersionOperation} size="sm" variant="outline">
-                  中断
-                </Button>
-              ) : null}
+              {/* 中断入口在下面的进度面板里，跟着进度条走，历史页也有。 */}
             </HStack>
             {versionChainDepth >= 5 ? (
               <Text color="orange.700" fontSize="xs" mt="1">
@@ -7849,7 +8487,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             <Text color="gray.900" fontSize="lg" fontWeight="700">历史版本</Text>
             <HintDot
               label="历史版本说明"
-              text={"保存过的游戏版本都在这里，最新的在最上面。\n\n可以查看每个版本改了哪些文件、还原到这个版本，或删除最新的版本。还原前请先关闭游戏。"}
+              text={"保存过的游戏版本都在这里，最新的在最上面。\n\n可以查看每个版本改了哪些文件、还原到这个版本，或删除任意版本；后面的版本依赖它时会先自动转换为独立版本。还原前请先关闭游戏。"}
             />
           </HStack>
           <Text color="gray.500" fontSize="xs" mt="1">
@@ -7888,9 +8526,8 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 {versionStatus.versions
                   .slice()
                   .reverse()
-                  .map((record, index) => {
+                  .map((record) => {
                     const changeLog = record.changeLog;
-                    const isLatest = index === 0;
                     const isCurrent = versionStatus.currentMatch.versionId === record.id;
                     const expanded = versionExpandedId === record.id;
                     const changeLogLabel = changeLog
@@ -7944,7 +8581,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                                 : "完整备份"}
                             </Text>
                           </Box>
-                          <HStack align="center" gap="2" wrap="wrap">
+                        </HStack>
+                        {/* 操作按钮一律单独一行、右对齐，与下方的变更指示器同级；
+                            不再跟标题挤在同一行，窄窗口也不会把标题压扁。 */}
+                        <HStack align="center" gap="2" justify="flex-end" mt="1.5" wrap="wrap">
                             <Button
                               disabled={versionBusy}
                               onClick={() => void restoreVersion(record)}
@@ -7953,7 +8593,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                             >
                               还原到这个版本
                             </Button>
-                            {isLatest ? (
+                            {record.baseType === "delta" &&
+                            !versionIsStandalone(record, versionStatus.versions) ? (
+                              <Button
+                                disabled={versionBusy}
+                                onClick={() => void convertVersion(record)}
+                                size="xs"
+                                title="和最近的完整备份重新比对、重写增量包；之后可删除它之前的旧版本"
+                                variant="ghost"
+                              >
+                                转换为独立版本
+                              </Button>
+                            ) : null}
+                            {versionCanDelete(record, versionStatus.versions) ? (
                               <Button
                                 colorPalette="red"
                                 disabled={versionBusy}
@@ -7963,8 +8615,27 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                               >
                                 删除
                               </Button>
-                            ) : null}
-                          </HStack>
+                            ) : (
+                              <Button
+                                colorPalette="red"
+                                disabled
+                                size="xs"
+                                title="第一个完整备份还被后面的版本依赖，不能删除；先删掉它后面的版本。"
+                                variant="ghost"
+                              >
+                                删除
+                              </Button>
+                            )}
+                            <Button
+                              colorPalette="red"
+                              disabled={versionBusy}
+                              onClick={() => void deleteVersionThrough(record)}
+                              size="xs"
+                              title="删除这个版本和它之前的所有版本；之后的版本会重建成新的独立基准"
+                              variant="ghost"
+                            >
+                              删除及更早
+                            </Button>
                         </HStack>
                         {changeLog ? (
                           <Box
@@ -8343,7 +9014,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                           <ModVersionTimeline
                             busy={modVersionBusy}
                             currentMatch={status.currentMatch}
+                            onConvert={(record) =>
+                              convertModVersion(target.rootPath, target.name, record)
+                            }
                             onDelete={(record) => void deleteModVersion(target.rootPath, target.name, record)}
+                            onDeleteThrough={(record) =>
+                              void deleteModVersionThrough(target.rootPath, target.name, record)
+                            }
                             onRestore={(record) => restoreModVersion(target.rootPath, target.name, record)}
                             versions={status.versions}
                           />
@@ -8558,6 +9235,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           >
             启动
           </Button>
+          {developerMode && (
+            <Button
+              aria-current={settingsPage === "developer" ? "page" : undefined}
+              className={`pz-resource-center-sidebar-item ${
+                settingsPage === "developer" ? "pz-resource-center-sidebar-item-active" : ""
+              }`}
+              onClick={() => switchSettingsPage("developer")}
+              size="sm"
+              variant="ghost"
+            >
+              开发者选项
+            </Button>
+          )}
         </Stack>
       </Box>
       {/* key=settingsPage：切分页时强制重挂正文，换页动画才会重播；
@@ -8577,7 +9267,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               ? launcherLogSettingsContent
               : settingsPage === "modLoader"
                 ? modLoaderSettingsContent
-                : startupSettingsContent}
+                : settingsPage === "developer"
+                  ? developerSettingsContent
+                  : startupSettingsContent}
       </Box>
     </Box>
   );
@@ -9404,8 +10096,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     >
       {wallpaperSeasonal ? <SeasonalWallpaper effect={wallpaperEffect} /> : null}
       <WindowTitlebar
+        badgeCount={taskRunningCount}
+        badgeFlightId={taskFlight ? taskFlight.key : null}
+        blockingOverlay={showPrivacyConsent}
+        nativeTitlebar={nativeTitlebar}
         onToggleTasks={() => (taskPanelOpen ? closeTaskPanel() : setTaskPanelOpen(true))}
-        taskCount={tasks.filter((task) => task.status === "running").length}
+        taskCount={taskRunningCount}
         taskPanelOpen={taskPanelOpen}
       >
         <Box className="pz-sidebar-brand">
@@ -9454,6 +10150,22 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           tasks={tasks}
         />
       )}
+      {/* 新增任务的徽标飞入：从鼠标处匀加速飞到任务中心，落地后卸载并让预留徽标转正。 */}
+      {taskFlight ? (
+        <TaskArrivalFlight
+          count={taskFlight.count}
+          from={{ x: taskFlight.fromX, y: taskFlight.fromY }}
+          key={taskFlight.key}
+          onArrived={() => {
+            setTaskFlight(null);
+            if (taskFlightFallbackRef.current !== null) {
+              window.clearTimeout(taskFlightFallbackRef.current);
+              taskFlightFallbackRef.current = null;
+            }
+          }}
+          to={{ x: taskFlight.toX, y: taskFlight.toY }}
+        />
+      ) : null}
       <Box className={`pz-app-layout ${activePage === "launch" ? "pz-app-layout-launch" : ""}`}>
         <Box
           className={`pz-main ${activePage === "launch" ? "pz-main-launch" : "pz-main-framed"} pz-main-${pageTransitionMovesShell ? pageTransitionPhase : "idle"}`}
@@ -9540,7 +10252,17 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           loading={modVersionDialogLoading}
           name={modVersionDialog.name}
           onClose={closeModVersionDialog}
+          onConvert={(record) =>
+            convertModVersion(modVersionDialog.rootPath, modVersionDialog.name, record)
+          }
           onDelete={(record) => void deleteModVersion(modVersionDialog.rootPath, modVersionDialog.name, record)}
+          onDeleteThrough={(record) =>
+            void deleteModVersionThrough(
+              modVersionDialog.rootPath,
+              modVersionDialog.name,
+              record,
+            )
+          }
           onRecord={() =>
             recordModVersion({
               rootPath: modVersionDialog.rootPath,
@@ -9603,9 +10325,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           <Box
             aria-modal="true"
             className="pz-privacy-overlay"
+            onMouseDown={(event) => {
+              // 强制遮罩盖住了标题栏的拖动区：让遮罩空白处接管拖动。
+              // 只在点到遮罩本身时启动（弹窗内容/iframe 里的选区不能被拖走窗口）。
+              if (event.button !== 0 || event.target !== event.currentTarget) {
+                return;
+              }
+              if (!isTauriRuntime()) {
+                return;
+              }
+              void getCurrentWindow().startDragging().catch(() => undefined);
+            }}
             position="fixed"
             role="dialog"
-            zIndex="tooltip"
           >
             <Box
               aria-label="隐私协议"
@@ -9783,6 +10515,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           </Box>
         </Portal>
       )}
+      {confirmRequest ? (
+        <ConfirmDialog closing={confirmClosing} onAction={settleConfirm} request={confirmRequest} />
+      ) : null}
       <ToastViewport onClose={dismissToast} toasts={toasts} />
     </Box>
   );

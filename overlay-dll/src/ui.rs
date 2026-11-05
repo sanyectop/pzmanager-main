@@ -82,14 +82,53 @@ static HEARTBEAT_TICKS: AtomicU32 = AtomicU32::new(0);
 /// 累计换帧次数（诊断用：界面没画出来时区分"图没生成"还是"游戏不再换帧"）。
 static SWAP_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// 渲染采样文件名（位于 `%TEMP%`）。DLL 每 ~500ms 回写一次真实换帧速率，
+/// 启动器据此判断「游戏已经在持续渲染」：没有 `[ZB]` 输出（console.txt 没更新）时
+/// 用它结束覆盖层，避免加载界面一直压着已经能玩的游戏。
+pub const RENDER_REPORT_FILE: &str = "pz_overlay_render.txt";
+/// 渲染回写间隔：太密会在 UI 线程刷磁盘，太疏启动器看不出"持续"。
+const RENDER_REPORT_INTERVAL: Duration = Duration::from_millis(500);
+static RENDER_REPORT_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static RENDER_REPORT_LAST_SWAPS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// hook 每帧调用：记录换帧时间并累加计数。
 pub fn note_swap() {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|value| value.as_millis() as u64)
-        .unwrap_or(0);
-    LAST_SWAP_MS.store(now, Ordering::Release);
+    LAST_SWAP_MS.store(now_ms(), Ordering::Release);
     SWAP_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 回写渲染速率给启动器。节流到 500ms；文件写失败不影响任何绘制逻辑。
+pub fn report_render_activity() {
+    let now = now_ms();
+    let last_ms = RENDER_REPORT_LAST_MS.load(Ordering::Acquire);
+    if last_ms != 0 && now.saturating_sub(last_ms) < RENDER_REPORT_INTERVAL.as_millis() as u64 {
+        return;
+    }
+    let swaps = SWAP_COUNT.load(Ordering::Relaxed);
+    let previous_swaps = RENDER_REPORT_LAST_SWAPS.swap(swaps, Ordering::AcqRel);
+    let elapsed = now.saturating_sub(last_ms);
+    // 第一次采样没有对照窗口，写 0；之后就是「两次采样之间的 hook 调用数 / 秒」。
+    let rate = if last_ms == 0 || elapsed == 0 {
+        0
+    } else {
+        swaps.saturating_sub(previous_swaps).saturating_mul(1000) / elapsed
+    };
+    RENDER_REPORT_LAST_MS.store(now, Ordering::Release);
+    let path = std::env::temp_dir().join(RENDER_REPORT_FILE);
+    let _ = std::fs::write(
+        path,
+        format!(
+            "rate={rate}\nswaps={swaps}\npaints={}\n",
+            crate::overlay::paint_count()
+        ),
+    );
 }
 
 /// 最近一次换帧的时间（UNIX 毫秒，0 = 还没换过）。
@@ -370,6 +409,9 @@ fn run(game_pid: u32) {
         if let Some(reason) = shutdown_reason {
             crate::overlay::request_shutdown(&reason);
         }
+
+        // 给启动器回写渲染速率（内部节流到 500ms）：没有 [ZB] 输出时启动器靠它收尾。
+        report_render_activity();
 
         std::thread::sleep(REFRESH_INTERVAL);
     }

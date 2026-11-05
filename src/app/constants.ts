@@ -12,6 +12,17 @@ export const TRANSLATION_LANGUAGE_OPTIONS = [
 
 export const DEFAULT_TRANSLATION_LANGUAGE = "zh-CN";
 
+/** 「通用 › 翻译引擎」：auto = 默认链（必应 → Google → MyMemory）；手动指定时该引擎优先，失败按默认链回退。 */
+export const DEFAULT_TRANSLATION_ENGINE = "auto";
+
+export const TRANSLATION_ENGINE_OPTIONS: WorkshopMenuOption[] = [
+  { value: "auto", label: "默认（自动回退）" },
+  { value: "bing", label: "必应翻译" },
+  { value: "google", label: "Google 翻译" },
+  { value: "mymemory", label: "MyMemory" },
+  { value: "relay", label: "中转翻译（离线）" },
+];
+
 export const MOD_LOADER_SCHEME_OPTIONS: WorkshopMenuOption[] = [
   { value: "zombieBuddy", label: "ZombieBuddy" },
   { value: "none", label: "不使用（原版加载）" },
@@ -137,7 +148,9 @@ export const CUSTOM_TRANSLATION_CHUNK_CHARS = 1800;
 export const TRANSLATION_BATCH_SIZE = 15;
 
 export const newsEngineLabels: Record<string, string> = {
+  relay: "中转翻译",
   google: "Google",
+  bing: "必应",
   mymemory: "MyMemory",
   none: "未翻译",
 };

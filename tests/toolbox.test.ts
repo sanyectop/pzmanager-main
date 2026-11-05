@@ -22,7 +22,7 @@ test("百宝箱 is a settings category, not a top-level nav page", () => {
   // 设置 › 设置分类里新增「百宝箱」
   assert.match(
     appSource,
-    /type SettingsPage = "about" \| "general" \| "toolbox" \| "logs" \| "modLoader" \| "startup";/,
+    /export type SettingsPage =\s*\| "about"\s*\| "general"\s*\| "toolbox"\s*\| "logs"\s*\| "modLoader"\s*\| "startup"\s*\| "developer";/,
   );
   assert.match(appSource, /onClick=\{\(\) => switchSettingsPage\("toolbox"\)\}/);
   assert.match(appSource, /aria-current=\{settingsPage === "toolbox" \? "page" : undefined\}/);

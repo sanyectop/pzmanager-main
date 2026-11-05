@@ -734,8 +734,9 @@ ProjectZomboid64.json vmArgs[0] = -agentpath:<pz_overlay.dll>
 - **切段**：按句子/标点切分，合并过短片段，纯数字/符号不送翻译；每段包
   `<span data-sid="...">`，译文按 sid 原位替换；
 - **批处理**：前端 15 条/批，后端再按 15 条或 2000 字符切批；超时 8 s、单次翻译 5 s；
-- **引擎**：Google `translate_a/single` 优先；失败用 Yandex `detect + translate`；
-  结果记录引擎到 `engineTally`，前端展示占比；
+- **引擎**：中转离线翻译（只接 zh/en/ru）→ Google `translate_a/single` →
+  必应（手机版 `cn.bing.com` 的 `ttranslatev3`，单段 ≤900 字切分）→ MyMemory；
+  失败各自熔断 10 分钟；结果记录引擎到 `engineTally`，前端展示占比；
 - **缓存**：`(语言, 文本) → (译文, 引擎)`，进程内 HashMap，避免重复请求。
 
 ### 5.10 背景图流水线
@@ -1001,7 +1002,7 @@ MSVC 工具链（覆盖层 DLL 的 MinHook C 源码需要 `cl.exe`）。
 beat=1793205846369
 launcherpid=44528
 session=1793205800000
-console=C:\Users\SanyeSAMA\Zomboid\console.txt
+console=%USERPROFILE%\Zomboid\console.txt
 progress=0.873
 phase=注入游戏类 · 注入 612/701
 memmax=8192

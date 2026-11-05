@@ -4,8 +4,11 @@ import {
   formatVersionBytes,
   shortVersionHash,
   versionBaseTypeLabel,
+  versionCanDelete,
   versionChangeSummary,
   versionDeltaChainDepth,
+  versionHasDependent,
+  versionIsStandalone,
   versionMatchLabel,
   versionPhaseLabel,
   versionProgressPercent,
@@ -173,8 +176,7 @@ test("maps backend phases to Chinese labels", () => {
   assert.equal(versionPhaseLabel("custom"), "custom");
 });
 
-test("counts deltas since the most recent full snapshot", () => {
-  assert.equal(versionDeltaChainDepth([]), 0);
+test("counts deltas since the most recent full snapshot", () => {  assert.equal(versionDeltaChainDepth([]), 0);
   assert.equal(
     versionDeltaChainDepth([record({ id: "v1", baseType: "full", parentId: null })]),
     0,
@@ -215,4 +217,29 @@ test("内测构建版本号按 base 比较，构建号不影响大小", () => {
   assert.equal(compareVersionStrings("1.5.261101-devbuild.5", "1.5.261101-devbuild.9"), 0);
   // 次版本更高的内测构建仍然更新。
   assert.equal(compareVersionStrings("1.6.0-devbuild.1", "1.5.261101"), 1);
+});
+
+test("recognises standalone versions and deletion dependencies", () => {
+  const base = record({ id: "v1", label: "基准版本" });
+  const middle = record({ id: "v2", parentId: "v1", baseType: "delta", label: "变化 1" });
+  const rebased = record({ id: "v3", parentId: "v1", baseType: "delta", label: "变化 2" });
+  const versions = [base, middle, rebased];
+
+  // 父版本是完整快照 = 独立；否则还能转换。
+  assert.equal(versionIsStandalone(base, versions), true);
+  assert.equal(versionIsStandalone(middle, versions), true);
+  assert.equal(versionIsStandalone(record({ id: "v4", parentId: "v2", baseType: "delta" }), versions), false);
+
+  assert.equal(versionHasDependent(base, versions), true);
+  assert.equal(versionHasDependent(middle, versions), false);
+  // 根基准被依赖时不能删；其余版本删除时后端会自动重挂依赖者。
+  assert.equal(versionCanDelete(base, versions), false);
+  assert.equal(versionCanDelete(middle, versions), true);
+  assert.equal(versionCanDelete(rebased, versions), true);
+  // 只有一个完整快照时它也可以删。
+  assert.equal(versionCanDelete(base, [base]), true);
+});
+
+test("maps the rebase phase label", () => {
+  assert.equal(versionPhaseLabel("rebase"), "正在重写增量包");
 });

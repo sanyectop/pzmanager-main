@@ -74,7 +74,8 @@ dumpbin /imports .\target\x86_64-pc-windows-msvc\release\pz_overlay.dll
 cd F:\pzmanager
 npm install            # 首次
 npm run tauri:build    # 打包构建
-# 或开发模式：
+# 或开发模式（tauri:dev 会先跑 npm run build:overlay 重建 DLL，
+# 避免 dev 启动把旧副本复制到 exe 旁、改动"看起来没生效"）：
 npm run tauri:dev
 ```
 
@@ -124,17 +125,20 @@ cargo +nightly build --features dll-syringe-inject
 > ZB 在加载**中途**联网（`Authors list fetch`，实测静默 10~41 秒）和跑 ClassGraph 全量扫描期间同样没有 `[ZB]` 输出；
 > 早先一律按 10 秒判定，会让覆盖层在游戏还没进主菜单时就被摘掉 —— 表现就是"没有加载过程，直接跳到加载完成"
 > （实测：00:31 那次在 `checking mods ban status` 后静默 10.4 秒就被判定完成，覆盖层 27 秒就撤了，而游戏一直加载到 00:32:49）。
-> 其它阶段的静默要等 **120 秒**才兜底结束。
+> 其它阶段的静默要等 **60 秒**才兜底结束（联网静默实测最长 41 秒，60 秒留余量）。
 
 1. 控制台出现 `[ZB] Running callbacks for onGameInitComplete`：ZombieBuddy 的最后一个里程碑，
    在这里**立即**停止覆盖。42.22 的主菜单紧接着会播放 Bink 过场（console 里的 `binkId:`），
    等到主菜单标记再停会把覆盖层压在过场上，表现为加载完成时闪屏；
 2. 控制台出现主菜单标记：`STATE: exit zombie.gameStates.TermsOfServiceState`、
    `added to the main menu`、`ZombieBuddy.getVersion()`（没有捕获到上一条时的兜底）；
-3. `[ZB]` 输出静默：收尾阶段（`注册 Lua 接口` / `初始化完成回调`）10 秒；其它阶段 120 秒兜底；
+3. `[ZB]` 输出静默：收尾阶段（`注册 Lua 接口` / `初始化完成回调`）10 秒；其它阶段 60 秒兜底；
 4. 完全没有 `[ZB]` 输出时，注入后 3 分钟兜底；
-5. 注入后 9 分钟会话上限；
-6. DLL 内部还有 10 分钟安全上限，避免启动器异常时一直保持红色。
+5. **渲染看门狗**：DLL 每 500ms 把换帧速率回写到 `%TEMP%\pz_overlay_render.txt`。
+   游戏持续渲染 ≥20fps 满 10 秒、而 `console.txt` 仍不更新（读不到 `[ZB]` 进度）时立即结束覆盖。
+   有些机器游戏根本不写 `console.txt`，旧逻辑会一直盖到 3 分钟上限；
+6. 注入后 9 分钟会话上限；
+7. DLL 内部还有 10 分钟安全上限，避免启动器异常时一直保持红色。
 
 ### 4.1 启动器关闭后的自读回退
 
@@ -354,7 +358,7 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
 
 | 现象 | 可能原因 | 处理 |
 | --- | --- | --- |
-| 提示「等待游戏进程超时（60 秒）」 | 游戏还没启动 / 进程名不在候选列表 | 确认任务管理器里能看到 `ProjectZomboid64.exe` 或 `javaw.exe`；若为其它名字，把它加进 `src-tauri/src/overlay.rs` 的 `TARGET_PROCESS_NAMES` |
+| 提示「等待游戏进程超时（60 秒）」 | 游戏还没启动 / 进程名不在候选列表 | 先看任务管理器：`ProjectZomboid64.exe` / `javaw.exe` 之外，**没有 Xbox 服务的机器上游戏可能显示为 wsappx（pz 是它的子进程）**——这种情况无需改动，启动器会按窗口标题 `Project Zomboid`（精确匹配）兜底识别进程并注入；真正的其它名字才需要加进 `src-tauri/src/overlay.rs` 的 `TARGET_PROCESS_NAMES` |
 | 提示「远程 LoadLibraryW 返回空句柄」 | DLL 位数不符（32 位游戏）、路径含特殊字符、杀软拦截 | 确认用 `--target x86_64-pc-windows-msvc` 构建；把 DLL 放到普通目录（如 `D:\tools\pz_overlay.dll`）；给杀软加白名单 |
 | 提示「打开游戏进程失败 / 拒绝访问」 | 游戏以管理员运行、启动器没有；或多用户/不同完整性级别 | 用相同权限级别运行两者（都普通身份或都管理员）；Steam 启动的游戏通常是普通身份 |
 | 提示「枚举 PID x 的模块列表失败」 | 目标进程是 32 位（WOW64），或进程刚退出 | 该错误不会中断注入（代码会继续尝试注入并给出更准确的报错）；确认使用 64 位游戏 |
@@ -363,7 +367,8 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
 | 进入回调但窗口没变红 | GL 状态挡住了 clear（scissor 已处理，剩余可能是多重采样/自定义 FBO），或换帧后画面被再次覆盖 | 看日志确认回调频率；确认游戏用的是默认帧缓冲；必要时在回调里临时 `glDisable(GL_MULTISAMPLE)` |
 | 红色一直不消失 | 启动器没发出停止信号（会话线程异常/被杀） | 正常流程最多 9 分钟会由会话上限结束，DLL 自身还有 10 分钟安全上限；检查 `%TEMP%\overlay.log` 是否出现「收到启动器停止信号」 |
 | 红色消失得太早 | 命中了主菜单标记或 `[ZB]` 静默 10 秒 | 见 `docs` 中 4 节的停止条件，可调整 `overlay_session.rs` 里的 `ZB_IDLE_TIMEOUT` / `COMPLETION_MARKERS` |
-| 加载中段闪屏/左下角黑块（42.22 常见） | 加载屏开始连续换帧时，wgl/gdi 两条 swap 路径可能在 5ms 内都触发；旧的全局时间去重把真正呈现到窗口的那一路当成重复帧跳过，游戏画面（含左下角黑块）露出 | 现在按 **HDC + GL 上下文** 去重，不同路径各自绘制；看 `%TEMP%\overlay.log` 心跳里的「换帧=」与「绘制=」，两者应接近。若仍异常，把首次 Hook 日志里的 hdc/ctx 和心跳一起记录 |
+| 加载中段闪屏/左下角黑块（42.22 常见） | 加载屏开始连续换帧时帧间隔可能短到几毫秒。旧实现按「5ms 内同 HDC+上下文」去重，把**真正呈现到窗口**的独立帧当成重复帧跳过，游戏画面（含左下角黑块）漏出 | 现在**每一次 swap 都绘制**，只有「外层 wglSwapBuffers 调用的原始实现又走到 gdi32!SwapBuffers」这种同一次呈现的嵌套才跳过。心跳里的「换帧=」与「绘制=」应基本相等（差异只来自嵌套路径） |
+| 红色一直不消失（游戏已经能玩） | ① 游戏没有写 `console.txt`，所有 `[ZB]` 判定都失效；② `[ZB]` 静默兜底过长 | 新版有两条兜底：渲染看门狗（持续 ≥20fps 10 秒但 `console.txt` 不更新 → 结束）和静默 60 秒；启动器日志里新增「覆盖层会话详情：ZB 行数/阶段/advice 分母/渲染速率」，先看 ZB 行数是否为 0 |
 | 变红后花屏/渲染异常 | GL 状态或 FBO 绑定未还原 | 本实现用 `glPushAttrib/glPopAttrib` + 还原 FBO 绑定；若仍有问题，把 `%TEMP%\overlay.log` 与复现步骤一起记录，并临时把 `paint_red_frame` 里的 FBO 段落注释掉做对照实验 |
 | 红屏且完全没有文字/界面 | 红色本身就是覆盖层底色（每帧 `glClear` 刷红），"无字"说明界面这一环断了。按可能性：① 进程里跑的是旧版"纯红探针"DLL（游戏目录残留 `-agentpath` 指向旧路径，宿主发现同名模块已加载就跳过注入）；② GL 残留状态把界面四边形整体丢弃（旧版未关深度测试/面剔除，或活动纹理单元非 0）；③ 游戏重建 WGL 上下文后旧纹理名失效；④ 界面线程 panic/锁中毒死亡、或找不到游戏窗口 | ① 问用户：红屏出现前有没有几秒能看到文字界面（有 = GL 环节问题，没有 = DLL/线程问题）；红屏是否超过 3 分钟不消失（是 = DLL 不响应停止事件，旧 DLL 嫌疑大）。② 收集：`%TEMP%\overlay.log`（新版会先写「pz_overlay v1.4.261031 已加载」，旧 DLL 没有这行）、`%USERPROFILE%\Zomboid\console.txt` 里 `[PZManager]` 行记录的 DLL 完整路径、游戏目录 `ProjectZomboid64.json` 的 `vmArgs[0]` 与启动 `.bat` 的 `_JAVA_OPTIONS` 里 `-agentpath` 指向。③ 校验安装目录 `pz_overlay.dll` 是否新版：`findstr /m "pz_overlay_status.txt" pz_overlay.dll` 有输出 = 新版；新版宿主注入旧 DLL 会直接报「覆盖层 DLL 版本过旧」，进程内预载路径不一致时界面会显示警告 |
 | `error[E0554]: #![feature] ... stable release channel` | 启用了 `dll-syringe-inject` feature 但用的是 stable | 用 `cargo +nightly build --features dll-syringe-inject`，或去掉该 feature 使用默认后端 |

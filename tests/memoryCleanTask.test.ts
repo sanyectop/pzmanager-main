@@ -136,9 +136,12 @@ test("设置里的清理按钮改为登记任务中心任务并采样物理内�
 });
 
 test("激进内存清理是独立开关，落盘后后端立刻生效", () => {
-  // 命令注册 + 设置读写 + 同步给 memclean 的后台线程/清理入口。
+  // 命令注册 + 设置读写（统一走 update_app_settings 的读改写锁）+ 同步给 memclean。
   assert.match(backendSource, /fn save_aggressive_memory_clean\(enabled: bool\) -> Result<\(\), String>/);
-  assert.match(backendSource, /settings\.aggressive_memory_clean = enabled;/);
+  assert.match(
+    backendSource,
+    /update_app_settings\(\|settings\| settings\.aggressive_memory_clean = enabled\)\?;/,
+  );
   assert.match(backendSource, /memclean::set_aggressive_cleanup\(enabled\);/);
   assert.match(backendSource, /^\s+save_aggressive_memory_clean,$/m);
   assert.match(appSource, /invoke\("save_aggressive_memory_clean", \{ enabled \}\)/);

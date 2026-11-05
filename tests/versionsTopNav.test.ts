@@ -19,7 +19,7 @@ test("版本 is a top-level nav page with a cube icon", () => {
   // 从设置侧栏移除，不再有设置内切换。
   assert.match(
     appSource,
-    /type SettingsPage = "about" \| "general" \| "toolbox" \| "logs" \| "modLoader" \| "startup";/,
+    /export type SettingsPage =\s*\| "about"\s*\| "general"\s*\| "toolbox"\s*\| "logs"\s*\| "modLoader"\s*\| "startup"\s*\| "developer";/,
   );
   assert.doesNotMatch(appSource, /switchSettingsPage\("versions"\)/);
   // 顶栏导航项：标签「版本」、图标 cube。

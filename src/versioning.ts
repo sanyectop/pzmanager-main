@@ -208,9 +208,9 @@ export function sortVersionsNewestFirst(versions: VersionRecord[]): VersionRecor
   return versions.slice().reverse();
 }
 
-/** 时间线序号：最新的一条是 1，越旧越大。 */
-export function versionOrdinal(index: number): number {
-  return index + 1;
+/** 时间线序号：最旧的一条是 1，越新越大（与直觉一致，也和版本 ID 的日期方向相同）。 */
+export function versionOrdinal(index: number, total: number): number {
+  return Math.max(1, total - index);
 }
 
 /** 时间线圆形胶囊直径：越新越大，最小 10px，前 8 条逐级递减。 */
@@ -262,6 +262,28 @@ export function versionBaseTypeLabel(baseType: string, _parentId: string | null)
   return baseType === "full" ? "完整备份" : "只存变化";
 }
 
+/** 增量版本是否直接挂在完整快照下（不再依赖中间的旧版本）。 */
+export function versionIsStandalone(record: VersionRecord, versions: VersionRecord[]): boolean {
+  if (record.baseType === "full") {
+    return true;
+  }
+  const parent = versions.find((version) => version.id === record.parentId);
+  return parent?.baseType === "full";
+}
+
+/** 是否还有别的版本依赖它（删除时会先自动把依赖者转换为独立版本）。 */
+export function versionHasDependent(record: VersionRecord, versions: VersionRecord[]): boolean {
+  return versions.some((version) => version.parentId === record.id);
+}
+
+/** 基础版本（根完整快照）被后面版本依赖时不能删；其余版本都可以删。 */
+export function versionCanDelete(record: VersionRecord, versions: VersionRecord[]): boolean {
+  if (!versionHasDependent(record, versions)) {
+    return true;
+  }
+  return record.parentId !== null;
+}
+
 export function versionLabelById(versions: VersionRecord[], id: string | null): string {
   if (!id) {
     return "未知版本";
@@ -300,6 +322,8 @@ export function versionPhaseLabel(phase: string): string {
     copying: "正在复制文件",
     deleting: "正在删除版本文件",
     delta: "正在保存变化",
+    /** 删除旧版本前，把依赖它的版本重挂到基准快照。 */
+    rebase: "正在重写增量包",
     restoring: "正在还原文件",
     pzopt: "正在处理 PZ Optimization",
     /** 大版本保存时顺带记录模组版本。 */

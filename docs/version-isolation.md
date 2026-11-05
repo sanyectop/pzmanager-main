@@ -54,7 +54,17 @@ versions/
 4. **还原到此版本**：先完整校验当前目录是否属于某个已记录版本（不属于时要求用户
    明确确认）；再逐个文件从最近完整快照 + 增量链重建，未变化的文件保留，目标版本
    没有的文件移到 `trash/restore-*`。每个写出的文件都校验 SHA-256。
-5. **删除版本**：只允许删除最新版本，避免破坏后续版本依赖的增量链。
+5. **转换为独立版本**：把某个增量版本与最近一次完整快照重新比对，重建它的增量包并把
+   父版本改成该完整快照。转换后它不再依赖中间的旧版本，链路深度变成 1 层，可以继续
+   删除它之前的版本。
+6. **删除版本**：任意版本都可以删除。如果它后面还有增量版本依赖它，删除前会先把这些
+   版本自动转换为独立版本（phase = `rebase`），再删文件；基础版本（根完整快照）仍被
+   后面的版本依赖时不允许删除（界面禁用该按钮并说明原因）。
+7. **删除该版本及更早**：一次删掉目标版本和它之前的所有版本。删不掉依赖链，所以先把
+   后面的幸存版本**物化成新的完整基准**（增量版本逐文件重建到 `base/`，完整备份挪到
+   `base/`，phase = `copying`），再从新到旧删除；被降级版本的旧增量包随后清掉。
+8. **还原前预检**：前端在弹确认框之前先查游戏是否在运行（`is_project_zomboid_running`），
+   开着就直接提示，不再让用户读完确认文案才失败。
 
 版本页面会读取 `appmanifest_108600.acf` 的 `buildid`，与最后捕获的 buildid 比较，
 变化时给出「Steam 可能已经更新」提示。还原旧版本不会改变 Steam 的更新状态。
@@ -106,8 +116,10 @@ PZ Optimization 通过 `install.ps1` 替换游戏类文件；切换游戏版本�
 | `start_version_capture` | 后台捕获增量版本 |
 | `start_version_restore` | 后台还原到指定版本 |
 | `start_version_verify` | 后台做根哈希校验，额外推送 `version-verified` |
+| `start_version_rebase` | 后台把指定增量版本转换为独立版本（重写增量包，phase = `rebase`） |
 | `cancel_version_operation` | 请求取消（还原开始写文件后不再中断，避免半还原） |
-| `delete_version` | 删除最新版本 |
+| `delete_version` | 删除任意版本；需要时先自动重挂后面的版本，再删除 |
+| `delete_version_through` | 删除该版本及更早；后面的版本先重建成新的完整基准 |
 
 扫描/复制/差分都在后台线程执行；同一时间只允许一个版本操作。开启多线程后，
 单个操作内部再按文件并行。
@@ -122,6 +134,9 @@ PZ Optimization 通过 `install.ps1` 替换游戏类文件；切换游戏版本�
 | 游戏还原 | 1 检查当前文件 → 2 还原文件（含 PZ Optimization 卸载/重装）→ 3 清理多余文件 → 4 还原关联模组版本（有大版本关联时） |
 | 模组完整保存 / 保存变化 | 1 计算哈希 → 2 复制文件 / 保存变化 |
 | 模组还原 | 1 检查 → 2 还原 → 3 清理 |
+| 转换独立版本 | 1 步（重写增量包，phase = `rebase`），前端不显示计数 |
+| 删除版本 | 1 步；删除旧版本时先重挂后续版本（phase = `rebase`），再删文件（phase = `deleting`） |
+| 删除该版本及更早 | 1 步；先物化新基准（phase = `copying`），再逐个删除（phase = `deleting`） |
 | 校验 | 1 步，前端不显示计数 |
 
 每一步的百分比各自从 0 走到 100。模组步骤按**模组**等分：处理第 i 个模组时是 `(i-1)/N` 到 `i/N`，
@@ -188,7 +203,9 @@ Rust 测试覆盖：根哈希稳定性、CDC 增量往返、完整快照 → 增
 | `start_mod_version_capture` | 记录增量版本 |
 | `start_mod_version_restore` | 还原到指定版本（先要求游戏关闭） |
 | `start_mod_version_verify` | 根哈希校验，额外推送 `mod-version-verified` |
-| `delete_mod_version` | 删除该模组的最新版本 |
+| `start_mod_version_rebase` | 把该模组的指定增量版本转换为独立版本 |
+| `delete_mod_version` | 删除该模组的任意版本；需要时先自动重挂后面的版本 |
+| `delete_mod_version_through` | 删除该版本及更早；后面的版本先重建成新的完整基准 |
 
 进度走独立事件 `mod-version-progress`，payload 在游戏事件基础上多 `rootKey` / `rootPath`；
 互斥仍共用 `VERSION_OPERATION_ACTIVE`，所以游戏大版本与模组版本操作不会并发。

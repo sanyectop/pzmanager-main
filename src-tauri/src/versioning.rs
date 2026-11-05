@@ -1766,7 +1766,7 @@ pub fn capture_version(
             for (index, (old, new)) in modified.iter().enumerate() {
                 let old_temp = temp_root.join(format!("{index:04}.old"));
                 materializer.materialize(&latest.id, &new.path, &old_temp, 0)?;
-                let delta_relative = format!("{delta_folder}/{index:04}.pzd");
+                let delta_relative = format!("{DELTA_DIR}/{delta_folder}/{index:04}.pzd");
                 let delta_path = store.join(&delta_relative);
                 let new_path = game_path.join(&new.path);
                 create_delta(Some(&old_temp), &new_path, &delta_path)?;
@@ -1794,7 +1794,7 @@ pub fn capture_version(
             }
 
             for (index, new) in added.iter().enumerate() {
-                let delta_relative = format!("{delta_folder}/add-{index:04}.pzd");
+                let delta_relative = format!("{DELTA_DIR}/{delta_folder}/add-{index:04}.pzd");
                 let delta_path = store.join(&delta_relative);
                 create_delta(None, &game_path.join(&new.path), &delta_path)?;
                 delta_bytes += fs::metadata(&delta_path)
@@ -1913,6 +1913,331 @@ pub fn capture_version(
             format_bytes(delta_bytes)
         ),
     })
+}
+
+// ---------------------------------------------------------------------------
+// 转换为独立版本（重挂到基准快照）
+// ---------------------------------------------------------------------------
+
+/// 一个版本自己的增量包目录。新版本写在 `deltas/<from>__<to>/`；
+/// 更早的版本曾把 `.pzd` 直接写在存储根目录，删除/重写时两个位置都要清。
+fn delta_dirs(store: &Path, parent_id: &str, version_id: &str) -> Vec<PathBuf> {
+    let folder = format!("{parent_id}__{version_id}");
+    vec![store.join(DELTA_DIR).join(&folder), store.join(&folder)]
+}
+
+/// 沿父链（含 `start_id`）找到最近的完整快照。
+fn nearest_full_ancestor<'a>(
+    meta: &'a VersionStoreMeta,
+    start_id: &str,
+) -> Option<&'a VersionRecord> {
+    let mut cursor = Some(start_id.to_string());
+    let mut hops = 0u32;
+    while let Some(id) = cursor {
+        let record = meta.versions.iter().find(|record| record.id == id)?;
+        if record.is_full() {
+            return Some(record);
+        }
+        hops += 1;
+        if hops > MAX_CHAIN_DEPTH {
+            return None;
+        }
+        cursor = record.parent_id.clone();
+    }
+    None
+}
+
+/// 把 `record` 的增量包重建成相对 `base`（完整快照）的独立增量，
+/// 并把它的父版本改成 `base`。之后删除 `base` 与它之间的旧版本不再影响它。
+fn rebase_onto(
+    store: &Path,
+    record: &VersionRecord,
+    base: &VersionRecord,
+    progress: Progress,
+) -> Result<String, String> {
+    if !base.is_full() {
+        return Err("转换基准必须是完整快照。".to_string());
+    }
+    if record.is_full() {
+        return Ok(format!("「{}」是完整备份，本身就是独立的。", record.label));
+    }
+    if record.parent_id.as_deref() == Some(base.id.as_str()) {
+        return Ok(format!("「{}」已经是独立版本。", record.label));
+    }
+
+    let mut meta = load_meta(store)?;
+    let target_manifest = load_manifest(store, &record.id)?;
+    let base_manifest = load_manifest(store, &base.id)?;
+    let base_root = full_snapshot_root(store, base);
+
+    let base_map: HashMap<String, ManifestFile> = base_manifest
+        .files
+        .iter()
+        .cloned()
+        .map(|file| (normalize_key(&file.path), file))
+        .collect();
+    let target_map: HashMap<String, ManifestFile> = target_manifest
+        .files
+        .iter()
+        .cloned()
+        .map(|file| (normalize_key(&file.path), file))
+        .collect();
+
+    let added: Vec<ManifestFile> = target_manifest
+        .files
+        .iter()
+        .filter(|file| !base_map.contains_key(&normalize_key(&file.path)))
+        .cloned()
+        .collect();
+    let removed: Vec<String> = base_manifest
+        .files
+        .iter()
+        .filter(|file| !target_map.contains_key(&normalize_key(&file.path)))
+        .map(|file| file.path.clone())
+        .collect();
+    let modified: Vec<(ManifestFile, ManifestFile)> = target_manifest
+        .files
+        .iter()
+        .filter_map(|file| {
+            let key = normalize_key(&file.path);
+            let old = base_map.get(&key)?;
+            (old.sha256 != file.sha256).then(|| (old.clone(), file.clone()))
+        })
+        .collect();
+
+    let delta_folder = format!("{}__{}", base.id, record.id);
+    let delta_root = store.join(DELTA_DIR).join(&delta_folder);
+    let temp_root = store.join(TMP_DIR).join(format!("{}-rebase", record.id));
+    // 上一次转换失败可能留下同名目录；当前记录的父版本不是这个基准时才清。
+    remove_if_exists(&delta_root);
+    remove_if_exists(&temp_root);
+
+    let result = (|| -> Result<(Vec<VersionAddedFile>, Vec<VersionModifiedFile>, u64), String> {
+        fs::create_dir_all(&delta_root)
+            .map_err(|error| io_error("创建增量目录", &delta_root, error))?;
+        fs::create_dir_all(&temp_root)
+            .map_err(|error| io_error("创建临时目录", &temp_root, error))?;
+
+        let total_changes = (modified.len() + added.len()) as u64;
+        let mut processed = 0u64;
+        let mut delta_bytes = 0u64;
+        let mut modified_entries = Vec::with_capacity(modified.len());
+        let mut added_entries = Vec::with_capacity(added.len());
+
+        {
+            let mut materializer = Materializer::new(store, &meta);
+
+            for (index, (old, new)) in modified.iter().enumerate() {
+                let target_temp = temp_root.join(format!("{index:04}.new"));
+                materializer.materialize(&record.id, &new.path, &target_temp, 0)?;
+                let base_path = base_root.join(&old.path);
+                if !base_path.is_file() {
+                    remove_if_exists(&target_temp);
+                    return Err(format!("完整快照缺少文件：{}", base_path.display()));
+                }
+                let delta_relative = format!("{DELTA_DIR}/{delta_folder}/{index:04}.pzd");
+                let delta_path = store.join(&delta_relative);
+                let delta_result = create_delta(Some(&base_path), &target_temp, &delta_path);
+                remove_if_exists(&target_temp);
+                delta_result?;
+                delta_bytes += fs::metadata(&delta_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                processed += 1;
+                progress(ProgressEvent {
+                    phase: "rebase".to_string(),
+                    processed_files: processed,
+                    total_files: total_changes,
+                    processed_bytes: delta_bytes,
+                    total_bytes: 0,
+                    current_path: Some(new.path.clone()),
+                })?;
+                modified_entries.push(VersionModifiedFile {
+                    path: new.path.clone(),
+                    old_size: old.size,
+                    new_size: new.size,
+                    old_sha256: old.sha256.clone(),
+                    new_sha256: new.sha256.clone(),
+                    delta: delta_relative,
+                });
+            }
+
+            for (index, new) in added.iter().enumerate() {
+                let target_temp = temp_root.join(format!("add-{index:04}.new"));
+                materializer.materialize(&record.id, &new.path, &target_temp, 0)?;
+                let delta_relative =
+                    format!("{DELTA_DIR}/{delta_folder}/add-{index:04}.pzd");
+                let delta_path = store.join(&delta_relative);
+                let delta_result = create_delta(None, &target_temp, &delta_path);
+                remove_if_exists(&target_temp);
+                delta_result?;
+                delta_bytes += fs::metadata(&delta_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                processed += 1;
+                progress(ProgressEvent {
+                    phase: "rebase".to_string(),
+                    processed_files: processed,
+                    total_files: total_changes,
+                    processed_bytes: delta_bytes,
+                    total_bytes: 0,
+                    current_path: Some(new.path.clone()),
+                })?;
+                added_entries.push(VersionAddedFile {
+                    path: new.path.clone(),
+                    size: new.size,
+                    sha256: new.sha256.clone(),
+                    delta: delta_relative,
+                });
+            }
+        }
+
+        Ok((added_entries, modified_entries, delta_bytes))
+    })();
+
+    remove_if_exists(&temp_root);
+
+    let (added_entries, modified_entries, delta_bytes) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            remove_if_exists(&delta_root);
+            return Err(error);
+        }
+    };
+
+    let added_count = added_entries.len();
+    let removed_count = removed.len();
+    let modified_count = modified_entries.len();
+    let change_log = VersionChangeLog {
+        from: base.id.clone(),
+        to: record.id.clone(),
+        from_build_id: base.steam_build_id.clone(),
+        to_build_id: record.steam_build_id.clone(),
+        added: added_entries,
+        removed,
+        modified: modified_entries,
+    };
+
+    let changelog_path = delta_root.join("changelog.json");
+    if let Err(error) = (|| -> Result<(), String> {
+        let content = serde_json::to_string_pretty(&change_log)
+            .map_err(|error| format!("序列化变更清单失败：{error}"))?;
+        fs::write(&changelog_path, format!("{content}\n"))
+            .map_err(|error| io_error("写入变更清单", &changelog_path, error))
+    })() {
+        remove_if_exists(&delta_root);
+        return Err(error);
+    }
+
+    let old_parent = record.parent_id.clone();
+    let mut manifest = target_manifest;
+    manifest.parent_version_id = Some(base.id.clone());
+    if let Err(error) = save_manifest(store, &manifest) {
+        remove_if_exists(&delta_root);
+        return Err(error);
+    }
+
+    let Some(slot) = meta
+        .versions
+        .iter_mut()
+        .find(|candidate| candidate.id == record.id)
+    else {
+        manifest.parent_version_id = old_parent;
+        let _ = save_manifest(store, &manifest);
+        remove_if_exists(&delta_root);
+        return Err(format!("版本不存在：{}", record.id));
+    };
+    slot.parent_id = Some(base.id.clone());
+    slot.change_log = Some(change_log);
+    if let Err(error) = save_meta(store, &meta) {
+        // 回滚清单，避免 parent_version_id 和 meta 指向不同的父版本。
+        manifest.parent_version_id = old_parent;
+        let _ = save_manifest(store, &manifest);
+        remove_if_exists(&delta_root);
+        return Err(error);
+    }
+
+    // 旧父版本的增量包已经没人引用；清掉，失败只留下孤儿文件。
+    if let Some(old_parent) = old_parent.as_deref() {
+        for dir in delta_dirs(store, old_parent, &record.id) {
+            remove_if_exists(&dir);
+        }
+    }
+
+    Ok(format!(
+        "已把「{}」转换为独立版本（基准「{}」）：新增 {}，删除 {}，修改 {}，增量包 {}。",
+        record.label,
+        base.label,
+        added_count,
+        removed_count,
+        modified_count,
+        format_bytes(delta_bytes)
+    ))
+}
+
+/// 把某个增量版本重挂到父链上最近的完整快照。已经是独立版本时直接返回提示。
+pub fn rebase_version_progress(
+    store: &Path,
+    version_id: &str,
+    progress: Progress,
+) -> Result<String, String> {
+    let meta = load_meta(store)?;
+    let Some(record) = meta
+        .versions
+        .iter()
+        .find(|record| record.id == version_id)
+        .cloned()
+    else {
+        return Err(format!("版本不存在：{version_id}"));
+    };
+    if record.is_full() {
+        return Ok(format!("「{}」是完整备份，本身就是独立的。", record.label));
+    }
+    let Some(parent_id) = record.parent_id.clone() else {
+        return Ok(format!("「{}」已经是独立版本。", record.label));
+    };
+    let Some(parent) = meta
+        .versions
+        .iter()
+        .find(|candidate| candidate.id == parent_id)
+    else {
+        return Err(format!(
+            "版本「{}」的父版本不存在，版本链可能已损坏。",
+            record.label
+        ));
+    };
+    if parent.is_full() {
+        return Ok(format!("「{}」已经是独立版本，不需要转换。", record.label));
+    }
+    let Some(base) = nearest_full_ancestor(&meta, &parent_id).cloned() else {
+        return Err(format!(
+            "「{}」找不到可用的完整快照，无法转换为独立版本。",
+            record.label
+        ));
+    };
+    rebase_onto(store, &record, &base, progress)
+}
+
+/// 完整备份的内容自带，只是挂靠位置变了：把 `parent_id` 指到新的上一个版本即可，
+/// 不需要重建任何文件。
+fn reattach_full_snapshot(
+    store: &Path,
+    record: &VersionRecord,
+    new_parent: &str,
+) -> Result<(), String> {
+    let mut meta = load_meta(store)?;
+    let mut manifest = load_manifest(store, &record.id)?;
+    manifest.parent_version_id = Some(new_parent.to_string());
+    save_manifest(store, &manifest)?;
+    let Some(slot) = meta
+        .versions
+        .iter_mut()
+        .find(|candidate| candidate.id == record.id)
+    else {
+        return Err(format!("版本不存在：{}", record.id));
+    };
+    slot.parent_id = Some(new_parent.to_string());
+    save_meta(store, &meta)
 }
 
 // ---------------------------------------------------------------------------
@@ -2404,11 +2729,212 @@ pub fn get_status(
     })
 }
 
+#[allow(dead_code)]
 pub fn delete_version(store: &Path, version_id: &str) -> Result<String, String> {
     delete_version_progress(store, version_id, &mut |_| Ok(()))
 }
 
-/// 删除最新的版本并按文件粒度上报进度（phase = "deleting"）。
+/// 幸存版本的父链是否伸进删除范围。增量沿 parent_id 向上找，撞到删除范围返回真、
+/// 撞到范围外的完整快照返回假；完整备份本身自包含，只看直接父版本。
+fn depends_on_doomed(
+    meta: &VersionStoreMeta,
+    record: &VersionRecord,
+    doomed: &HashSet<String>,
+) -> bool {
+    if record.is_full() {
+        return record
+            .parent_id
+            .as_deref()
+            .is_some_and(|parent| doomed.contains(parent));
+    }
+    let mut cursor = record.parent_id.clone();
+    let mut hops = 0u32;
+    while let Some(id) = cursor {
+        if doomed.contains(&id) {
+            return true;
+        }
+        let Some(parent) = meta.versions.iter().find(|candidate| candidate.id == id) else {
+            return false;
+        };
+        if parent.is_full() {
+            return false;
+        }
+        hops += 1;
+        if hops > MAX_CHAIN_DEPTH {
+            return true;
+        }
+        cursor = parent.parent_id.clone();
+    }
+    false
+}
+
+/// 让所有还依赖删除范围的幸存版本摆脱依赖：
+/// - 完整备份：父版本改成 None，目录从 `checkpoints/<id>` 挪到 `base/<id>`；
+/// - 增量版本：整个物化成新的完整快照（`base/<id>`），清掉 change_log。
+/// 按时间序处理，物化时父链仍然完整。返回被降级前记录的 (旧父版本, 版本) 对，
+/// 供调用方在删除完成后清理它们的旧增量包。
+fn promote_dependents_of_doomed(
+    store: &Path,
+    doomed: &HashSet<String>,
+    progress: Progress,
+) -> Result<Vec<(String, String)>, String> {
+    let meta = load_meta(store)?;
+    let mut promoted: Vec<(String, String)> = Vec::new();
+    for record in meta.versions.iter().cloned() {
+        if doomed.contains(&record.id) || !depends_on_doomed(&meta, &record, doomed) {
+            continue;
+        }
+        let old_parent = record.parent_id.clone();
+        let new_root = store.join(BASE_DIR).join(&record.id);
+        if new_root.exists() {
+            return Err(format!("完整快照目录已存在：{}", new_root.display()));
+        }
+        if record.is_full() {
+            // 只挪位置：完整快照的内容不依赖父版本。
+            let old_root = full_snapshot_root(store, &record);
+            fs::rename(&old_root, &new_root)
+                .map_err(|error| io_error("移动完整快照", &old_root, error))?;
+        } else {
+            // 物化成完整快照：逐文件沿旧链重建，写完才改 meta，中途失败可整体放弃。
+            let manifest = load_manifest(store, &record.id)?;
+            fs::create_dir_all(&new_root)
+                .map_err(|error| io_error("创建完整快照目录", &new_root, error))?;
+            let result = (|| -> Result<(), String> {
+                let mut materializer = Materializer::new(store, &meta);
+                let total = manifest.files.len() as u64;
+                for (index, file) in manifest.files.iter().enumerate() {
+                    let destination = new_root.join(&file.path);
+                    if let Some(parent) = destination.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|error| io_error("创建快照子目录", parent, error))?;
+                    }
+                    materializer.materialize(&record.id, &file.path, &destination, 0)?;
+                    progress(ProgressEvent {
+                        phase: "copying".to_string(),
+                        processed_files: index as u64 + 1,
+                        total_files: total,
+                        processed_bytes: 0,
+                        total_bytes: 0,
+                        current_path: Some(file.path.clone()),
+                    })?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                remove_if_exists(&new_root);
+                return Err(error);
+            }
+            let mut manifest = manifest;
+            manifest.base_type = "full".to_string();
+            manifest.parent_version_id = None;
+            if let Err(error) = save_manifest(store, &manifest) {
+                remove_if_exists(&new_root);
+                return Err(error);
+            }
+        }
+        let mut meta = load_meta(store)?;
+        let Some(slot) = meta
+            .versions
+            .iter_mut()
+            .find(|candidate| candidate.id == record.id)
+        else {
+            return Err(format!("版本不存在：{}", record.id));
+        };
+        slot.parent_id = None;
+        slot.base_type = "full".to_string();
+        slot.change_log = None;
+        save_meta(store, &meta)?;
+        if let Some(old_parent) = old_parent {
+            promoted.push((old_parent, record.id.clone()));
+        }
+    }
+    Ok(promoted)
+}
+
+/// 「删除该版本及更早」：先让后面的版本摆脱对删除范围的依赖（重建成新的完整基准），
+/// 再从新到旧逐个删除。phase：重建 = "copying"，删除 = "deleting"。
+pub fn delete_versions_through_progress(
+    store: &Path,
+    version_id: &str,
+    progress: Progress,
+) -> Result<String, String> {
+    let meta = load_meta(store)?;
+    let Some(index) = meta
+        .versions
+        .iter()
+        .position(|record| record.id == version_id)
+    else {
+        return Err(format!("版本不存在：{version_id}"));
+    };
+    let doomed: Vec<String> = meta.versions[..=index]
+        .iter()
+        .map(|record| record.id.clone())
+        .collect();
+    let doomed_set: HashSet<String> = doomed.iter().cloned().collect();
+
+    let promoted = promote_dependents_of_doomed(store, &doomed_set, &mut *progress)?;
+    let mut deleted = 0u64;
+    for id in doomed.iter().rev() {
+        delete_version_progress(store, id, progress)?;
+        deleted += 1;
+    }
+    // 被降级版本的旧增量包已经没人引用，清掉；失败只留下孤儿文件。
+    for (old_parent, id) in &promoted {
+        for dir in delta_dirs(store, old_parent, id) {
+            remove_if_exists(&dir);
+        }
+    }
+    Ok(format!("已删除 {deleted} 个版本。"))
+}
+
+/// 删除任意版本；如果它后面还有版本依赖它，先把依赖者重挂到基准快照：
+/// 增量依赖者重建增量包（phase = "rebase"），完整备份依赖者只改挂靠位置。
+/// 随后交给严格的 `delete_version_progress` 落盘删除。
+pub fn delete_version_with_rebase_progress(
+    store: &Path,
+    version_id: &str,
+    progress: Progress,
+) -> Result<String, String> {
+    let meta = load_meta(store)?;
+    let Some(target) = meta
+        .versions
+        .iter()
+        .find(|record| record.id == version_id)
+        .cloned()
+    else {
+        return Err(format!("版本不存在：{version_id}"));
+    };
+    let dependents: Vec<VersionRecord> = meta
+        .versions
+        .iter()
+        .filter(|record| record.parent_id.as_deref() == Some(version_id))
+        .cloned()
+        .collect();
+    if !dependents.is_empty() {
+        let Some(parent_id) = target.parent_id.clone() else {
+            return Err(format!(
+                "「{}」是基础版本，后面还有版本依赖它，不能删除。",
+                target.label
+            ));
+        };
+        let Some(base) = nearest_full_ancestor(&meta, &parent_id).cloned() else {
+            return Err(format!(
+                "找不到「{}」的完整快照，无法重挂后面的版本。",
+                target.label
+            ));
+        };
+        for dependent in &dependents {
+            if dependent.is_full() {
+                reattach_full_snapshot(store, dependent, &parent_id)?;
+            } else {
+                rebase_onto(store, dependent, &base, &mut *progress)?;
+            }
+        }
+    }
+    delete_version_progress(store, version_id, progress)
+}
+
+/// 删除一个没有被其他版本依赖的版本，并按文件粒度上报进度（phase = "deleting"）。
 /// 先落盘新的 meta 再删文件：即使删文件中途失败，也只是留下孤儿文件，
 /// 不会出现「meta 里还有版本、manifest 已经被删掉」的不可还原状态。
 pub fn delete_version_progress(
@@ -2424,16 +2950,28 @@ pub fn delete_version_progress(
     else {
         return Err(format!("版本不存在：{version_id}"));
     };
-    if index + 1 != meta.versions.len() {
-        return Err("只能删除最新的版本；旧版本还被后面的版本用着。".to_string());
+    if let Some(dependent) = meta
+        .versions
+        .iter()
+        .find(|record| record.parent_id.as_deref() == Some(version_id))
+    {
+        return Err(format!(
+            "「{}」还被「{}」依赖，请先把后面的版本转换为独立版本。",
+            version_id, dependent.label
+        ));
     }
 
-    let record = meta.versions.pop().expect("index checked above");
-    meta.active_version_id = meta.versions.last().map(|record| record.id.clone());
-    meta.last_seen_build_id = meta
-        .versions
-        .last()
-        .and_then(|record| record.steam_build_id.clone());
+    let was_last = index + 1 == meta.versions.len();
+    let record = meta.versions.remove(index);
+    if meta.active_version_id.as_deref() == Some(record.id.as_str()) {
+        meta.active_version_id = meta.versions.last().map(|record| record.id.clone());
+    }
+    if was_last {
+        meta.last_seen_build_id = meta
+            .versions
+            .last()
+            .and_then(|record| record.steam_build_id.clone());
+    }
     save_meta(store, &meta)?;
 
     // 收集要删的文件（含大小），按文件粒度删除并上报进度。
@@ -2442,7 +2980,7 @@ pub fn delete_version_progress(
         targets.push(full_snapshot_root(store, &record));
     }
     if let Some(parent_id) = &record.parent_id {
-        targets.push(store.join(DELTA_DIR).join(format!("{parent_id}__{}", record.id)));
+        targets.extend(delta_dirs(store, parent_id, &record.id));
     }
     targets.push(store.join(TMP_DIR).join(&record.id));
 
@@ -2859,6 +3397,192 @@ mod tests {
         delete_version(&store, &third_record.id).unwrap();
         let status = get_status(Some(&game), &store, Some("200"), "stable", false).unwrap();
         assert_eq!(status.versions.len(), 3);
+    }
+
+    #[test]
+    fn rebase_makes_delta_version_independent_and_restorable() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+
+        write_file(&game, "a.txt", b"one");
+        write_file(&game, "b.txt", b"bee");
+        let first = snapshot(&game, &store).version.unwrap();
+
+        write_file(&game, "a.txt", b"two");
+        let second = capture(&game, &store, "200").version.unwrap();
+
+        write_file(&game, "a.txt", b"three");
+        write_file(&game, "c.txt", b"new");
+        let third = capture(&game, &store, "300").version.unwrap();
+        assert_eq!(third.parent_id.as_deref(), Some(second.id.as_str()));
+
+        let message = rebase_version_progress(&store, &third.id, &mut ignore_progress).unwrap();
+        assert!(message.contains("独立版本"));
+        // 旧链路（second → third）已经被重写掉。
+        assert!(!delta_dirs(&store, &second.id, &third.id)
+            .iter()
+            .any(|path| path.exists()));
+
+        let versions = read_versions(&store).unwrap();
+        let rebased = versions.iter().find(|version| version.id == third.id).unwrap();
+        assert_eq!(rebased.parent_id.as_deref(), Some(first.id.as_str()));
+        let change_log = rebased.change_log.as_ref().unwrap();
+        assert_eq!(change_log.from, first.id);
+        assert_eq!(change_log.added.len(), 1);
+        assert_eq!(change_log.modified.len(), 1);
+        assert_eq!(change_log.removed.len(), 0);
+
+        restore_version(&game, &store, &third.id, false, true, &mut ignore_progress).unwrap();
+        assert_eq!(read_file(&game, "a.txt"), b"three");
+        assert_eq!(read_file(&game, "c.txt"), b"new");
+
+        // 中间版本已经没有依赖者，可以单独删掉；转换后的版本仍能还原。
+        delete_version(&store, &second.id).unwrap();
+        assert_eq!(read_versions(&store).unwrap().len(), 2);
+        restore_version(&game, &store, &third.id, false, true, &mut ignore_progress).unwrap();
+        assert_eq!(read_file(&game, "a.txt"), b"three");
+    }
+
+    #[test]
+    fn rebase_is_noop_when_parent_is_already_full() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+
+        write_file(&game, "a.txt", b"one");
+        let first = snapshot(&game, &store).version.unwrap();
+        write_file(&game, "a.txt", b"two");
+        let second = capture(&game, &store, "200").version.unwrap();
+        assert_eq!(second.parent_id.as_deref(), Some(first.id.as_str()));
+
+        let message = rebase_version_progress(&store, &second.id, &mut ignore_progress).unwrap();
+        assert!(message.contains("已经是独立版本"));
+        let versions = read_versions(&store).unwrap();
+        let unchanged = versions.iter().find(|version| version.id == second.id).unwrap();
+        assert_eq!(unchanged.parent_id.as_deref(), Some(first.id.as_str()));
+    }
+
+    #[test]
+    fn deleting_middle_version_rebases_its_successor() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+
+        write_file(&game, "a.txt", b"one");
+        let first = snapshot(&game, &store).version.unwrap();
+        write_file(&game, "a.txt", b"two");
+        let second = capture(&game, &store, "200").version.unwrap();
+        write_file(&game, "a.txt", b"three");
+        let third = capture(&game, &store, "300").version.unwrap();
+
+        delete_version_with_rebase_progress(&store, &second.id, &mut ignore_progress).unwrap();
+
+        let versions = read_versions(&store).unwrap();
+        assert!(versions.iter().all(|version| version.id != second.id));
+        let successor = versions.iter().find(|version| version.id == third.id).unwrap();
+        assert_eq!(successor.parent_id.as_deref(), Some(first.id.as_str()));
+
+        restore_version(&game, &store, &third.id, false, true, &mut ignore_progress).unwrap();
+        assert_eq!(read_file(&game, "a.txt"), b"three");
+        restore_version(&game, &store, &first.id, false, true, &mut ignore_progress).unwrap();
+        assert_eq!(read_file(&game, "a.txt"), b"one");
+    }
+
+    #[test]
+    fn refuses_deleting_root_base_with_dependents() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+
+        write_file(&game, "a.txt", b"one");
+        let first = snapshot(&game, &store).version.unwrap();
+        write_file(&game, "a.txt", b"two");
+        let second = capture(&game, &store, "200").version.unwrap();
+
+        let error =
+            delete_version_with_rebase_progress(&store, &first.id, &mut ignore_progress).unwrap_err();
+        assert!(error.contains("基础版本"));
+        // 严格版本也不允许绕过依赖检查。
+        assert!(delete_version(&store, &first.id).is_err());
+        // 最新版本没有依赖者，可以直接删。
+        delete_version(&store, &second.id).unwrap();
+        assert_eq!(read_versions(&store).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delta_files_live_under_the_deltas_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+
+        write_file(&game, "a.txt", b"one");
+        let first = snapshot(&game, &store).version.unwrap();
+        write_file(&game, "a.txt", b"two");
+        let second = capture(&game, &store, "200").version.unwrap();
+
+        let delta_dir = store.join(DELTA_DIR).join(format!("{}__{}", first.id, second.id));
+        let has_pzd = fs::read_dir(&delta_dir)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "pzd"));
+        assert!(has_pzd);
+        // 旧布局（存储根目录）不应再生成增量包。
+        assert!(!store.join(format!("{}__{}", first.id, second.id)).exists());
+
+        delete_version(&store, &second.id).unwrap();
+        assert!(!delta_dir.exists());
+    }
+
+    #[test]
+    fn delete_through_promotes_successor_to_a_new_base() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let store = directory.path().join("store");
+        fs::create_dir_all(&game).unwrap();
+
+        write_file(&game, "a.txt", b"one");
+        let first = snapshot(&game, &store).version.unwrap();
+        write_file(&game, "a.txt", b"two");
+        let second = capture(&game, &store, "200").version.unwrap();
+        write_file(&game, "a.txt", b"three");
+        write_file(&game, "b.txt", b"bee");
+        let third = capture(&game, &store, "300").version.unwrap();
+
+        // 删除前两个版本：第三个必须重建成不依赖任何人的新完整基准。
+        delete_versions_through_progress(&store, &second.id, &mut ignore_progress).unwrap();
+
+        let versions = read_versions(&store).unwrap();
+        assert_eq!(versions.len(), 1);
+        let successor = &versions[0];
+        assert_eq!(successor.id, third.id);
+        assert_eq!(successor.base_type, "full");
+        assert_eq!(successor.parent_id, None);
+        assert!(successor.change_log.is_none());
+        // 物化出的完整快照落在 base/（parent 为 None 的约定位置），旧增量包已清。
+        assert!(store.join(BASE_DIR).join(&third.id).is_dir());
+        for parent in [&first.id, &second.id] {
+            assert!(!store
+                .join(DELTA_DIR)
+                .join(format!("{parent}__{}", third.id))
+                .exists());
+        }
+
+        // 新基准能独立还原，内容就是删除时的状态。
+        write_file(&game, "a.txt", b"corrupted");
+        fs::remove_file(game.join("b.txt")).unwrap();
+        restore_version(&game, &store, &third.id, true, true, &mut ignore_progress).unwrap();
+        assert_eq!(read_file(&game, "a.txt"), b"three");
+        assert_eq!(read_file(&game, "b.txt"), b"bee");
+
+        // 只剩一个版本时「删除及更早」等于清空整个版本库。
+        delete_versions_through_progress(&store, &third.id, &mut ignore_progress).unwrap();
+        assert!(read_versions(&store).unwrap().is_empty());
     }
 
     #[test]

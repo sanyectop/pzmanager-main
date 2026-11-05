@@ -122,16 +122,6 @@ pub(crate) fn fast_launch_agent_for_batch(agent_path: Option<&str>) -> Option<&s
     agent_path.filter(|path| !path.chars().any(char::is_whitespace))
 }
 
-/// 把 ZB agent 参数统一成带 `policy=allow-all` 的形式（只保留一条）。
-///
-/// 背景：`ProjectZomboid64.json` / `.bat` / Steam 启动参数里任一处的 `-agentlib:zbNative`
-/// 都会先于其它来源被 JVM 加载，而 ZB 的策略只在第一次加载时锁定
-/// （[`Loader.setPolicy`] 是 write-once，重复 agent 会被忽略）。
-/// 因此要强制跳过"模组审批确认界面"，必须保证**第一个** agent 参数就带 `policy=allow-all`。
-pub(crate) fn normalize_zombie_buddy_agent_tokens(tokens: &mut Vec<String>) -> bool {
-    normalize_loader_agent_tokens(tokens, ZOMBIE_BUDDY_POLICY_AGENT)
-}
-
 /// 方案不使用加载器时，把启动参数里的加载器 agent 摘掉：
 /// 前端默认启动参数带 `-agentlib:zbNative`，不摘就等于背着方案偷偷挂上。
 /// 返回 true 表示确实摘掉了参数。
@@ -176,22 +166,34 @@ pub(crate) fn steam_launch_value_has_both(value: &str) -> bool {
     })
 }
 
+/// 按当前加载器方案改写 Steam LaunchOptions 值：
+/// `policy_agent = Some(agent)` 归一化 agent（方案启用加载器）；
+/// `None`（方案 = 不使用加载器）则**摘掉**已有的 agent——否则每次改内存上限/启动
+/// 都会把 `-agentlib:zbNative` 偷偷写回 Steam 配置，用户选的"不使用加载器"形同虚设。
 pub(crate) fn patch_steam_launch_options_value_with_memory(
     value: &str,
     memory_mb: Option<u64>,
     extra_args: &[String],
+    policy_agent: Option<&str>,
 ) -> (String, bool) {
     let mut tokens: Vec<String> = value.split_whitespace().map(str::to_string).collect();
     let original = tokens.clone();
 
-    normalize_zombie_buddy_agent_tokens(&mut tokens);
-    let agent_index = tokens
-        .iter()
-        .position(|token| is_zombie_buddy_agent_token(token))
-        .unwrap_or(0);
-    // ZB 要求 agent 参数后带 `--` 结束符。
-    if !tokens[agent_index + 1..].iter().any(|token| token == "--") {
-        tokens.insert(agent_index + 1, "--".to_string());
+    match policy_agent {
+        Some(agent) => {
+            normalize_loader_agent_tokens(&mut tokens, agent);
+            let agent_index = tokens
+                .iter()
+                .position(|token| is_zombie_buddy_agent_token(token))
+                .unwrap_or(0);
+            // ZB 要求 agent 参数后带 `--` 结束符。
+            if !tokens[agent_index + 1..].iter().any(|token| token == "--") {
+                tokens.insert(agent_index + 1, "--".to_string());
+            }
+        }
+        None => {
+            strip_loader_agent_tokens(&mut tokens);
+        }
     }
 
     if let Some(memory_mb) = memory_mb {
@@ -492,8 +494,12 @@ pub(crate) fn format_memory_mb(memory_mb: u64) -> String {
 }
 
 pub(crate) fn quoted_key(line: &str, key: &str) -> bool {
+    // Steam 自己解析 VDF 时键名不区分大小写（实测文件里 "Apps" 与 "apps" 两种拼写都存在），
+    // 这里也必须不区分，否则手机/老版本写出的全小写文件会走不到结构节点。
     let tokens = parse_quoted_tokens(line);
-    tokens.first().is_some_and(|value| value == key)
+    tokens
+        .first()
+        .is_some_and(|value| value.eq_ignore_ascii_case(key))
 }
 
 pub(crate) fn brace_delta(line: &str) -> i32 {
@@ -508,11 +514,28 @@ pub(crate) fn line_indentation(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
 
+/// 从 `start`（指向开引号）开始找闭引号的位置（返回值指向闭引号本身）。
+/// 感知 `\"` / `\\` 转义：值里含转义引号时，按「第 N 个引号」数会截错位置，
+/// 拼回去就会在闭引号后残留原文尾巴 —— 整个 localconfig.vdf 从那行起解析错乱。
+/// 按 ASCII 字节走是安全的：UTF-8 多字节序列不会包含 0x22 / 0x5C。
+fn closing_quote_index(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 pub(crate) fn replace_vdf_value(line: &str, value: &str) -> Option<String> {
     let first_quote = line.find('"')?;
-    let key_end = line[first_quote + 1..].find('"')? + first_quote + 1;
+    let key_end = closing_quote_index(line, first_quote)?;
     let value_start = line[key_end + 1..].find('"')? + key_end + 1;
-    let value_end = line[value_start + 1..].find('"')? + value_start + 1;
+    let value_end = closing_quote_index(line, value_start)?;
     let escaped_value = value.replace('\\', "\\\\").replace('"', "\\\"");
     Some(format!(
         "{}{}{}",
@@ -526,6 +549,7 @@ pub(crate) fn patch_steam_launch_options_content_with_memory(
     content: &str,
     memory_mb: Option<u64>,
     extra_args: &[String],
+    policy_agent: Option<&str>,
 ) -> Result<(String, bool), String> {
     let newline = if content.contains("\r\n") {
         "\r\n"
@@ -556,7 +580,9 @@ pub(crate) fn patch_steam_launch_options_content_with_memory(
         if let Some(depth) = app_depth {
             let next_depth = depth + brace_delta(&line);
             if quoted_key(&line, "LaunchOptions") && depth > 0 {
-                let current_value = parse_quoted_tokens(&line)
+                let tokens_on_line = parse_quoted_tokens(&line);
+                let indentation = line_indentation(&line);
+                let current_value = tokens_on_line
                     .get(1)
                     .cloned()
                     .unwrap_or_default();
@@ -564,8 +590,16 @@ pub(crate) fn patch_steam_launch_options_content_with_memory(
                     &current_value,
                     memory_mb,
                     extra_args,
+                    policy_agent,
                 );
-                if !options_changed {
+                // 历史版本在值含转义引号时会把这行写坏（闭引号后残留原文尾巴）。
+                // VDF 的 LaunchOptions 一行只应有「键 + 值」两组引号，多出来的都是
+                // 残留垃圾：整行重建成规范形式，用户无需手动去 Steam 里清理。
+                if tokens_on_line.len() > 2 {
+                    output.push(format!("{indentation}\"LaunchOptions\" \"{options}\""));
+                    launch_options_found = true;
+                    changed = true;
+                } else if !options_changed {
                     launch_options_found = true;
                     output.push(line);
                 } else {
@@ -579,7 +613,8 @@ pub(crate) fn patch_steam_launch_options_content_with_memory(
             } else if next_depth <= 0 && !launch_options_found {
                 let indentation = line_indentation(&line);
                 let launch_options =
-                    patch_steam_launch_options_value_with_memory("", memory_mb, extra_args).0;
+                    patch_steam_launch_options_value_with_memory("", memory_mb, extra_args, policy_agent)
+                        .0;
                 output.push(format!(
                     "{indentation}    \"LaunchOptions\" \"{launch_options}\""
                 ));
@@ -619,8 +654,13 @@ pub(crate) fn patch_steam_launch_options_content_with_memory(
                     let indentation = line_indentation(&line);
                     with_app.push(format!("{indentation}    \"{PROJECT_ZOMBOID_APP_ID}\""));
                     with_app.push(format!("{indentation}    {{"));
-                    let launch_options =
-                        patch_steam_launch_options_value_with_memory("", memory_mb, extra_args).0;
+                    let launch_options = patch_steam_launch_options_value_with_memory(
+                        "",
+                        memory_mb,
+                        extra_args,
+                        policy_agent,
+                    )
+                    .0;
                     with_app.push(format!(
                         "{indentation}        \"LaunchOptions\" \"{launch_options}\""
                     ));
@@ -658,5 +698,6 @@ pub(crate) fn patch_steam_launch_options_content_with_memory(
 }
 
 pub(crate) fn patch_steam_launch_options_content(content: &str) -> Result<(String, bool), String> {
-    patch_steam_launch_options_content_with_memory(content, None, &[])
+    // 安装/配置流程只在 ZombieBuddy 方案下发生，按启用加载器处理。
+    patch_steam_launch_options_content_with_memory(content, None, &[], Some(ZOMBIE_BUDDY_POLICY_AGENT))
 }

@@ -3,6 +3,7 @@
 //! 通过 `lib.rs` 的 `pub(crate) use settings::*;` 保持原有调用路径。
 
 use crate::*;
+use std::sync::Mutex;
 use tauri::Manager;
 /// 设置页「通用 › 翻译语言」的取值：和前端 TRANSLATION_LANGUAGE_OPTIONS 一一对应。
 /// 翻译链路（`news_translation::normalize_language`）其实认更多语言，但设置里只暴露这 6 种，
@@ -18,6 +19,30 @@ pub(crate) fn normalize_translation_language(language: &str) -> Option<String> {
         .iter()
         .find(|candidate| candidate.eq_ignore_ascii_case(trimmed))
         .map(|candidate| (*candidate).to_string())
+}
+
+/// 「通用 › 翻译引擎」的取值：auto = 默认链（必应 → Google → MyMemory）；
+/// 其余为手动指定的优先引擎，失败后仍按默认顺序回退其余引擎。
+/// relay 是中转服务器上的 Argos 离线翻译（批级、只接 zh-CN/en/ru）。
+pub(crate) const TRANSLATION_ENGINES: [&str; 5] = ["auto", "bing", "google", "mymemory", "relay"];
+
+/// 大小写不敏感地归一化到上面的取值；不在列表里返回 None。
+pub(crate) fn normalize_translation_engine(engine: &str) -> Option<String> {
+    let trimmed = engine.trim();
+    TRANSLATION_ENGINES
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(trimmed))
+        .map(|candidate| (*candidate).to_string())
+}
+
+/// 翻译管线读的当前引擎偏好；读设置失败 / 坏值按 auto（默认链）处理。
+pub(crate) fn configured_translation_engine() -> String {
+    app_settings_path()
+        .and_then(|path| load_app_settings_at(&path))
+        .ok()
+        .and_then(|settings| settings.translation_engine)
+        .and_then(|value| normalize_translation_engine(&value))
+        .unwrap_or_else(|| "auto".to_string())
 }
 
 /// 字体对比度：0（保持现有配色）到 100（浅色面上的文字压到近黑）。
@@ -119,10 +144,31 @@ pub(crate) fn app_settings_path() -> Result<PathBuf, String> {
 
 pub(crate) fn load_app_settings_at(path: &Path) -> Result<AppSettings, String> {
     if !path.is_file() {
-        return Ok(AppSettings::default());
+        // `AppSettings::default()` 来自 derive，布尔字段全是 false；这里把默认开启的
+        // 「启动时保留 JAR 模组启用状态」补上，和 serde 的 default 函数保持一致。
+        let mut settings = AppSettings::default();
+        settings.jar_mod_use_disk_state_on_startup = default_jar_mod_use_disk_state_on_startup();
+        return Ok(settings);
     }
     let content = fs::read_to_string(path).map_err(|error| format!("读取应用设置失败: {error}"))?;
     serde_json::from_str(&content).map_err(|error| format!("解析应用设置失败: {error}"))
+}
+
+/// settings.json 的全部读写都过这把锁：约 20 个命令各自「读全文 → 改一个字段 → 写全文」，
+/// 同步命令跑在主线程、异步命令跑在 tokio worker，没有这把锁就会互相覆盖丢字段。
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+/// 串行地「加载 → 修改 → 保存」一份应用设置。
+/// 所有改设置字段的命令都应走这里，而不是各自 load/save。
+pub(crate) fn update_app_settings(
+    update: impl FnOnce(&mut AppSettings),
+) -> Result<AppSettings, String> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&path)?;
+    update(&mut settings);
+    save_app_settings_at(&path, &settings)?;
+    Ok(settings)
 }
 
 pub(crate) fn save_app_settings_at(path: &Path, settings: &AppSettings) -> Result<(), String> {
@@ -131,7 +177,12 @@ pub(crate) fn save_app_settings_at(path: &Path, settings: &AppSettings) -> Resul
     }
     let content = serde_json::to_string_pretty(settings)
         .map_err(|error| format!("序列化应用设置失败: {error}"))?;
-    fs::write(path, format!("{content}\n")).map_err(|error| format!("保存应用设置失败: {error}"))
+    // 先写临时文件再改名：写一半崩溃/断电不会留下解析失败的 settings.json——
+    // 那会让所有 save_*/get_app_settings/启动/版本操作全部报错，只能手删文件自救。
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, format!("{content}\n"))
+        .map_err(|error| format!("保存应用设置失败: {error}"))?;
+    fs::rename(&temp, path).map_err(|error| format!("保存应用设置失败: {error}"))
 }
 
 #[tauri::command]
@@ -157,6 +208,14 @@ pub(crate) fn get_app_settings() -> Result<AppSettings, String> {
         settings
             .blur_strength
             .map_or(BLUR_STRENGTH_DEFAULT, normalize_blur_strength),
+    );
+    // 翻译引擎：坏值回落默认（auto = 必应 → Google → MyMemory）。
+    settings.translation_engine = Some(
+        settings
+            .translation_engine
+            .as_deref()
+            .and_then(normalize_translation_engine)
+            .unwrap_or_else(|| "auto".to_string()),
     );
     // 模组加载器方案同理，坏值回落默认（ZombieBuddy）。
     settings.mod_loader_scheme = Some(
@@ -201,74 +260,91 @@ pub(crate) fn get_app_settings() -> Result<AppSettings, String> {
         .steam_proxy
         .as_deref()
         .and_then(steam_relay::normalize_steam_proxy);
+    // 启动参数：去掉首尾空白与空条目，保证存进去的就是可用的参数列表。
+    settings.launch_arguments = settings
+        .launch_arguments
+        .iter()
+        .map(|argument| argument.trim().to_string())
+        .filter(|argument| !argument.is_empty())
+        .collect();
     Ok(settings)
+}
+
+/// 「启动详情 › 启动参数」：整体替换（前端传完整列表），立即生效并落盘。
+#[tauri::command]
+pub(crate) fn save_launch_arguments(arguments: Vec<String>) -> Result<Vec<String>, String> {
+    update_app_settings(|settings| {
+        settings.launch_arguments = arguments
+            .iter()
+            .map(|argument| argument.trim().to_string())
+            .filter(|argument| !argument.is_empty())
+            .collect();
+    })?;
+    Ok(load_app_settings_at(&app_settings_path()?)?.launch_arguments)
 }
 
 #[tauri::command]
 pub(crate) fn save_developer_mode(enabled: bool) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.developer_mode = enabled;
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.developer_mode = enabled)?;
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn save_steam_account_hidden(hidden: bool) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.steam_account_hidden = hidden;
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.steam_account_hidden = hidden)?;
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn save_translation_language(language: String) -> Result<(), String> {
     let normalized = normalize_translation_language(&language)
         .ok_or_else(|| format!("不支持的翻译语言: {language}"))?;
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.translation_language = Some(normalized);
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.translation_language = Some(normalized))?;
+    Ok(())
+}
+
+/// 「通用 › 翻译引擎」：只落盘，之后的翻译请求立即生效（已翻好的内容保持原结果）。
+#[tauri::command]
+pub(crate) fn save_translation_engine(engine: String) -> Result<(), String> {
+    let normalized = normalize_translation_engine(&engine)
+        .ok_or_else(|| format!("不支持的翻译引擎: {engine}"))?;
+    update_app_settings(|settings| settings.translation_engine = Some(normalized))?;
+    // 用户明确切换引擎后，之前必应失败留下的静默期作废：立刻按新选择重试。
+    crate::news_translation::clear_bing_backoff();
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn save_font_contrast(value: u8) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.font_contrast = Some(normalize_font_contrast(value));
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.font_contrast = Some(normalize_font_contrast(value)))?;
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn save_blur_strength(value: u8) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.blur_strength = Some(normalize_blur_strength(value));
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.blur_strength = Some(normalize_blur_strength(value)))?;
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn save_font_scale(value: u8) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.font_scale = Some(normalize_font_scale(value));
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.font_scale = Some(normalize_font_scale(value)))?;
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn save_font_family(value: String) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.font_family = normalize_font_family(&value);
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.font_family = normalize_font_family(&value))?;
+    Ok(())
 }
 
 /// 覆盖层背景色（设置 › 通用）：存 `#RRGGBB`，写空串 = 恢复默认纯红。
 #[tauri::command]
 pub(crate) fn save_overlay_background_color(value: String) -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.overlay_background_color = normalize_overlay_background_color(&value);
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| {
+        settings.overlay_background_color = normalize_overlay_background_color(&value);
+    })?;
+    Ok(())
 }
 
 /// 记住当前窗口尺寸（前端在拖动结束后防抖调用）。
@@ -277,7 +353,7 @@ pub(crate) fn save_overlay_background_color(value: String) -> Result<(), String>
 /// inner-size / scale-factor 两个窗口权限；最大化时不记忆（那不是用户想要的固定尺寸）。
 #[tauri::command]
 pub(crate) fn save_window_size(app: tauri::AppHandle) -> Result<(u32, u32), String> {
-    
+
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "未找到主窗口。".to_string())?;
@@ -292,20 +368,20 @@ pub(crate) fn save_window_size(app: tauri::AppHandle) -> Result<(u32, u32), Stri
         .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
     let factor = window
         .scale_factor()
-        .map_err(|error| format!("读取屏幕缩放系数失败: {error}"))?;
+        .map_err(|error| format!("读取窗口尺寸失败: {error}"))?;
     let width = (size.width as f64 / factor).round() as u32;
     let height = (size.height as f64 / factor).round() as u32;
     // 拖动过程的中间态也钳位到合法区间保存（DPI 缩放下最小尺寸附近可能略低于下限）。
     let width = clamp_window_width(width);
     let height = clamp_window_height(height);
 
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.window_width = Some(width);
-    settings.window_height = Some(height);
-    save_app_settings_at(&path, &settings)?;
+    update_app_settings(|settings| {
+        settings.window_width = Some(width);
+        settings.window_height = Some(height);
+    })?;
     Ok((width, height))
 }
+
 
 /// 恢复默认窗口尺寸：立即生效，同时清掉记住的尺寸（下次启动回到 conf 默认值）。
 #[tauri::command]
@@ -318,21 +394,42 @@ pub(crate) fn restore_default_window_size(app: tauri::AppHandle) -> Result<(), S
         .set_size(tauri::LogicalSize::new(WINDOW_WIDTH_MIN, WINDOW_HEIGHT_MIN))
         .map_err(|error| format!("设置窗口尺寸失败: {error}"))?;
 
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.window_width = None;
-    settings.window_height = None;
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| {
+        settings.window_width = None;
+        settings.window_height = None;
+    })?;
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn save_mod_loader_scheme(scheme: String) -> Result<(), String> {
     let normalized = normalize_mod_loader_scheme(&scheme)
         .ok_or_else(|| format!("不支持的模组加载器方案: {scheme}"))?;
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.mod_loader_scheme = Some(normalized);
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.mod_loader_scheme = Some(normalized))?;
+    Ok(())
+}
+
+/// 「窗口 › 原生窗口标题栏」：切换系统原生标题栏（decorations），立即生效并落盘。
+/// 自定义标题栏在个别设备 / WebView 上拖不动时用它兜底；开启后前端把自绘标题栏
+/// 两侧的 LOGO 与窗口按钮滑出隐藏（动画在 CSS），中间的导航保留。
+#[tauri::command]
+pub(crate) fn save_native_titlebar(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口。".to_string())?;
+    // 先应用再落盘：切换失败时设置保持原值，界面和实际状态不会错位。
+    window
+        .set_decorations(enabled)
+        .map_err(|error| format!("切换原生标题栏失败: {error}"))?;
+    update_app_settings(|settings| settings.native_titlebar = enabled)?;
+    Ok(())
+}
+
+/// 「模组加载器 › 启动时保留 JAR 模组启用状态」：只落盘，下一次启动 / 自动扫描时生效。
+#[tauri::command]
+pub(crate) fn save_jar_mod_use_disk_state_on_startup(enabled: bool) -> Result<(), String> {
+    update_app_settings(|settings| settings.jar_mod_use_disk_state_on_startup = enabled)?;
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -342,13 +439,34 @@ pub(crate) fn save_memory_limit(memory_mb: u64) -> Result<(), String> {
     if steam_configs.is_empty() {
         return Err("找不到 Steam localconfig.vdf".to_string());
     }
-    patch_steam_launch_options_at_paths(&steam_configs, Some(memory_mb), &[])?;
+    // Steam 启动项里的 agent 按当前方案处理：方案 = 不使用加载器时**摘掉**，
+    // 否则改一次内存上限就会把 -agentlib:zbNative 偷偷写回 Steam 配置。
+    // 方案读取放在 update_app_settings 的锁内（读改写一体的旧写法在这里等价，
+    // 但统一走锁，避免 async 命令与主线程的同步 save_* 竞争）。
+    let policy_agent = {
+        let path = app_settings_path()?;
+        let _guard = SETTINGS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let settings = load_app_settings_at(&path)?;
+        settings
+            .mod_loader_scheme
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MOD_LOADER_SCHEME.to_string())
+        // guard 在此 drop
+    };
+    patch_steam_launch_options_at_paths(
+        &steam_configs,
+        Some(memory_mb),
+        &[],
+        normalize_mod_loader_scheme(&policy_agent)
+            .as_deref()
+            .and_then(mod_loader_policy_agent),
+    )?;
     // 同一份内存上限也写进游戏目录的 JSON / BAT，避免那里残留的旧 -Xmx 覆盖设置。
     force_zombie_buddy_policy(Some(memory_mb))?;
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.memory_limit_mb = Some(memory_mb);
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.memory_limit_mb = Some(memory_mb))?;
+    Ok(())
 }
 
 /// 记录用户同意隐私协议时的协议版本号（首次启动与版本更新后都会要求重新同意）。
@@ -358,17 +476,98 @@ pub(crate) fn save_privacy_consent(version: String) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("隐私协议版本号不能为空".to_string());
     }
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.privacy_consented_version = Some(trimmed);
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.privacy_consented_version = Some(trimmed))?;
+    Ok(())
 }
 
 /// 撤销隐私协议同意：清空记录，下次启动会重新弹出同意框。
 #[tauri::command]
 pub(crate) fn clear_privacy_consent() -> Result<(), String> {
-    let path = app_settings_path()?;
-    let mut settings = load_app_settings_at(&path)?;
-    settings.privacy_consented_version = None;
-    save_app_settings_at(&path, &settings)
+    update_app_settings(|settings| settings.privacy_consented_version = None)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LauncherUserDataClearResult {
+    pub(crate) path: String,
+    pub(crate) removed_entries: usize,
+    pub(crate) freed_bytes: u64,
+}
+
+/// 递归统计条目占用（只用于清除前的提示，不是精确的磁盘回收量）。
+fn directory_usage_bytes(path: &Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| directory_usage_bytes(&entry.path()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// 开发者选项 › 清除启动器用户数据：删除 `%USERPROFILE%\Zomboid\.pzmanager` 下的
+/// 全部启动器数据（设置、JAR 模组状态、模组预设、日志、背景图、反馈记录、
+/// 极速启动备份与版本备份），不影响游戏本体、存档和模组文件。
+#[tauri::command(async)]
+pub(crate) fn clear_launcher_user_data() -> Result<LauncherUserDataClearResult, String> {
+    // 原子地占住版本操作互斥标记：删除可能持续数秒（版本备份上 GB），
+    // 只在删除前检查一次的话，期间启动的版本操作会把自己的存储目录删到一半。
+    // 占住之后新版本操作会被 spawn_version_operation 直接拒绝，删完再释放。
+    if crate::VERSION_OPERATION_ACTIVE
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err("请等当前版本操作完成后再清除用户数据。".to_string());
+    }
+    let result = clear_launcher_user_data_inner();
+    // 无论成败都要释放标记：spawn_version_operation 完成时同样清它，语义一致。
+    crate::VERSION_OPERATION_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    result
+}
+
+fn clear_launcher_user_data_inner() -> Result<LauncherUserDataClearResult, String> {
+    let directory = pzmanager_directory()?;
+    let mut removed_entries = 0;
+    let mut freed_bytes = 0;
+    if directory.is_dir() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("读取启动器数据目录失败: {error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("读取启动器数据目录失败: {error}"))?;
+            let path = entry.path();
+            freed_bytes += directory_usage_bytes(&path);
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+                    .map_err(|error| format!("删除 {} 失败: {error}", path.display()))?;
+            } else {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("删除 {} 失败: {error}", path.display()))?;
+            }
+            removed_entries += 1;
+        }
+    }
+    // 目录本身保留：后续写日志 / 设置不用再处理目录不存在的情况。
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("重建启动器数据目录失败: {error}"))?;
+    Ok(LauncherUserDataClearResult {
+        path: directory.to_string_lossy().into_owned(),
+        removed_entries,
+        freed_bytes,
+    })
 }
