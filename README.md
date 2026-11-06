@@ -53,6 +53,14 @@ node --test tests/            # 前端：源码/配置契约断言（Node ≥ 22
 
 这些目录的改动不会进入提交历史；若重命名或移动，需同步更新 `.gitignore`。
 
+## 开源协议
+
+本项目以 **GNU General Public License v3.0 or later（GPL-3.0-or-later）** 发布，完整协议见 [LICENSE](LICENSE)。
+
+- 客户端全部源码（本仓库，含 `overlay-core/` 与 `overlay-dll/`）适用 GPL-3.0-or-later：可以自由使用、修改、分发，但基于它的衍生作品必须以同一协议开源发布。
+- 服务端组件（Steam 中转、更新源、反馈查看器）仅在本机/自有服务器运行、不随本仓库分发，不在开源范围内。
+- PZManager 与 Project Zomboid 的开发/发行方无关；游戏本体、Steam 客户端与各第三方模组（含 ZombieBuddy、Viewpoint 等）仍受其各自协议约束。
+
 ## 环境要求
 
 * Windows x64（游戏、启动器、覆盖层 DLL 必须同为 64 位）

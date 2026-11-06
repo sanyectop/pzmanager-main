@@ -2,7 +2,8 @@
 name = "pzmanager"
 version = "1.5.261101-devbuild.1793501619"
 description = "Project Zomboid launcher + mod manager"
-authors = ["you"]
+authors = ["叁葉 (sanyectop)"]
+license = "GPL-3.0-or-later"
 edition = "2021"
 
 [lib]

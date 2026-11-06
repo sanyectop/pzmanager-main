@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.5.261101-devbuild.1793501619",
   "type": "module",
+  "license": "GPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
