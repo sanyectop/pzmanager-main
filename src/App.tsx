@@ -294,7 +294,7 @@ function App() {
   // 全局翻译语言（设置 › 通用）：开发者新闻和创意工坊详情都读这一份。
   const [translationLanguage, setTranslationLanguage] = useState(DEFAULT_TRANSLATION_LANGUAGE);
   const [translationLanguageSaving, setTranslationLanguageSaving] = useState(false);
-  // 翻译引擎（设置 › 通用）：auto = 默认链（必应 → Google → MyMemory）；手动指定时该引擎优先。
+  // 翻译引擎（设置 › 通用）：auto = 默认链（Google → 必应 → MyMemory）；手动指定时该引擎优先。
   const [translationEngine, setTranslationEngine] = useState(DEFAULT_TRANSLATION_ENGINE);
   const [translationEngineSaving, setTranslationEngineSaving] = useState(false);
   // 设置 › 翻译器：自定义文本翻译，默认跟随通用里的翻译语言。
@@ -1433,7 +1433,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }, []);
 
   // 进行中任务数增加 → 触发「鼠标处 → 任务中心」的徽标飞入；减少或不变 → 徽标立即如实显示。
-  useEffect(() => {
+  // 必须用 useLayoutEffect（绘制前同步执行）：任务加入的那一帧要把徽标切到预留态
+  // 再上屏。用 useEffect 的话会先画出一帧「徽标可见但飞行动画还没挂上」，
+  // 表现为计数气泡闪现一次然后消失。
+  useLayoutEffect(() => {
     const previous = prevTaskRunningRef.current;
     prevTaskRunningRef.current = taskRunningCount;
     if (taskRunningCount <= previous) {
@@ -3378,6 +3381,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         (update.operation === "modSaveAll" || update.operation === "modRestorePack")
       ) {
         void loadModVersionPacks();
+      }
+      // 一键保存模组变更完成：待捕获变化已清零，刷新模组列表并让详情面板重新拉取。
+      if (update.status === "completed" && update.operation === "modSaveChanges") {
         void loadModVersionTargets();
         setModVersionStatuses({});
       }
@@ -4821,6 +4827,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       });
       showToast(`${label}失败：${message}`, "error");
     }
+  }
+
+  /** 一键保存模组变更：后端自动挑出有待捕获变化（或还没有版本）的模组，
+      无变化的自动跳过；不创建整合包。 */
+  function saveModChanges() {
+    if (!modVersionTargets?.length) {
+      showToast("还没有读取到模组列表，先点「刷新」。", "info");
+      return;
+    }
+    void startModPackOperation("start_mod_version_save_changes", {}, "保存模组变更", "模组变更保存");
   }
 
   function saveAllModVersions() {
@@ -6980,7 +6996,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           <Text color="gray.800" fontSize="sm" fontWeight="700">翻译引擎</Text>
           <Text color="gray.500" fontSize="xs" mt="1">
             优先使用所选引擎翻译开发者新闻、创意工坊详情与翻译器文本，失败时自动回退其余引擎。
-            默认顺序：必应 → Google → MyMemory；「中转翻译」是中转服务器上的离线翻译，只支持中文 / 英语 / 俄语。
+            默认顺序：Google → 必应 → MyMemory；「中转翻译」是中转服务器上的离线翻译，只支持中文 / 英语 / 俄语。
           </Text>
         </Box>
         <WorkshopDropdown
@@ -7374,7 +7390,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     <Box className="pz-panel pz-translator-settings-panel">
       <Text color="gray.900" fontSize="lg" fontWeight="700">翻译器</Text>
       <Text color="gray.500" fontSize="sm" mt="1">
-        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（默认必应优先，失败自动回退；可在 设置 › 通用 › 翻译引擎 里手动指定）。
+        翻译自定义文本，与开发者新闻、创意工坊详情使用同一条翻译线路（默认 Google 优先，失败自动回退；可在 设置 › 通用 › 翻译引擎 里手动指定）。
       </Text>
 
       <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
@@ -8782,6 +8798,15 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           </HStack>
         </Box>
         <HStack gap="1" wrap="wrap">
+          <Button
+            colorPalette="blue"
+            disabled={modVersionBusy || !modVersionTargets?.length}
+            onClick={saveModChanges}
+            size="sm"
+            title="只保存有变化的模组：自动跳过没有改动的模组，不创建整合包"
+          >
+            一键保存模组变更
+          </Button>
           <Button
             colorPalette="blue"
             disabled={modVersionBusy || !modVersionTargets?.length}

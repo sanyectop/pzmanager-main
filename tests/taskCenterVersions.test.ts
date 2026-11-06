@@ -55,6 +55,12 @@ test("the task center badge counts running version operations", () => {
   assert.match(appSource, /badgeFlightId=\{taskFlight \? taskFlight\.key : null\}/);
   // 兜底：动画意外中断 1.5s 后强制收尾。
   assert.match(appSource, /taskFlightFallbackRef\.current = window\.setTimeout\(\(\) => setTaskFlight\(null\), 1500\)/);
+  // 触发飞入的计数监听必须用 useLayoutEffect：任务加入的那一帧就要把徽标切到
+  // 预留态再上屏，否则会先画出一帧可见徽标（气泡闪现后消失）。
+  assert.match(
+    appSource,
+    /useLayoutEffect\(\(\) => \{\s*\n\s*const previous = prevTaskRunningRef\.current;/,
+  );
   assert.match(appSource, /暂无任务。下载光影、保存\/还原版本、清理内存等后台操作会出现在这里。/);
 });
 
