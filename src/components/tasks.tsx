@@ -1,6 +1,6 @@
 /** 从 src/App.tsx 拆出的类型 / 常量 / 工具 / 独立组件，行为保持不变。 */
 import { Badge, Box, Button, HStack, Text } from "@chakra-ui/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { NotificationEntry, TaskItem, ToastItem } from "../app/types";
 import { formatDownloadSize, notificationKindLabel, notificationKindPalette, taskStatusLabel, taskStatusPalette } from "../app/utils";
 
@@ -177,10 +177,82 @@ export function TaskCenterPanel({
     return right.createdAt - left.createdAt;
   });
 
+  // ---- 移除任务的两阶段高度编排 -----------------------------------------
+  // 阶段一（行退场期间）：把面板锁在当前高度，行收拢不改变面板大小；
+  // 阶段二（任务彻底移除后）：用三次缓出（先快后慢）把高度渐变到新的自然高度。
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const lockedHeightRef = useRef<number | null>(null);
+  const heightEaseTimerRef = useRef<number | null>(null);
+  const prevTaskCountRef = useRef(tasks.length);
+
+  useLayoutEffect(() => {
+    if (closingTaskIds.length === 0) {
+      return;
+    }
+    const panel = panelRef.current;
+    if (!panel) {
+      return;
+    }
+    // 上一段高度渐变若还在进行，先停掉并按当前实际高度重新锁。
+    if (heightEaseTimerRef.current !== null) {
+      window.clearTimeout(heightEaseTimerRef.current);
+      heightEaseTimerRef.current = null;
+    }
+    lockedHeightRef.current = panel.offsetHeight;
+    panel.style.transition = "none";
+    panel.style.height = `${lockedHeightRef.current}px`;
+  }, [closingTaskIds]);
+
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) {
+      return;
+    }
+    const previous = prevTaskCountRef.current;
+    prevTaskCountRef.current = tasks.length;
+    if (tasks.length >= previous) {
+      // 内容增多或不变：交还上一段动画可能残留的内联高度。
+      if (heightEaseTimerRef.current !== null) {
+        window.clearTimeout(heightEaseTimerRef.current);
+        heightEaseTimerRef.current = null;
+        panel.style.transition = "";
+        panel.style.height = "";
+        lockedHeightRef.current = null;
+      }
+      return;
+    }
+    const from = lockedHeightRef.current;
+    if (from === null) {
+      return;
+    }
+    lockedHeightRef.current = null;
+    // 目标：行已从列表移除后的自然高度。
+    panel.style.transition = "none";
+    panel.style.height = "auto";
+    const target = panel.offsetHeight;
+    if (Math.abs(target - from) < 1 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      panel.style.transition = "";
+      panel.style.height = "";
+      return;
+    }
+    panel.style.height = `${from}px`;
+    // 强制一次布局，让过渡拿到明确的起点而不是从 auto 直接跳变。
+    void panel.offsetHeight;
+    // easeOutCubic：三次缓出，先快后慢。
+    panel.style.transition = "height 0.32s cubic-bezier(0.215, 0.61, 0.355, 1)";
+    panel.style.height = `${target}px`;
+    heightEaseTimerRef.current = window.setTimeout(() => {
+      heightEaseTimerRef.current = null;
+      panel.style.transition = "";
+      panel.style.height = "";
+    }, 350);
+  }, [tasks]);
+
   return (
     <Box
       aria-label="任务中心"
       className={`pz-task-panel${closing ? " is-closing" : ""}`}
+      ref={panelRef}
       role="dialog"
     >
       <HStack align="start" gap="3" justify="space-between" wrap="wrap">
