@@ -3108,16 +3108,6 @@ body {
   z-index: calc(var(--pz-z-menu) + 1) !important;
 }
 
-/* 多级子菜单的隐形悬停桥：悬停判定区向四周外扩 14px。
-   子菜单（尤其翻转展开到父菜单左侧时）与父菜单边缘之间存在焦点切换死角，
-   鼠标斜穿接缝上角会短暂同时离开两级菜单，Ark 判定离开就播隐藏动画、
-   指针落进子菜单又重播显示动画。外扩后指针全程算在菜单内容内，不再闪断。 */
-.pz-background-menu-layer::before {
-  content: "";
-  position: absolute;
-  inset: -14px;
-}
-
 .pz-background-menu-content {
   min-width: 220px;
   max-width: min(320px, calc(100vw - 1rem));

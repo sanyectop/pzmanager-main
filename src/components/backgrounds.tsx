@@ -130,7 +130,7 @@ export function BackgroundMenu({
               gutter: 0,
               strategy: "fixed",
               flip: true,
-              shift: 8,
+              shift: -14,
               overflowPadding: 8,
             }}
           >
@@ -170,7 +170,7 @@ export function BackgroundMenu({
                     gutter: 0,
                     strategy: "fixed",
                     flip: true,
-                    shift: 8,
+                    shift: -14,
                     overflowPadding: 8,
                   }}
                 >
@@ -224,7 +224,7 @@ export function BackgroundMenu({
                     gutter: 0,
                     strategy: "fixed",
                     flip: true,
-                    shift: 8,
+                    shift: -14,
                     overflowPadding: 8,
                   }}
                 >
@@ -283,7 +283,7 @@ export function BackgroundMenu({
               gutter: 0,
               strategy: "fixed",
               flip: true,
-              shift: 8,
+              shift: -14,
               overflowPadding: 8,
             }}
           >
@@ -315,7 +315,7 @@ export function BackgroundMenu({
               gutter: 0,
               strategy: "fixed",
               flip: true,
-              shift: 8,
+              shift: -14,
               overflowPadding: 8,
             }}
           >
@@ -339,7 +339,7 @@ export function BackgroundMenu({
                     gutter: 0,
                     strategy: "fixed",
                     flip: true,
-                    shift: 8,
+                    shift: -14,
                     overflowPadding: 8,
                   }}
                 >
@@ -393,7 +393,7 @@ export function BackgroundMenu({
                       gutter: 0,
                       strategy: "fixed",
                       flip: true,
-                      shift: 8,
+                      shift: -14,
                       overflowPadding: 8,
                     }}
                   >
