@@ -127,7 +127,7 @@ export function BackgroundMenu({
           <Menu.Root
             positioning={{
               placement: "right-start",
-              gutter: 4,
+              gutter: 0,
               strategy: "fixed",
               flip: true,
               shift: 8,
@@ -167,7 +167,7 @@ export function BackgroundMenu({
                 <Menu.Root
                   positioning={{
                     placement: "right-start",
-                    gutter: 4,
+                    gutter: 0,
                     strategy: "fixed",
                     flip: true,
                     shift: 8,
@@ -221,7 +221,7 @@ export function BackgroundMenu({
                 <Menu.Root
                   positioning={{
                     placement: "right-start",
-                    gutter: 4,
+                    gutter: 0,
                     strategy: "fixed",
                     flip: true,
                     shift: 8,
@@ -280,7 +280,7 @@ export function BackgroundMenu({
           <Menu.Root
             positioning={{
               placement: "right-start",
-              gutter: 4,
+              gutter: 0,
               strategy: "fixed",
               flip: true,
               shift: 8,
@@ -312,7 +312,7 @@ export function BackgroundMenu({
           <Menu.Root
             positioning={{
               placement: "right-start",
-              gutter: 4,
+              gutter: 0,
               strategy: "fixed",
               flip: true,
               shift: 8,
@@ -336,7 +336,7 @@ export function BackgroundMenu({
                 <Menu.Root
                   positioning={{
                     placement: "right-start",
-                    gutter: 4,
+                    gutter: 0,
                     strategy: "fixed",
                     flip: true,
                     shift: 8,
@@ -390,7 +390,7 @@ export function BackgroundMenu({
                     key={key}
                     positioning={{
                       placement: "right-start",
-                      gutter: 4,
+                      gutter: 0,
                       strategy: "fixed",
                       flip: true,
                       shift: 8,
