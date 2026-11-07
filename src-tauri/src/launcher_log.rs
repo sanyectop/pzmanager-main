@@ -144,6 +144,12 @@ fn append_at(path: &Path, level: &str, message: &str) -> std::io::Result<()> {
 }
 
 fn write_log(level: &str, message: &str) {
+    // 测试进程与启动器共用 %USERPROFILE%\Zomboid\.pzmanager\logs\launcher.log；
+    // cargo test 触发的日志（如熔断测试）会写进真实日志文件污染用户日志，
+    // 所以测试构建下一律不落盘（launcher_log 自身测试只用 _at 变体 + 临时目录）。
+    if cfg!(test) {
+        return;
+    }
     let Some(path) = log_file_path() else {
         return;
     };

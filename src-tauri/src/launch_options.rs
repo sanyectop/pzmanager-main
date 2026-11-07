@@ -159,11 +159,14 @@ pub(crate) fn normalize_loader_agent_tokens(tokens: &mut Vec<String>, policy_age
     changed
 }
 
+/// LaunchOptions 是否已配置好 ZombieBuddy 加载器（agent 存在即视为已配置）。
+///
+/// 旧版还要求 agent 之后必须跟 `--` 分隔符；2026-11-07 起写入时会把裸 `--` 一律剥掉
+/// （B42 自带的 Zulu 25 JRE 报 "Unrecognized option: --" 直接拒绝创建 JVM，见
+/// `patch_steam_launch_options_value_with_memory`），这条检查没跟着改，导致"安装成功
+/// 但状态永远显示缺少 Steam LaunchOptions"。现在放宽为只验 agent 本身。
 pub(crate) fn steam_launch_value_has_both(value: &str) -> bool {
-    let tokens: Vec<_> = value.split_whitespace().collect();
-    tokens.iter().enumerate().any(|(index, token)| {
-        is_zombie_buddy_agent_token(token) && tokens[index + 1..].contains(&"--")
-    })
+    contains_zombie_buddy_agent(value)
 }
 
 /// 按当前加载器方案改写 Steam LaunchOptions 值：
@@ -182,19 +185,16 @@ pub(crate) fn patch_steam_launch_options_value_with_memory(
     match policy_agent {
         Some(agent) => {
             normalize_loader_agent_tokens(&mut tokens, agent);
-            let agent_index = tokens
-                .iter()
-                .position(|token| is_zombie_buddy_agent_token(token))
-                .unwrap_or(0);
-            // ZB 要求 agent 参数后带 `--` 结束符。
-            if !tokens[agent_index + 1..].iter().any(|token| token == "--") {
-                tokens.insert(agent_index + 1, "--".to_string());
-            }
         }
         None => {
             strip_loader_agent_tokens(&mut tokens);
         }
     }
+    // 裸 `--` 一律剥掉：B42 自带的 Zulu 25 JRE 直接报 "Unrecognized option: --" 拒绝创建
+    // JVM（实测 2026-11-07，游戏 1-2 秒内秒退且不落任何日志）。旧版本曾在这里给 agent
+    // 后面自动补 `--`，但 11-01 pzopt 写的启动项没有 `--`，ZB agent 照常工作——它从来
+    // 不是必需品；`--` 只会把后面的 JVM 参数误当成主类参数。
+    tokens.retain(|token| token != "--");
 
     if let Some(memory_mb) = memory_mb {
         let target = memory_arg(memory_mb);
@@ -209,11 +209,14 @@ pub(crate) fn patch_steam_launch_options_value_with_memory(
                 tokens.remove(index);
             }
         } else {
-            let separator = tokens
+            // 内存是 JVM 参数，紧跟在 agent 之后（没有 agent 就放最前），
+            // 保持「JVM 参数在前、游戏参数在后」的次序。
+            let insert_at = tokens
                 .iter()
-                .position(|token| token == "--")
-                .unwrap_or(tokens.len());
-            tokens.insert(separator, target);
+                .position(|token| is_zombie_buddy_agent_token(token))
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            tokens.insert(insert_at, target);
         }
     }
 

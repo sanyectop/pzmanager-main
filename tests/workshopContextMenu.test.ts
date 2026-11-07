@@ -59,9 +59,11 @@ test("a square share button on the workshop row opens Steam", () => {
   assert.match(buttonBlock, /event\.stopPropagation\(\)/);
   assert.match(buttonBlock, /void openWorkshopItem\(item\.id, item\.fileUrl\)/);
   // 图标是斜向右上的箭头（↗），不是三点连线的分享图标，也不是先上后右的折线。
-  assert.match(buttonBlock, /className="pz-workshop-share-icon"/);
-  assert.match(buttonBlock, /d="M3\.4 12\.6 12\.8 3\.2"/);
-  assert.match(buttonBlock, /d="M6\.8 3\.2H12\.8V9\.2"/);
+  // 箭头抽成了公共组件（components/icons.tsx），这里沿用工坊的固定尺寸类。
+  assert.match(buttonBlock, /<ExternalArrowIcon className="pz-workshop-share-icon" \/>/);
+  assert.match(appSource, /export function ExternalArrowIcon/);
+  assert.match(appSource, /d="M3\.4 12\.6 12\.8 3\.2"/);
+  assert.match(appSource, /d="M6\.8 3\.2H12\.8V9\.2"/);
   assert.doesNotMatch(buttonBlock, /d="M4\.2 13\.4V3\.6H12"/);
   assert.doesNotMatch(buttonBlock, /default-share-icon|faShareNodes/);
   assert.match(buttonBlock, /aria-label=\{`在 Steam 中打开 \$\{item\.title \|\| "未命名模组"\}`\}/);

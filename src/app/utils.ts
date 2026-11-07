@@ -89,6 +89,8 @@ export function overlayPhaseLabel(phase: string): string {
       return "正在读取加载进度";
     case "finished":
       return "已完成";
+    case "game-exited":
+      return "游戏已退出";
     case "error":
       return "失败";
     default:
@@ -255,41 +257,55 @@ export function buildCustomTranslationJobs(source: string): {
   return { lines, jobs };
 }
 
+/** 分批调用后端翻译并回填。返回 false = 连续两批请求失败后中止：
+ * 后端多半正在重启或翻译服务整体不可用，调用方应提示用户重试，
+ * 而不是像旧版那样静默吞掉所有错误，让页面永远停在原文。
+ * 返回 true = 全部翻完或调用方已取消。 */
 export async function translateInBatches(
   jobs: Array<{ sid: string; text: string }>,
   language: string,
   onResults: (results: DeveloperNewsTranslationResult[]) => void,
   onProgress: (completed: number, total: number) => void,
   isCancelled: () => boolean,
-): Promise<void> {
-  for (let index = 0; index < jobs.length; index += TRANSLATION_BATCH_SIZE) {
+): Promise<boolean> {
+  let index = 0;
+  let consecutiveFailures = 0;
+  while (index < jobs.length) {
     if (isCancelled()) {
-      return;
+      return true;
     }
     const batch = jobs.slice(index, index + TRANSLATION_BATCH_SIZE);
+    let results: DeveloperNewsTranslationResult[];
     try {
-      const results = await invoke<DeveloperNewsTranslationResult[]>("translate_developer_news_batch", {
+      results = await invoke<DeveloperNewsTranslationResult[]>("translate_developer_news_batch", {
         jobs: batch,
         language,
       });
-      if (isCancelled()) {
-        return;
-      }
-      onResults(results);
+      consecutiveFailures = 0;
     } catch {
       if (isCancelled()) {
-        return;
+        return true;
       }
-    } finally {
-      if (!isCancelled()) {
-        onProgress(Math.min(index + batch.length, jobs.length), jobs.length);
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 2) {
+        return false;
       }
+      // 失败后等 1.5 秒重试同一批（dev 模式后端重启的间隙就能扛过去）。
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      continue;
     }
+    if (isCancelled()) {
+      return true;
+    }
+    onResults(results);
+    // 只有真正成功的批次才推进进度——失败批不虚报 completed。
+    index += TRANSLATION_BATCH_SIZE;
+    onProgress(Math.min(index, jobs.length), jobs.length);
   }
+  return true;
 }
 
-export function formatNewsEngineShare(tally: Record<string, number> | undefined): string | null {
-  if (!tally) return null;
+export function formatNewsEngineShare(tally: Record<string, number> | undefined): string | null {  if (!tally) return null;
   const entries = Object.entries(tally).filter(([, count]) => count > 0);
   const total = entries.reduce((sum, [, count]) => sum + count, 0);
   if (total === 0) return null;

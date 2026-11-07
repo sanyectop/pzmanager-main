@@ -103,6 +103,9 @@ pub(crate) struct ScannedJarMod {
     pub(crate) patch_classes: Vec<String>,
     pub(crate) patch_methods: Vec<JavaPatchMethod>,
     pub(crate) lua_classes: Vec<String>,
+    /// 该模组字节码引用到的游戏类（zombie.* / fmod.*，二进制名）。
+    /// 「注入项搜索」的数据源：崩溃诊断点名的类在这里反查模组。
+    pub(crate) class_references: Vec<String>,
     pub(crate) decision: Option<bool>,
 }
 
@@ -324,6 +327,47 @@ pub(crate) fn class_annotations(class_bytes: &[u8]) -> Option<JavaClassAnnotatio
     )
 }
 
+/// 游戏类引用提取的正则：`zombie.` / `zombie/`、`fmod.` / `fmod/` 开头的类名。
+///
+/// 前向边界 `[^./]` 只排除「更长名字的尾巴」——`me.zombie.xxx`（前面是点）、
+/// `media/lua/zombie.foo` 这类路径段（前面是斜杠）；字段描述符的 `Lzombie/…`
+/// 前缀是字母 `L`，必须放行。续排字符集含 `.` 和 `/`，所以点分注解值
+/// （`zombie.gameStates.GameLoadingState`）和斜杠描述符
+/// （`Lzombie/util/list/PZArrayList;`）都吃到完整类名。
+fn game_class_reference_pattern() -> &'static regex::Regex {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(r#"(?:^|[^./])((?:zombie|fmod)[./][A-Za-z0-9_$][A-Za-z0-9_$.\/]*)"#)
+            .expect("游戏类引用正则必须能编译")
+    })
+}
+
+/// 从 classfile 常量池提取该类**引用到的游戏类**（zombie.* / fmod.*，二进制名、去重排序）。
+///
+/// 崩溃诊断点名的往往是模组字节码里引用的类（如 42.22 移除的
+/// `zombie.util.list.PZArrayList`，它出现在 DGVViewpointEyes 的字段描述符里），
+/// 而不是 @Patch 注解本身——所以搜「注入项」必须扫常量池，而不是只看注解。
+pub(crate) fn class_references(class_bytes: &[u8]) -> Vec<String> {
+    let Ok((_, class_file)) = java_class_rs::parse_classfile(class_bytes) else {
+        return Vec::new();
+    };
+    let mut references = std::collections::BTreeSet::new();
+    for entry in &class_file.constant_pool {
+        let java_class_rs::ConstantPoolEntry::Utf8(info) = entry else {
+            continue;
+        };
+        for capture in game_class_reference_pattern().captures_iter(&info.value) {
+            let token = &capture[1];
+            let dotted = token
+                .replace('/', ".")
+                .trim_end_matches(['.', '/'])
+                .to_string();
+            references.insert(dotted);
+        }
+    }
+    references.into_iter().collect()
+}
+
 pub(crate) fn patch_method_annotation_name(descriptor: &str) -> Option<&'static str> {
     let name = descriptor
         .strip_prefix('L')?
@@ -363,6 +407,7 @@ pub(crate) fn scan_java_mod_jar(
     let mut patch_classes = Vec::new();
     let mut patch_methods = Vec::new();
     let mut lua_classes = Vec::new();
+    let mut collected_references = std::collections::BTreeSet::new();
 
     for index in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(index) else {
@@ -379,6 +424,9 @@ pub(crate) fn scan_java_mod_jar(
         if entry.read_to_end(&mut class_bytes).is_err() {
             continue;
         }
+        // 游戏类引用收**全部**扫描到的类文件（不受下面 in_declared_package 门控）：
+        // 引用关系是"这个 jar 用了哪些游戏类"，与补丁类归哪个包无关。
+        collected_references.extend(class_references(&class_bytes));
         let Some(class_info) = class_annotations(&class_bytes) else {
             continue;
         };
@@ -420,6 +468,7 @@ pub(crate) fn scan_java_mod_jar(
     patch_methods.dedup();
     lua_classes.sort();
     lua_classes.dedup();
+    let class_references: Vec<String> = collected_references.into_iter().collect();
     let disabled = info_path.file_name().is_some_and(|name| {
         name.to_string_lossy()
             .eq_ignore_ascii_case("mod.info.disabled")
@@ -442,6 +491,7 @@ pub(crate) fn scan_java_mod_jar(
         patch_classes,
         patch_methods,
         lua_classes,
+        class_references,
         decision: Some(!disabled),
     })
 }

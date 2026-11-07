@@ -59,7 +59,21 @@ test("save-all reuses every mod's own chain and records the refs", () => {
   assert.match(backendSource, /restore_mod_refs\(&pack\.mods/);
   assert.match(backendSource, /"modRestorePack"/);
   // 只有一步，进度条隐藏计数。
-  assert.match(backendSource, /"modSaveAll" \| "modRestorePack" =>/);
+  assert.match(backendSource, /"modSaveAll" \| "modSaveChanges" \| "modRestorePack" =>/);
+});
+
+test("save-changes picks only mods with pending changes and skips the pack", () => {
+  // 11-06 新增「一键保存模组变更」：逐模组元数据比对（不哈希）挑出有变化的，
+  // 无变化跳过；不创建整合包。完成后刷新模组状态（待捕获变化清零）。
+  assert.match(backendSource, /fn start_mod_version_save_changes\(app: tauri::AppHandle\)/);
+  assert.match(backendSource, /fn mod_root_has_pending_changes\(/);
+  assert.match(backendSource, /"modSaveChanges"/);
+  assert.match(backendSource, /所有模组都没有变化，无需保存。/);
+  assert.match(backendSource, /capture_mod_versions\(&pending, "保存变化"/);
+  assert.match(backendSource, /            start_mod_version_save_changes,/);
+  assert.match(appSource, /一键保存模组变更/);
+  assert.match(appSource, /"start_mod_version_save_changes"/);
+  assert.match(appSource, /update\.operation === "modSaveChanges"/);
 });
 
 test("mod version tab exposes the save-all button and the pack list", () => {

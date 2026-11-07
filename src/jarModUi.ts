@@ -94,3 +94,48 @@ export function toggleJarModExpansion(expandedKeys: ReadonlySet<string>, key: st
   }
   return next;
 }
+
+/** 「注入项搜索」要匹配的字段来源：诊断里点名的可能是游戏类，也可能是模组自身类名/方法名。 */
+export type JarModInjectionFields = {
+  classReferences: string[];
+  patchClasses: string[];
+  luaClasses: string[];
+  patchMethods: Array<{
+    annotation: string;
+    methodName: string;
+  }>;
+};
+
+/** 归一化注入项查询：去空白、转小写、斜杠归一成点分（支持两种输入形式）。 */
+function normalizeInjectionQuery(query: string): string {
+  return query.trim().toLowerCase().replace(/\//g, ".");
+}
+
+/** 模组是否拥有这条注入项：对游戏类引用、补丁类、Lua 暴露类、注入方法名做子串匹配。 */
+export function jarModMatchesInjectionItem(
+  mod: JarModInjectionFields,
+  query: string,
+): boolean {
+  const normalized = normalizeInjectionQuery(query);
+  if (!normalized) {
+    return true;
+  }
+  const haystacks = [
+    ...mod.classReferences,
+    ...mod.patchClasses,
+    ...mod.luaClasses,
+    ...mod.patchMethods.map((patchMethod) => patchMethod.methodName),
+  ];
+  return haystacks.some((value) => value.toLowerCase().replace(/\//g, ".").includes(normalized));
+}
+
+/** 按注入项过滤模组；query 为空白时原样返回（不过滤）。 */
+export function filterJarModsByInjectionItem<T extends JarModInjectionFields>(
+  mods: T[],
+  query: string,
+): T[] {
+  if (!query.trim()) {
+    return mods;
+  }
+  return mods.filter((mod) => jarModMatchesInjectionItem(mod, query));
+}

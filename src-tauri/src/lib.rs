@@ -40,10 +40,14 @@ mod lua_mods;
 pub(crate) use lua_mods::*;
 mod settings;
 pub(crate) use settings::*;
+mod shaderpack_config;
+pub(crate) use shaderpack_config::*;
 mod steam;
 pub(crate) use steam::*;
 mod support;
 pub(crate) use support::*;
+mod task_store;
+pub(crate) use task_store::*;
 mod viewpoint_media;
 pub(crate) use viewpoint_media::*;
 
@@ -205,7 +209,7 @@ struct AppSettings {
     shader_download_threads: Option<usize>,
     memory_limit_mb: Option<u64>,
     translation_language: Option<String>,
-    /// 「通用 › 翻译引擎」：auto = 默认链（必应 → Google → MyMemory）；其余为手动指定的
+    /// 「通用 › 翻译引擎」：auto = 默认链（Google → 必应 → MyMemory）；其余为手动指定的
     /// 优先引擎（bing / google / mymemory / relay），失败后仍按默认顺序回退其余引擎。
     #[serde(default)]
     translation_engine: Option<String>,
@@ -1171,7 +1175,8 @@ fn version_step_for(operation: &str, phase: &str) -> u32 {
             _ => 0,
         },
         // 一键保存 / 还原整套模组：只有一步（进度按模组等分）。
-        "modSaveAll" | "modRestorePack" => match phase {
+        // 一键保存（全部/仅变更）/ 还原整套模组：只有一步（进度按模组等分）。
+        "modSaveAll" | "modSaveChanges" | "modRestorePack" => match phase {
             "preparing" | "scanning" | "hashing" | "mods" => 1,
             _ => 0,
         },
@@ -2027,6 +2032,75 @@ fn rename_mod_version_pack(pack_id: String, label: String) -> Result<String, Str
     Ok(format!("整合包「{old_label}」已重命名为「{pack_label}」。"))
 }
 
+/// 模组是否有待保存的变化：没有历史（需要基准）或有待捕获变化都算。
+/// 状态读不出来（目录消失等）按「没有变化」处理——这种模组在保存时会单独报错，
+/// 保守地包含它只会让一键保存卡在一个必败的模组上。
+fn mod_root_has_pending_changes(
+    root: &mod_versioning::ModRoot,
+    store_base: &Path,
+) -> bool {
+    let Ok(store) = mod_version_store(root, store_base) else {
+        return false;
+    };
+    let versions = versioning::read_versions(&store).unwrap_or_default();
+    if versions.is_empty() {
+        return true;
+    }
+    match versioning::get_status(Some(&root.path), &store, None, "mods", false) {
+        Ok(status) => status
+            .pending_changes
+            .is_some_and(|changes| changes.added + changes.removed + changes.modified > 0),
+        Err(_) => false,
+    }
+}
+
+/// 一键保存模组变更：只保存「有待捕获变化 / 还没有版本」的模组，
+/// 无变化的模组自动跳过。不创建整合包（那是一键保存全部模组的职责）。
+#[tauri::command(async)]
+fn start_mod_version_save_changes(app: tauri::AppHandle) -> Result<u64, String> {
+    let (store_base, parallel) = configured_version_options()?;
+    let roots = collect_mod_roots();
+    if roots.is_empty() {
+        return Err("没有可保存的模组。".to_string());
+    }
+    spawn_version_operation_with(
+        app,
+        "mod-version-progress",
+        "modSaveChanges",
+        None,
+        1,
+        move |progress| {
+            // 逐个模组做元数据比对（不哈希，只看路径 + 大小），挑出有变化的；
+            // 比对本身也要几秒，进度条按同样的模组等分推进。
+            let total = roots.len();
+            let mut pending = Vec::new();
+            for (index, root) in roots.iter().enumerate() {
+                progress(mod_marker_event(index, total, &root.name))?;
+                if mod_root_has_pending_changes(root, &store_base) {
+                    pending.push(root.clone());
+                }
+            }
+            if pending.is_empty() {
+                return Ok("所有模组都没有变化，无需保存。".to_string());
+            }
+            let skipped = total - pending.len();
+            let (references, failures) =
+                capture_mod_versions(&pending, "保存变化", parallel, progress)?;
+            let failure_note = if failures > 0 {
+                format!("，{failures} 个失败")
+            } else {
+                String::new()
+            };
+            Ok(format!(
+                "已保存 {} 个模组的变更（{} 个无变化跳过{}）。",
+                references.len(),
+                skipped,
+                failure_note
+            ))
+        },
+    )
+}
+
 /// 一键把当前所有模组各存一个版本，并记成一条整合包。
 #[tauri::command(async)]
 fn start_mod_version_save_all(
@@ -2688,6 +2762,13 @@ fn launch_project_zomboid(
             steam_configs.len()
         ));
 
+        // 光影包覆写：把启动器里配置的 minecraft.* 参数行级写进 viewpoint-live.properties。
+        // 尽力而为：失败只记日志不阻断启动——游戏启动配置在上面已经写完，光影只是锦上添花。
+        let shader_override_applied = apply_shaderpack_overrides_for_launch().unwrap_or_else(|error| {
+            launcher_log::error(&format!("光影包覆写失败：{error}"));
+            false
+        });
+
         // 「启动时清理内存」：拉起游戏之前先把各进程的工作集还给系统。
         // 此刻游戏还没起来，所以这次清理不会被 memclean 的保护名单挡掉任何东西。
         // 清理失败/读不到内存状态都不影响启动——这是纯优化，不能变成启动的前置条件。
@@ -2717,6 +2798,10 @@ fn launch_project_zomboid(
         match launch_result {
             Ok(_) => {
                 launcher_log::info("已发送 Steam 启动请求。");
+                // 光影覆写真正写入了才需要还原监听：等游戏退出后把 viewpoint-live.properties 整文件还原。
+                if shader_override_applied {
+                    overlay_session::start_shaderpack_restore_watcher();
+                }
                 Ok(())
             }
             Err(error) => {
@@ -2833,6 +2918,8 @@ pub fn run() {
             log_frontend_message,
             get_system_memory_mb,
             get_app_settings,
+            load_saved_tasks,
+            save_tasks,
             save_memory_limit,
             save_developer_mode,
             save_steam_account_hidden,
@@ -2883,6 +2970,7 @@ pub fn run() {
             delete_mod_version_pack,
             rename_mod_version_pack,
             start_mod_version_save_all,
+            start_mod_version_save_changes,
             start_mod_version_restore_pack,
             submit_feedback,
             list_submitted_feedback,
@@ -2935,6 +3023,10 @@ pub fn run() {
             list_viewpoint_shaderpacks,
             import_viewpoint_shaderpack,
             delete_viewpoint_shaderpack,
+            read_shaderpack_config,
+            get_shaderpack_overrides,
+            save_shaderpack_override,
+            clear_shaderpack_override,
             workshop_options,
             browse_workshop,
             fetch_workshop_item_detail,

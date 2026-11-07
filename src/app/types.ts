@@ -152,6 +152,8 @@ export type ScannedJarMod = {
     methodName: string;
   }>;
   luaClasses: string[];
+  /** 模组字节码引用到的游戏类（zombie.* / fmod.*）。「注入项搜索」的数据源。 */
+  classReferences: string[];
   decision: boolean | null;
 };
 
@@ -180,6 +182,10 @@ export type OverlaySessionUpdate = {
   processName: string | null;
   zbLines: number;
   elapsedMs: number;
+  /** 游戏停止原因（与后端 StopReason 的 serde 序列化一致），仅「游戏进程已退出」时给出。 */
+  stopReason?: string | null;
+  /** 游戏进程退出码；进程消亡后拿不到时缺省。 */
+  exitCode?: number | null;
 };
 
 export type OverlayZbProgress = {
@@ -403,7 +409,7 @@ export type AppSettings = {
   shaderDownloadThreads: number | null;
   memoryLimitMb: number | null;
   translationLanguage: string | null;
-  /** 「通用 › 翻译引擎」：auto = 默认链（必应 → Google → MyMemory）；其余为手动指定的优先引擎。 */
+  /** 「通用 › 翻译引擎」：auto = 默认链（Google → 必应 → MyMemory）；其余为手动指定的优先引擎。 */
   translationEngine: string | null;
   fontContrast: number | null;
   /** 0–200：毛玻璃 / 亚克力的模糊强度，100 = 设计基准。 */
@@ -586,3 +592,87 @@ export type CustomTranslationLine =
   | { kind: "blank" }
   | { kind: "raw"; text: string }
   | { kind: "translatable"; chunks: string[]; sids: string[]; separators: string[] };
+
+/** Viewpoint 光影包配置：shaders.properties 解析结果 + viewpoint-live.properties 当前值。 */
+
+/** 预设里的一个参数 token（`opt=value` / `opt` 开 / `!opt` 关）。 */
+export type ShaderProfileToken = {
+  option: string;
+  value: string;
+};
+
+/** shaders.properties 里的一个参数：默认值、是否滑块、观测到的取值、live 文件当前值。 */
+export type ShaderpackOptionInfo = {
+  name: string;
+  /** lang 文件里的显示名（option.<name>）；没有 = null（前端回退参数名）。 */
+  label: string | null;
+  /** lang 文件里的说明（option.<name>.comment）。 */
+  comment: string | null;
+  defaultValue: string | null;
+  slider: boolean;
+  values: string[];
+  /** 有本地化标签的观测取值。 */
+  valueLabels: ShaderValueLabel[];
+  liveValue: string | null;
+};
+
+/** 一个取值的本地化显示名（value.<name>.<value> / 通用 value.<value>）。 */
+export type ShaderValueLabel = {
+  value: string;
+  label: string;
+};
+
+/** shaders.properties 里的一个预设（profile.*）。 */
+export type ShaderProfileMeta = {
+  name: string;
+  /** lang 文件里的预设显示名（profile.<name>）；没有 = null。 */
+  label: string | null;
+  tokens: ShaderProfileToken[];
+};
+
+/** 一个光影包的覆写配置（shaderpack-overrides.json 里的一条）。 */
+export type ShaderpackOverrideEntry = {
+  packName: string;
+  /** 选用的预设；空 = 不覆写预设。 */
+  profile: string | null;
+  /** 参数覆写值（键 = shaders.properties 的参数名）。 */
+  values: Record<string, string>;
+};
+
+/** read_shaderpack_config 返回的弹窗数据。 */
+/** 分页界面里的一个格子（OptiFine / Iris 的 screen 布局 token）。 */
+export type ShaderScreenToken = {
+  /** "option"（参数）| "screen"（[子屏] 引用）| "empty" | "profile"（<profile> 预设按钮）。 */
+  kind: "option" | "screen" | "empty" | "profile";
+  /** option 名或子屏名；empty 没有。 */
+  name: string | null;
+};
+
+/** 一个分页界面（主页 = "screen"，子页 = screen.<name> 的 name）。 */
+export type ShaderScreenInfo = {
+  name: string;
+  /** lang 的 screen.<name> 显示名。 */
+  label: string | null;
+  /** screen.<name>.columns，OptiFine 默认 2。 */
+  columns: number;
+  tokens: ShaderScreenToken[];
+};
+
+export type ShaderpackConfigInfo = {
+  packName: string;
+  /** 推导 / 反查出的 packId（写入键用）。 */
+  packId: string;
+  /** packId 是否与 live 文件里已出现的键对上；false = 推导值。 */
+  packIdMatched: boolean;
+  /** 实际使用的 lang 文件名字干（如 "zh_CN"）；包里没有 lang = null。 */
+  lang: string | null;
+  /** 包里可用的全部语言（文件名字干，去重）。 */
+  availableLangs: string[];
+  /** 分页界面（Iris 同款布局）；第一个是主页。 */
+  screens: ShaderScreenInfo[];
+  profiles: ShaderProfileMeta[];
+  options: ShaderpackOptionInfo[];
+  /** live 文件里当前的 minecraftProfile.<packId>。 */
+  liveProfile: string | null;
+  saved: ShaderpackOverrideEntry | null;
+};

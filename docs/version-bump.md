@@ -19,7 +19,7 @@
 | 4 | `overlay-dll/Cargo.toml` | `version` | `pz_overlay` DLL 版本。**运行时可见**：DLL 加载时用 `env!("CARGO_PKG_VERSION")` 往 `%TEMP%\overlay.log` 写首行 `pz_overlay vX.Y.Z 已加载（pid=…）`——排查用户跑的是哪版 DLL 就看这行 |
 | 5 | `docs/promo/release-page/index.html` | 「当前版本：vX.Y.Z」文案 + 下载链接里的文件名 | 发布页展示；下载链接文件名要和 `release/` 里实际产物一致 |
 | 6 | `docs/overlay-injection.md` §7 | 排查表里的示例日志行 `pz_overlay vX.Y.Z 已加载` | 示例要跟着当前版本走，避免排查时对不上 |
-| 7 | `update-api(服务端请勿上传)/api/latest.json`（该目录不随仓库推送） | `version` / `pubDate` / `notes` / `downloads` 直链（123 云盘 `cloudDrive` + GitHub 安装包、便携版） | **启动器更新源**（Cloudflare Pages，部署流程见该目录内的 README.md）。启动器只比这里改晚才提示更新——所以它必须和本次发版一起更新并重新部署，否则老用户收不到提示 |
+| 7 | `update-api(服务端请勿上传)/changelog.md`（该目录不随仓库推送） | H1 版本号、`- 键：值`（发布日期 / 123 云盘 / Windows 安装包 / Windows 便携版 / 发布页）、`## 更新内容` 逐条 | **启动器更新源的编辑入口**：改完跑 `python "pytools(开发人员工具请勿上传)/build_update_api.py"` 生成 `api/latest.json`（字段映射见 update-api 目录内 README.md）。启动器只比更新源晚才提示更新——所以它必须和本次发版一起更新并重新部署，否则老用户收不到提示 |
 
 ## 二、不要手改、随构建自动更新的 3 处
 

@@ -76,7 +76,7 @@ pzmanager
 ├─ 资源中心      创意工坊 / 光影下载 / 开发者新闻
 ├─ 模组管理      Lua 模组 / JAR 模组 / 模组预设
 ├─ 设置          关于 / 通用 / 百宝箱 / 日志 / 模组加载器 / 启动
-└─ 任务中心      标题栏右侧，光影下载 + 版本保存/还原等后台任务
+└─ 任务中心      标题栏右侧，光影下载 + 版本保存/还原等后台任务；任务落盘 tasks.json，启动恢复历史（退出时在跑的标为中断）
 ```
 
 ### 2.2 功能清单与成熟度
@@ -96,7 +96,7 @@ pzmanager
 | 创意工坊浏览 | 资源中心 › 创意工坊 | 稳定 | 排序/时间/标签/搜索/分页，300 s 缓存 |
 | 工坊详情与翻译 | 工坊列表右键 | 稳定 | 官方 API + BBCode + 按段翻译 |
 | 光影资源检索/下载 | 资源中心 › 光影下载 | 稳定 | Modrinth 优先、CurseForge 兜底、镜像回退；下载进入全局任务中心 |
-| 开发者新闻与翻译 | 资源中心 › 开发者新闻 | 稳定 | Steam News + 15 条/批翻译 |
+| 开发者新闻与翻译 | 资源中心 › 开发者新闻 | 稳定 | Steam News + 20 句/批拼接翻译 |
 | Lua 模组管理 | 模组管理 › Lua | 稳定 | 排序、依赖前置、批量启停 |
 | JAR 模组管理 | 模组管理 › JAR | 稳定（需 ZombieBuddy） | 注解扫描、审批、冲突分级 |
 | 模组预设 | 模组管理侧栏 | 稳定 | Lua 顺序 + JAR 启停快照 |
@@ -219,9 +219,9 @@ pzmanager
 
 - 取 `ISteamNews/GetNewsForApp/v2`（AppID 108600），可限制条数与单条 gid；
 - 正文先清洗（白名单标签、URL 校验、属性过滤），再按可翻译片段切分并包 `data-sid`；
-- 前端按 **15 条/批**调 `translate_developer_news_batch`，后台按 `BATCH_SIZE=15`、
-  单条 `MAX_TEXT_LEN=2000` 再切批；Google 优先、失败回退 Yandex；
-- 每条新闻显示「翻译来源 Google 62% · Yandex 38%」的引擎占比（`engineTally`）；
+- 前端按 **20 句/批**调 `translate_developer_news_batch`，后台按 `BATCH_SIZE=JOIN_BATCH=20`（整批拼成一段发一次引擎请求）、
+  单条 `MAX_TEXT_LEN=2000` 再切批；Google 优先、失败按必应 → MyMemory 回退；
+- 每条新闻显示「翻译来源 Google 62% · 必应 38%」的引擎占比（`engineTally`）；
 - 翻译语言取设置 › 通用的全局值；选 English 时不翻译、直接显示原文；
 - 翻译结果与源文按 `(语言, 文本)` 做内存缓存，重复打开页面不会重复请求。
 
@@ -733,9 +733,10 @@ ProjectZomboid64.json vmArgs[0] = -agentpath:<pz_overlay.dll>
   其他属性过滤；BBCode（`[b][i][url][img]...`）转 HTML；
 - **切段**：按句子/标点切分，合并过短片段，纯数字/符号不送翻译；每段包
   `<span data-sid="...">`，译文按 sid 原位替换；
-- **批处理**：前端 15 条/批，后端再按 15 条或 2000 字符切批；超时 8 s、单次翻译 5 s；
-- **引擎**：中转离线翻译（只接 zh/en/ru）→ Google `translate_a/single` →
+- **批处理**：前端 20 句/批，后端再按 20 句或 2000 字符切批；超时 8 s、单次翻译 5 s；
+- **引擎**：Google `translate_a/single` →
   必应（手机版 `cn.bing.com` 的 `ttranslatev3`，单段 ≤900 字切分）→ MyMemory；
+  中转离线翻译（只接 zh/en/ru）仅在「翻译引擎」手动指定时批级先试；
   失败各自熔断 10 分钟；结果记录引擎到 `engineTally`，前端展示占比；
 - **缓存**：`(语言, 文本) → (译文, 引擎)`，进程内 HashMap，避免重复请求。
 

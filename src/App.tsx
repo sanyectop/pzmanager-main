@@ -1,4 +1,4 @@
-import { Avatar, Badge, Box, Button, Checkbox, HStack, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea } from "@chakra-ui/react";
+import { Avatar, Badge, Box, Button, Checkbox, HStack, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea, VStack } from "@chakra-ui/react";
 import { faAnglesDown, faAnglesUp, faCircleInfo, faClockRotateLeft, faCubes, faGear, faHouse, faImages, faPlus, faScrewdriverWrench, faSun, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,6 +28,7 @@ import {
   shouldFinishMemoryClean,
 } from "./memoryClean";
 import { MIN_MEMORY_MB, defaultMemoryLimitMb } from "./memorySettings";
+import { sanitizeSavedTasks, TASK_HISTORY_CAP } from "./taskHistory";
 import {
   DEFAULT_STEAM_RELAY_BASE,
   STEAM_RELAY_MODE_OPTIONS,
@@ -52,6 +53,7 @@ import {
 } from "./modManagement";
 import {
   analyzeJarModConflicts,
+  filterJarModsByInjectionItem,
   jarScanStatusLabel,
   toggleJarModExpansion,
   type JarModConflictRisk,
@@ -97,6 +99,7 @@ import {
   SettingsPage,
   ShaderDownloadRequest,
   ShaderpackIcon,
+  ShaderpackOverrideEntry,
   StartupTiming,
   TaskItem,
   ToastItem,
@@ -192,9 +195,18 @@ import {
   startupTimingText,
   translateInBatches,
 } from "./app/utils";
+import {
+  formatGameStopDialogBody,
+  GAME_LAUNCH_FAIL_TITLE,
+  GAME_STOP_DIALOG_TITLE,
+  shouldReportSessionEnd,
+} from "./sessionEnd";
 import { BackgroundMenu } from "./components/backgrounds";
 import { ConfirmDialog, type ConfirmRequest } from "./components/confirm";
+import { ExternalArrowIcon } from "./components/icons";
+import { SettingsRow, SettingsSection } from "./components/settingsCards";
 import { FastLaunchCacheStatusLine, FastLaunchWarningDialog } from "./components/fastLaunch";
+import { ShaderpackConfigDialog } from "./components/shaderpackConfig";
 import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWarningDialog, VersionStoreDriveDialog } from "./components/version";
 import { NotificationConsole, TaskArrivalFlight, TaskCenterPanel, ToastViewport } from "./components/tasks";
 import { ResourceDownloadBrowser, WorkshopDropdown, WorkshopTagPicker, WorkshopTagSelectionSummary } from "./components/workshop";
@@ -231,6 +243,8 @@ function App() {
   const confirmExitTimerRef = useRef<number | null>(null);
   const [notificationHistory, setNotificationHistory] = useState<NotificationEntry[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  /** 任务历史是否已从 tasks.json 装载完：装载前禁止落盘，防止空列表覆盖历史。 */
+  const tasksLoadedRef = useRef(false);
   /** 正在播移除动画的任务 id；动画走完才真正从 tasks 里删掉。 */
   const [taskClosingIds, setTaskClosingIds] = useState<string[]>([]);
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
@@ -523,10 +537,17 @@ function App() {
   const [luaModSortMode, setLuaModSortMode] = useState<"load" | "name">("load");
   const [jarModSearch, setJarModSearch] = useState("");
   const [jarModFilter, setJarModFilter] = useState<JarModFilter>("all");
+  // 注入项搜索（冲突分析面板上方）：按游戏类引用反查模组，如崩溃诊断里的
+  // zombie.util.list.PZArrayList。
+  const [injectionSearch, setInjectionSearch] = useState("");
   const [shots, setShots] = useState<ManagedDirectory | null>(null);
   const [shaderpacks, setShaderpacks] = useState<ManagedDirectory | null>(null);
   const [shaderpackIcons, setShaderpackIcons] = useState<Record<string, ShaderpackIcon | null>>({});
   const [shaderpackSearchTerms, setShaderpackSearchTerms] = useState<Record<string, string | null>>({});
+  /** 每个光影包的覆写配置（启动时写入 viewpoint-live.properties 的值）。 */
+  const [shaderpackOverrides, setShaderpackOverrides] = useState<ShaderpackOverrideEntry[]>([]);
+  /** 正在打开「配置」弹窗的光影包文件名。 */
+  const [shaderpackConfigPack, setShaderpackConfigPack] = useState<string | null>(null);
   /** 图标图片两个地址都加载不出来、已经换 CurseForge 源重搜过的包，防止反复换源。 */
   const shaderpackIconResourced = useRef<Set<string>>(new Set());
   const [steamAccountHidden, setSteamAccountHidden] = useState(false);
@@ -697,14 +718,26 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   const jarModSearchText = jarModSearch.trim().toLowerCase();
   const filteredJarMods = jarMods
     ? filterJarMods(
-        jarMods.filter((mod) =>
-          !jarModSearchText ||
-          [mod.id, mod.infoId, mod.packageName, mod.description ?? ""]
-            .some((value) => value.toLowerCase().includes(jarModSearchText)),
+        filterJarModsByInjectionItem(
+          jarMods.filter((mod) =>
+            !jarModSearchText ||
+            [mod.id, mod.infoId, mod.packageName, mod.description ?? ""]
+              .some((value) => value.toLowerCase().includes(jarModSearchText)),
+          ),
+          injectionSearch,
         ),
         jarModFilter,
       )
     : undefined;
+  // 注入项搜索激活时，冲突分析只保留「任一端模组命中」的冲突对。
+  const injectionSearchActive = injectionSearch.trim().length > 0;
+  const injectionMatchedIds =
+    injectionSearchActive && jarMods
+      ? new Set(filterJarModsByInjectionItem(jarMods, injectionSearch).map((mod) => mod.id))
+      : null;
+  const visibleJarModConflicts = injectionMatchedIds
+    ? jarModConflicts.filter((conflict) => conflict.modIds.some((id) => injectionMatchedIds.has(id)))
+    : jarModConflicts;
   const selectedLuaModCount = selectedLuaModKeys.size;
   /** 选中项里真正占加载顺序的模组数：多选拖动时整组搬，未启用/加载器不算数。 */
   const selectedEnabledLuaModCount = (luaMods ?? []).filter(
@@ -730,10 +763,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
     const visibleMessage = conciseNotification(message, developerModeRef.current);
     setToasts((current) => [...current.slice(-3), { id, message: visibleMessage, kind }]);
-    // 错误必须由用户确认后消失（3 秒一闪而过容易错过）；提示/成功仍自动退场。
-    if (kind !== "error") {
-      window.setTimeout(() => dismissToast(id), 3000);
-    }
+    // 全部自动退场：进度条就是倒计时，走完即消失。错误停留更久（8 秒）避免一闪而过，
+    // 通知历史里随时可回看；也可以点 × 手动关。
+    window.setTimeout(() => dismissToast(id), kind === "error" ? 8000 : 3000);
   }
 
   /** 弹应用内确认框并等待用户选择；返回被点动作的 value（Esc/遮罩返回 cancelValue）。 */
@@ -1091,7 +1123,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
     const translations = new Map<string, { text: string; engine: string }>();
     try {
-      await translateInBatches(
+      const completed = await translateInBatches(
         jobs,
         translatorLanguage,
         (results) => {
@@ -1108,6 +1140,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         () => runId !== translatorRunIdRef.current,
       );
       if (runId !== translatorRunIdRef.current) return;
+      // translateInBatches 返回 false = 连续两批请求失败，本轮已中止。
+      if (!completed) {
+        setTranslatorError("翻译服务暂时不可用（连续请求失败），请稍后重试。");
+        setTranslatorBusy(false);
+        return;
+      }
 
       const translatedLines = lines.map((line) => {
         if (line.kind === "blank") return "";
@@ -2087,12 +2125,14 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
     setLoadingMedia(true);
     try {
-      const [shotDirectory, shaderpackDirectory] = await Promise.all([
+      const [shotDirectory, shaderpackDirectory, overrideEntries] = await Promise.all([
         invoke<ManagedDirectory>("list_viewpoint_shots"),
         invoke<ManagedDirectory>("list_viewpoint_shaderpacks"),
+        invoke<ShaderpackOverrideEntry[]>("get_shaderpack_overrides"),
       ]);
       setShots(shotDirectory);
       setShaderpacks(shaderpackDirectory);
+      setShaderpackOverrides(overrideEntries);
       setShaderpackIcons({});
       setShaderpackSearchTerms({});
       shaderpackIconResourced.current.clear();
@@ -2101,6 +2141,17 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setLoadingMedia(false);
+    }
+  }
+
+  /** 配置弹窗保存后只刷新覆写列表（不动图标 / 截图）。 */
+  async function refreshShaderpackOverrides() {
+    try {
+      setShaderpackOverrides(
+        await invoke<ShaderpackOverrideEntry[]>("get_shaderpack_overrides"),
+      );
+    } catch {
+      // 列表刷新失败不弹错误：下次 refreshMedia 会再拉一遍
     }
   }
 
@@ -2915,6 +2966,52 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     };
   }, []);
 
+  // 任务中心持久化：启动时读 tasks.json 恢复历史任务（退出时还在跑的任务
+  // 由 sanitizeSavedTasks 标成「中断」），之后任务一有变化就防抖落盘。
+  useEffect(() => {
+    let active = true;
+    invoke<unknown[]>("load_saved_tasks")
+      .then((saved) => {
+        if (!active) {
+          return;
+        }
+        const restored = sanitizeSavedTasks(saved);
+        // 任务 id 是「前缀-递增号」：恢复历史后把计数器拨到已见最大号之后，
+        // 否则新任务会和历史任务撞 id（React key / 精确更新都会串行）。
+        for (const task of restored) {
+          const match = /-(\d+)$/.exec(task.id);
+          if (match) {
+            taskIdRef.current = Math.max(taskIdRef.current, Number(match[1]));
+          }
+        }
+        setTasks(restored);
+      })
+      .catch(() => {
+        // tasks.json 属可丢弃缓存：读不到就按无历史任务处理，不提示。
+      })
+      .finally(() => {
+        if (active) {
+          tasksLoadedRef.current = true;
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // 任务变化后 0.6s 防抖落盘：进度事件高频更新时最多写这么多次；
+  // 首次装载完成前直接跳过，避免挂载时的空列表把 tasks.json 覆盖掉。
+  useEffect(() => {
+    if (!tasksLoadedRef.current) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      // 后端还会按 TASK_HISTORY_CAP 再裁一次；这里先截，减少无效传输。
+      void invoke("save_tasks", { tasks: tasks.slice(0, TASK_HISTORY_CAP) }).catch(() => {});
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [tasks]);
+
   useEffect(() => {
     void loadBackgroundOptions();
     void scanWorkshopBackgrounds();
@@ -3190,7 +3287,23 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         setStartupClock(Date.now());
       }
       if (update.phase === "error") {
-        showToast(update.message, "error");
+        // 会话失败（如注入失败、游戏进程在窗口出现前退出）：报错用模态框，
+        // 不自动消失，等用户确认。沿用停止原因模态框的确认交互。
+        void showConfirm({
+          title: GAME_LAUNCH_FAIL_TITLE,
+          body: update.message,
+          actions: [{ label: "知道了", value: "ok" }],
+        });
+      }
+      // 游戏停止事件（会话内 finished / 会话后 game-exited，除用户主动正常退出）：
+      // 模态框展示结果、停止原因与诊断，不自动消失。诊断文案由后端拼在消息里，
+      // 这里拆成两段展示。
+      if (shouldReportSessionEnd(update)) {
+        void showConfirm({
+          title: GAME_STOP_DIALOG_TITLE,
+          body: formatGameStopDialogBody(update),
+          actions: [{ label: "知道了", value: "ok" }],
+        });
       }
     }).then((cleanup) => { unlistenSession = cleanup; }).catch(() => undefined);
     void listen<OverlayZbProgress>("overlay-zb-progress", (event) => {
@@ -5778,7 +5891,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                   ? "red"
                   : overlaySession.phase === "finished"
                     ? "green"
-                    : "blue"
+                    : overlaySession.phase === "game-exited"
+                      ? "red"
+                      : "blue"
               }
             >
               {overlayPhaseLabel(overlaySession.phase)}
@@ -6373,6 +6488,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                   {formatBytes(pack.sizeBytes)}
                 </Text>
               </Box>
+              {shaderpackOverrides.some((entry) => entry.packName === pack.name) ? (
+                <Badge colorPalette="blue" flexShrink={0} variant="subtle">
+                  已配置覆写
+                </Badge>
+              ) : null}
+              <Button
+                colorPalette="blue"
+                onClick={() => setShaderpackConfigPack(pack.name)}
+                size="sm"
+                variant="outline"
+              >
+                配置
+              </Button>
               <Button
                 colorPalette="red"
                 loading={deletingShaderpack === pack.name}
@@ -6615,29 +6743,8 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                             title="在 Steam 中打开"
                             variant="outline"
                           >
-                            {/* 斜向右上的箭头（↗）：表示“到外部打开”。
-                                不用三点连线的分享图标，也不画成先上后右的折线。 */}
-                            <svg
-                              aria-hidden="true"
-                              className="pz-workshop-share-icon"
-                              fill="none"
-                              viewBox="0 0 16 16"
-                            >
-                              <path
-                                d="M3.4 12.6 12.8 3.2"
-                                stroke="currentColor"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth="1.6"
-                              />
-                              <path
-                                d="M6.8 3.2H12.8V9.2"
-                                stroke="currentColor"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth="1.6"
-                              />
-                            </svg>
+                            {/* 斜向右上的箭头图标与全站「到外部打开」同一枚（components/icons）。 */}
+                            <ExternalArrowIcon className="pz-workshop-share-icon" />
                           </Button>
                         </Box>
                       </Menu.ContextTrigger>
@@ -6803,7 +6910,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                   size="sm"
                   variant="outline"
                 >
-                  在 Steam 中打开 ↗
+                  在 Steam 中打开 <ExternalArrowIcon />
                 </Button>
               </HStack>
             </Box>
@@ -6815,6 +6922,8 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    // 同详情窗：先摆总数再开翻，进度条立刻可见。
+    setDeveloperNewsTranslationProgress({ completed: 0, total: developerNewsTranslationJobs.length });
     // 分批翻译交给 translateInBatches（与创意工坊详情同一条管线），
     // 这里只负责把译文写回新闻列表和来源占比。
     void translateInBatches(
@@ -6842,7 +6951,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       },
       (completed, total) => setDeveloperNewsTranslationProgress({ completed, total }),
       () => cancelled,
-    );
+    ).then((completed) => {
+      // 连续两批失败（后端重启 / 服务不可用）时不再静默：明确告诉用户重试入口。
+      if (!completed && !cancelled) {
+        showToast("翻译服务暂时不可用，本轮新闻翻译已中止；点「刷新」重试。", "error");
+      }
+    });
     return () => { cancelled = true; };
   }, [developerNewsTranslationJobs, translationLanguage]);
 
@@ -6855,6 +6969,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       return;
     }
     let cancelled = false;
+    // 先把总数摆出来：进度从「原文」立刻变成 0/N，第一句译完就开始涨——
+    // 否则后端还在跑的时候界面一直显示「原文」，看起来像没在翻译。
+    setWorkshopDetailProgress({ completed: 0, total: workshopDetailJobs.length });
     void translateInBatches(
       workshopDetailJobs,
       workshopDetailJobsLanguage,
@@ -6873,7 +6990,11 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       },
       (completed, total) => setWorkshopDetailProgress({ completed, total }),
       () => cancelled,
-    );
+    ).then((completed) => {
+      if (!completed && !cancelled) {
+        showToast("翻译服务暂时不可用，详情翻译已中止；关闭窗口后重开重试。", "error");
+      }
+    });
     return () => { cancelled = true; };
   }, [workshopDetailJobs, workshopDetailJobsLanguage]);
 
@@ -6908,7 +7029,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               <Text color="gray.500" fontSize="xs" mt="1">{new Date(item.date * 1000).toLocaleString()} {item.author ? `· ${item.author}` : ""} {item.feedLabel ? `· ${item.feedLabel}` : ""}</Text>
               <HtmlContentWithImageReveal className="pz-developer-news-content" html={item.contentsHtml} mt="3" />
               <HStack align="center" gap="2" justify="space-between" mt="1" wrap="wrap">
-                <Box>{item.url && <Button className="pz-news-source-link" onClick={() => void openUrl(item.url)} size="xs" variant="ghost">查看原文 ↗</Button>}</Box>
+                <Box>{item.url && <Button className="pz-news-source-link" onClick={() => void openUrl(item.url)} size="xs" variant="ghost">查看原文 <ExternalArrowIcon /></Button>}</Box>
                 {engineShare && (
                   <Text className="pz-news-engine-share" title="本条新闻的翻译提供商占比">
                     翻译来源 {engineShare}
@@ -6954,341 +7075,319 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
 
   const generalSettingsContent = (
     <Box className="pz-panel pz-general-settings-panel">
-      <Text color="gray.900" fontSize="lg" fontWeight="700">通用</Text>
-      <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">开发者模式</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            开启后显示更多技术细节，包括加载方式、模组标签、冲突分析和详细通知。
-          </Text>
-        </Box>
-        <Switch.Root
-          aria-label="开发者模式"
-          checked={developerMode}
-          disabled={developerModeSaving}
-          onCheckedChange={(details) => void updateDeveloperMode(details.checked)}
+      <SettingsSection title="通用">
+        <SettingsRow
+          label="开发者模式"
+          hint="开启后显示更多技术细节，包括加载方式、模组标签、冲突分析和详细通知。"
         >
-          <Switch.HiddenInput />
-          <Switch.Control>
-            <Switch.Thumb />
-          </Switch.Control>
-        </Switch.Root>
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">翻译语言</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            开发者新闻和创意工坊详情的正文、标题都按这个语言翻译；选 English 时不翻译，直接显示原文。
-          </Text>
-        </Box>
-        {/* 与资源中心筛选行同一个下拉组件，样式完全一致（含 26px 控件高度与 ▾ 箭头）。 */}
-        <WorkshopDropdown
-          ariaLabel="翻译语言"
-          disabled={translationLanguageSaving}
-          onChange={(value) => void updateTranslationLanguage(value)}
-          options={TRANSLATION_LANGUAGE_OPTIONS}
-          value={translationLanguage}
-          width="9rem"
-        />
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">翻译引擎</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            优先使用所选引擎翻译开发者新闻、创意工坊详情与翻译器文本，失败时自动回退其余引擎。
-            默认顺序：Google → 必应 → MyMemory；「中转翻译」是中转服务器上的离线翻译，只支持中文 / 英语 / 俄语。
-          </Text>
-        </Box>
-        <WorkshopDropdown
-          ariaLabel="翻译引擎"
-          disabled={translationEngineSaving}
-          onChange={(value) => void updateTranslationEngine(value)}
-          options={TRANSLATION_ENGINE_OPTIONS}
-          value={translationEngine}
-          width="11rem"
-        />
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">字体对比度</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            觉得文字和背景颜色太接近、看不清楚时往右拉：文字会变得更深，最左端保持默认配色。
-          </Text>
-        </Box>
-        <Box flex="1" maxW="320px" minW="200px">
-          <HStack justify="space-between" mb="1">
-            <Text color="gray.500" fontSize="xs">
-              {fontContrast === 0 ? "默认配色" : "文字压深"}
-            </Text>
-            <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
-              {fontContrast}%
-            </Text>
-          </HStack>
-          {/* 与启动页内存滑块同一个样式类，观感一致（类名叫 memory 是历史原因）。 */}
-          <Slider.Root
-            aria-label={["字体对比度"]}
-            className="pz-memory-slider"
-            max={100}
-            min={0}
-            step={5}
-            value={[fontContrast]}
-            onValueChange={({ value }) => {
-              const nextValue = value[0];
-              if (nextValue !== undefined) {
-                updateFontContrast(nextValue);
-              }
-            }}
+          <Switch.Root
+            aria-label="开发者模式"
+            checked={developerMode}
+            disabled={developerModeSaving}
+            onCheckedChange={(details) => void updateDeveloperMode(details.checked)}
           >
-            <Slider.Control>
-              <Slider.Track>
-                <Slider.Range />
-              </Slider.Track>
-              <Slider.Thumb index={0}>
-                <Slider.HiddenInput />
-              </Slider.Thumb>
-            </Slider.Control>
-          </Slider.Root>
-        </Box>
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">模糊度</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            毛玻璃效果的强度：往左更通透（0 等于关闭模糊），往右更厚重。
-            面板、菜单、弹层和提示气泡会一起变化。
-          </Text>
-        </Box>
-        <Box flex="1" maxW="320px" minW="200px">
-          <HStack justify="space-between" mb="1">
-            <Text color="gray.500" fontSize="xs">
-              {blurStrength === 0
-                ? "关闭模糊"
-                : blurStrength === DEFAULT_BLUR_STRENGTH
-                  ? "默认"
-                  : blurStrength < DEFAULT_BLUR_STRENGTH
-                    ? "更通透"
-                    : "更厚重"}
-            </Text>
-            <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
-              {blurStrength}%
-            </Text>
-          </HStack>
-          {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
-          <Slider.Root
-            aria-label={["模糊度"]}
-            className="pz-memory-slider"
-            max={MAX_BLUR_STRENGTH}
-            min={MIN_BLUR_STRENGTH}
-            step={BLUR_STRENGTH_STEP}
-            value={[blurStrength]}
-            onValueChange={({ value }) => {
-              const nextValue = value[0];
-              if (nextValue !== undefined) {
-                updateBlurStrength(nextValue);
-              }
-            }}
+            <Switch.HiddenInput />
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Root>
+        </SettingsRow>
+        <SettingsRow
+          label="原生窗口标题栏"
+          hint={
+            "改用系统自带的标题栏：自绘标题栏在某些设备 / WebView 上无法拖动时用它兜底。" +
+            "开启后自绘标题栏两侧的 LOGO 与窗口按钮会滑出隐藏，中间的导航保留；立即生效，下次启动按这个设置打开。"
+          }
+        >
+          <Switch.Root
+            aria-label="原生窗口标题栏"
+            checked={nativeTitlebar}
+            disabled={nativeTitlebarSaving}
+            onCheckedChange={(details) => void updateNativeTitlebar(details.checked)}
           >
-            <Slider.Control>
-              <Slider.Track>
-                <Slider.Range />
-              </Slider.Track>
-              <Slider.Thumb index={0}>
-                <Slider.HiddenInput />
-              </Slider.Thumb>
-            </Slider.Control>
-          </Slider.Root>
-        </Box>
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">界面字号</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            整体放大或缩小界面文字：往左更紧凑，往右更大更易读。窗口和控件大小保持不变。
-          </Text>
-        </Box>
-        <Box flex="1" maxW="320px" minW="200px">
-          <HStack justify="space-between" mb="1">
-            <Text color="gray.500" fontSize="xs">
-              {fontScale === DEFAULT_FONT_SCALE
-                ? "默认"
-                : fontScale < DEFAULT_FONT_SCALE
-                  ? "更紧凑"
-                  : "更大"}
-            </Text>
-            <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
-              {fontScale}%
-            </Text>
-          </HStack>
-          {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
-          <Slider.Root
-            aria-label={["界面字号"]}
-            className="pz-memory-slider"
-            max={MAX_FONT_SCALE}
-            min={MIN_FONT_SCALE}
-            step={FONT_SCALE_STEP}
-            value={[fontScale]}
-            onValueChange={({ value }) => {
-              const nextValue = value[0];
-              if (nextValue !== undefined) {
-                updateFontScale(nextValue);
-              }
-            }}
-          >
-            <Slider.Control>
-              <Slider.Track>
-                <Slider.Range />
-              </Slider.Track>
-              <Slider.Thumb index={0}>
-                <Slider.HiddenInput />
-              </Slider.Thumb>
-            </Slider.Control>
-          </Slider.Root>
-        </Box>
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">界面字体</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            选择系统常见字体；选「自定义…」后可填入本机安装的任意字体名，也可以直接粘贴 CSS font-family 列表。
-          </Text>
-        </Box>
-        <HStack gap="2" align="center">
-          <WorkshopDropdown
-            ariaLabel="界面字体"
-            onChange={(value) => {
-              setFontFamilyChoice(value);
-              if (value === "custom") {
-                // 保留当前值（可能是预设的 CSS 列表），由旁边的输入框直接编辑。
-                return;
-              }
-              updateFontFamily(FONT_FAMILY_PRESET_CSS[value] ?? "");
-            }}
-            options={FONT_FAMILY_PRESETS}
-            value={fontFamilyChoice}
-            width="11rem"
-          />
-          {fontFamilyChoice === "custom" && (
+            <Switch.HiddenInput />
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Root>
+        </SettingsRow>
+        <SettingsRow
+          label="覆盖层背景色"
+          hint="游戏加载时覆盖层的底色（默认纯红）。文字会自动按背景深浅换成白字或深色字，浅色背景也能看清。改动在下次启动游戏时生效。"
+        >
+          <HStack gap="2" align="center" wrap="wrap">
+            {OVERLAY_BACKGROUND_PRESETS.map((preset) => {
+              const selected =
+                overlayBackgroundColor.toUpperCase() === preset.value.toUpperCase();
+              return (
+                <Button
+                  aria-label={`覆盖层背景色：${preset.label}`}
+                  aria-pressed={selected}
+                  key={preset.value}
+                  onClick={() => updateOverlayBackgroundColor(preset.value)}
+                  size="sm"
+                  title={preset.label}
+                  variant={selected ? "solid" : "outline"}
+                >
+                  <Box
+                    bg={preset.value}
+                    borderColor="gray.300"
+                    borderRadius="sm"
+                    borderWidth="1px"
+                    h="0.7rem"
+                    w="0.7rem"
+                  />
+                </Button>
+              );
+            })}
+            {/* 系统取色器：Chakra Input 的 color 类型，样式规则里已排除在统一控件高度之外。 */}
             <Input
-              aria-label="自定义字体"
-              placeholder="字体名，如 思源黑体 / Sarasa Gothic SC"
-              value={fontFamily}
-              width="13rem"
-              onChange={(event) => updateFontFamily(event.target.value)}
+              aria-label="自定义覆盖层背景色"
+              onChange={(event) => updateOverlayBackgroundColor(event.target.value)}
+              title="自定义颜色"
+              type="color"
+              value={overlayBackgroundColor}
+              w="2.4rem"
             />
-          )}
-        </HStack>
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">窗口大小</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            直接拖动窗口边缘即可调整大小（最小 {DEFAULT_WINDOW_WIDTH} × {DEFAULT_WINDOW_HEIGHT}），
-            启动器会自动记住，下次启动按这个尺寸打开。
-          </Text>
-        </Box>
-        <HStack gap="2" align="center">
-          <Text color="gray.500" fontSize="xs">
-            {savedWindowSize
-              ? `已记住 ${savedWindowSize[0]} × ${savedWindowSize[1]}`
-              : `默认 ${DEFAULT_WINDOW_WIDTH} × ${DEFAULT_WINDOW_HEIGHT}`}
-          </Text>
-          <Button
-            aria-label="恢复默认窗口大小"
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              void invoke("restore_default_window_size")
-                .then(() => setSavedWindowSize(null))
-                .catch((error: unknown) => {
-                  showToast(error instanceof Error ? error.message : String(error), "error");
-                });
-            }}
-          >
-            恢复默认
-          </Button>
-        </HStack>
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">原生窗口标题栏</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            改用系统自带的标题栏：自绘标题栏在某些设备 / WebView 上无法拖动时用它兜底。
-            开启后自绘标题栏两侧的 LOGO 与窗口按钮会滑出隐藏，中间的导航保留；
-            立即生效，下次启动按这个设置打开。
-          </Text>
-        </Box>
-        <Switch.Root
-          aria-label="原生窗口标题栏"
-          checked={nativeTitlebar}
-          disabled={nativeTitlebarSaving}
-          onCheckedChange={(details) => void updateNativeTitlebar(details.checked)}
-        >
-          <Switch.HiddenInput />
-          <Switch.Control>
-            <Switch.Thumb />
-          </Switch.Control>
-        </Switch.Root>
-      </HStack>
-      <HStack align="center" gap="4" justify="space-between" mt="5" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">覆盖层背景色</Text>
-          <Text color="gray.500" fontSize="xs" mt="1">
-            游戏加载时覆盖层的底色（默认纯红）。文字会自动按背景深浅换成白字或深色字，
-            浅色背景也能看清。改动在下次启动游戏时生效。
-          </Text>
-        </Box>
-        <HStack gap="2" align="center" wrap="wrap">
-          {OVERLAY_BACKGROUND_PRESETS.map((preset) => {
-            const selected =
-              overlayBackgroundColor.toUpperCase() === preset.value.toUpperCase();
-            return (
+            <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+              {overlayBackgroundColor.toUpperCase()}
+            </Text>
+            {overlayBackgroundColor.toUpperCase() !== DEFAULT_OVERLAY_BACKGROUND_COLOR && (
               <Button
-                aria-label={`覆盖层背景色：${preset.label}`}
-                aria-pressed={selected}
-                key={preset.value}
-                onClick={() => updateOverlayBackgroundColor(preset.value)}
+                aria-label="恢复默认覆盖层背景色"
+                onClick={() => updateOverlayBackgroundColor(DEFAULT_OVERLAY_BACKGROUND_COLOR)}
                 size="sm"
-                title={preset.label}
-                variant={selected ? "solid" : "outline"}
+                variant="ghost"
               >
-                <Box
-                  bg={preset.value}
-                  borderColor="gray.300"
-                  borderRadius="sm"
-                  borderWidth="1px"
-                  h="0.7rem"
-                  w="0.7rem"
-                />
+                恢复默认
               </Button>
-            );
-          })}
-          {/* 系统取色器：Chakra Input 的 color 类型，样式规则里已排除在统一控件高度之外。 */}
-          <Input
-            aria-label="自定义覆盖层背景色"
-            onChange={(event) => updateOverlayBackgroundColor(event.target.value)}
-            title="自定义颜色"
-            type="color"
-            value={overlayBackgroundColor}
-            w="2.4rem"
-          />
-          <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
-            {overlayBackgroundColor.toUpperCase()}
-          </Text>
-          {overlayBackgroundColor.toUpperCase() !== DEFAULT_OVERLAY_BACKGROUND_COLOR && (
+            )}
+          </HStack>
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title="外观">
+        <SettingsRow
+          label="字体对比度"
+          hint="觉得文字和背景颜色太接近、看不清楚时往右拉：文字会变得更深，最左端保持默认配色。"
+        >
+          <Box flex="1" maxW="320px" minW="200px">
+            <HStack justify="space-between" mb="1">
+              <Text color="gray.500" fontSize="xs">
+                {fontContrast === 0 ? "默认配色" : "文字压深"}
+              </Text>
+              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+                {fontContrast}%
+              </Text>
+            </HStack>
+            {/* 与启动页内存滑块同一个样式类，观感一致（类名叫 memory 是历史原因）。 */}
+            <Slider.Root
+              aria-label={["字体对比度"]}
+              className="pz-memory-slider"
+              max={100}
+              min={0}
+              step={5}
+              value={[fontContrast]}
+              onValueChange={({ value }) => {
+                const nextValue = value[0];
+                if (nextValue !== undefined) {
+                  updateFontContrast(nextValue);
+                }
+              }}
+            >
+              <Slider.Control>
+                <Slider.Track>
+                  <Slider.Range />
+                </Slider.Track>
+                <Slider.Thumb index={0}>
+                  <Slider.HiddenInput />
+                </Slider.Thumb>
+              </Slider.Control>
+            </Slider.Root>
+          </Box>
+        </SettingsRow>
+        <SettingsRow
+          label="模糊度"
+          hint="毛玻璃效果的强度：往左更通透（0 等于关闭模糊），往右更厚重。面板、菜单、弹层和提示气泡会一起变化。"
+        >
+          <Box flex="1" maxW="320px" minW="200px">
+            <HStack justify="space-between" mb="1">
+              <Text color="gray.500" fontSize="xs">
+                {blurStrength === 0
+                  ? "关闭模糊"
+                  : blurStrength === DEFAULT_BLUR_STRENGTH
+                    ? "默认"
+                    : blurStrength < DEFAULT_BLUR_STRENGTH
+                      ? "更通透"
+                      : "更厚重"}
+              </Text>
+              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+                {blurStrength}%
+              </Text>
+            </HStack>
+            {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
+            <Slider.Root
+              aria-label={["模糊度"]}
+              className="pz-memory-slider"
+              max={MAX_BLUR_STRENGTH}
+              min={MIN_BLUR_STRENGTH}
+              step={BLUR_STRENGTH_STEP}
+              value={[blurStrength]}
+              onValueChange={({ value }) => {
+                const nextValue = value[0];
+                if (nextValue !== undefined) {
+                  updateBlurStrength(nextValue);
+                }
+              }}
+            >
+              <Slider.Control>
+                <Slider.Track>
+                  <Slider.Range />
+                </Slider.Track>
+                <Slider.Thumb index={0}>
+                  <Slider.HiddenInput />
+                </Slider.Thumb>
+              </Slider.Control>
+            </Slider.Root>
+          </Box>
+        </SettingsRow>
+        <SettingsRow
+          label="界面字号"
+          hint="整体放大或缩小界面文字：往左更紧凑，往右更大更易读。窗口和控件大小保持不变。"
+        >
+          <Box flex="1" maxW="320px" minW="200px">
+            <HStack justify="space-between" mb="1">
+              <Text color="gray.500" fontSize="xs">
+                {fontScale === DEFAULT_FONT_SCALE
+                  ? "默认"
+                  : fontScale < DEFAULT_FONT_SCALE
+                    ? "更紧凑"
+                    : "更大"}
+              </Text>
+              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+                {fontScale}%
+              </Text>
+            </HStack>
+            {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
+            <Slider.Root
+              aria-label={["界面字号"]}
+              className="pz-memory-slider"
+              max={MAX_FONT_SCALE}
+              min={MIN_FONT_SCALE}
+              step={FONT_SCALE_STEP}
+              value={[fontScale]}
+              onValueChange={({ value }) => {
+                const nextValue = value[0];
+                if (nextValue !== undefined) {
+                  updateFontScale(nextValue);
+                }
+              }}
+            >
+              <Slider.Control>
+                <Slider.Track>
+                  <Slider.Range />
+                </Slider.Track>
+                <Slider.Thumb index={0}>
+                  <Slider.HiddenInput />
+                </Slider.Thumb>
+              </Slider.Control>
+            </Slider.Root>
+          </Box>
+        </SettingsRow>
+        <SettingsRow
+          label="界面字体"
+          hint="选择系统常见字体；选「自定义…」后可填入本机安装的任意字体名，也可以直接粘贴 CSS font-family 列表。"
+        >
+          <HStack gap="2" align="center">
+            <WorkshopDropdown
+              ariaLabel="界面字体"
+              onChange={(value) => {
+                setFontFamilyChoice(value);
+                if (value === "custom") {
+                  // 保留当前值（可能是预设的 CSS 列表），由旁边的输入框直接编辑。
+                  return;
+                }
+                updateFontFamily(FONT_FAMILY_PRESET_CSS[value] ?? "");
+              }}
+              options={FONT_FAMILY_PRESETS}
+              value={fontFamilyChoice}
+              width="11rem"
+            />
+            {fontFamilyChoice === "custom" && (
+              <Input
+                aria-label="自定义字体"
+                placeholder="字体名，如 思源黑体 / Sarasa Gothic SC"
+                value={fontFamily}
+                width="13rem"
+                onChange={(event) => updateFontFamily(event.target.value)}
+              />
+            )}
+          </HStack>
+        </SettingsRow>
+        <SettingsRow
+          label="窗口大小"
+          hint={
+            `直接拖动窗口边缘即可调整大小（最小 ${DEFAULT_WINDOW_WIDTH} × ${DEFAULT_WINDOW_HEIGHT}），` +
+            "启动器会自动记住，下次启动按这个尺寸打开。"
+          }
+        >
+          <HStack gap="2" align="center">
+            <Text color="gray.500" fontSize="xs">
+              {savedWindowSize
+                ? `已记住 ${savedWindowSize[0]} × ${savedWindowSize[1]}`
+                : `默认 ${DEFAULT_WINDOW_WIDTH} × ${DEFAULT_WINDOW_HEIGHT}`}
+            </Text>
             <Button
-              aria-label="恢复默认覆盖层背景色"
-              onClick={() => updateOverlayBackgroundColor(DEFAULT_OVERLAY_BACKGROUND_COLOR)}
+              aria-label="恢复默认窗口大小"
               size="sm"
-              variant="ghost"
+              variant="outline"
+              onClick={() => {
+                void invoke("restore_default_window_size")
+                  .then(() => setSavedWindowSize(null))
+                  .catch((error: unknown) => {
+                    showToast(error instanceof Error ? error.message : String(error), "error");
+                  });
+              }}
             >
               恢复默认
             </Button>
-          )}
-        </HStack>
-      </HStack>
-      <Box mt="5">
-        <HStack align="center" gap="2" wrap="wrap">
-          <Text color="gray.800" fontSize="sm" fontWeight="700">网络</Text>
+          </HStack>
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title="翻译">
+        <SettingsRow
+          label="翻译语言"
+          hint="开发者新闻和创意工坊详情的正文、标题都按这个语言翻译；选 English 时不翻译，直接显示原文。"
+        >
+          {/* 与资源中心筛选行同一个下拉组件，样式完全一致（含 26px 控件高度与 ▾ 箭头）。 */}
+          <WorkshopDropdown
+            ariaLabel="翻译语言"
+            disabled={translationLanguageSaving}
+            onChange={(value) => void updateTranslationLanguage(value)}
+            options={TRANSLATION_LANGUAGE_OPTIONS}
+            value={translationLanguage}
+            width="9rem"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="翻译引擎"
+          hint="优先使用所选引擎翻译开发者新闻、创意工坊详情与翻译器文本，失败时自动回退其余引擎。默认顺序：Google → 必应 → MyMemory；「中转翻译」是中转服务器上的离线翻译，只支持中文 / 英语 / 俄语。"
+        >
+          <WorkshopDropdown
+            ariaLabel="翻译引擎"
+            disabled={translationEngineSaving}
+            onChange={(value) => void updateTranslationEngine(value)}
+            options={TRANSLATION_ENGINE_OPTIONS}
+            value={translationEngine}
+            width="11rem"
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        title="网络"
+        titleExtra={
           <HintDot
             label="网络中转说明"
             text={
@@ -7297,91 +7396,101 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               "UU 这类只加速 Steam 客户端的工具不会接管启动器，开着也仍需中转；如果你装了 Clash / V2Ray 等带本地端口的代理，填在下面通常比中转更快。"
             }
           />
-        </HStack>
-        <HStack align="center" gap="2" mt="3" wrap="wrap">
-          <WorkshopDropdown
-            ariaLabel="Steam 网络加速模式"
-            disabled={steamRelaySaving}
-            onChange={(value) => {
-              setSteamRelayMode(value);
-              void saveSteamRelaySettings(value, steamRelayBase);
-            }}
-            options={STEAM_RELAY_MODE_OPTIONS}
-            value={steamRelayMode}
-            width="11rem"
-          />
-          <Input
-            aria-label="Steam 中转服务器地址"
-            placeholder={`默认：${DEFAULT_STEAM_RELAY_BASE}`}
-            value={steamRelayBase}
-            width="18rem"
-            onBlur={() => void saveSteamRelaySettings(steamRelayMode, steamRelayBase)}
-            onChange={(event) => setSteamRelayBase(event.currentTarget.value)}
-          />
-          <Button
-            className="pz-steam-relay-action"
-            colorPalette="blue"
-            disabled={steamRelayTesting}
-            size="sm"
-            variant="outline"
-            onClick={() => void testSteamRelay()}
-          >
-            {steamRelayTesting ? "测试中…" : "测试连接"}
-          </Button>
-        </HStack>
-        {steamRelayPing && (
-          <Text
-            color={steamRelayPing.startsWith("连接失败") ? "red.500" : "green.700"}
-            fontSize="xs"
-            mt="2"
-          >
-            {steamRelayPing}
-          </Text>
-        )}
-        <HStack align="center" gap="2" mt="3" wrap="wrap">
-          <Input
-            aria-label="本地代理"
-            disabled={steamProxySaving}
-            placeholder="本地代理（可选）：http://127.0.0.1:7897"
-            value={steamProxy}
-            width="18rem"
-            onBlur={() => void saveSteamProxy(steamProxy)}
-            onChange={(event) => setSteamProxy(event.currentTarget.value)}
-          />
-          <Button
-            className="pz-steam-relay-action"
-            disabled={steamProxyDetecting}
-            size="sm"
-            variant="outline"
-            onClick={() => void detectSteamProxy()}
-          >
-            {steamProxyDetecting ? "检测中…" : "自动检测"}
-          </Button>
-          {steamProxy && (
-            <Button
-              className="pz-steam-relay-action"
-              disabled={steamProxySaving}
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setSteamProxy("");
-                void saveSteamProxy("");
-              }}
-            >
-              清除
-            </Button>
-          )}
-        </HStack>
-        {steamProxyHint && (
-          <Text
-            color={steamProxyHint.startsWith("已选用") ? "green.700" : "gray.600"}
-            fontSize="xs"
-            mt="2"
-          >
-            {steamProxyHint}
-          </Text>
-        )}
-      </Box>
+        }
+      >
+        <SettingsRow label="Steam 网络加速">
+          <VStack align="flex-end" gap="2">
+            <HStack align="center" gap="2" wrap="wrap">
+              <WorkshopDropdown
+                ariaLabel="Steam 网络加速模式"
+                disabled={steamRelaySaving}
+                onChange={(value) => {
+                  setSteamRelayMode(value);
+                  void saveSteamRelaySettings(value, steamRelayBase);
+                }}
+                options={STEAM_RELAY_MODE_OPTIONS}
+                value={steamRelayMode}
+                width="11rem"
+              />
+              <Input
+                aria-label="Steam 中转服务器地址"
+                placeholder={`默认：${DEFAULT_STEAM_RELAY_BASE}`}
+                value={steamRelayBase}
+                width="18rem"
+                onBlur={() => void saveSteamRelaySettings(steamRelayMode, steamRelayBase)}
+                onChange={(event) => setSteamRelayBase(event.currentTarget.value)}
+              />
+              <Button
+                className="pz-steam-relay-action"
+                colorPalette="blue"
+                disabled={steamRelayTesting}
+                size="sm"
+                variant="outline"
+                onClick={() => void testSteamRelay()}
+              >
+                {steamRelayTesting ? "测试中…" : "测试连接"}
+              </Button>
+            </HStack>
+            {steamRelayPing && (
+              <Text
+                color={steamRelayPing.startsWith("连接失败") ? "red.500" : "green.700"}
+                fontSize="xs"
+              >
+                {steamRelayPing}
+              </Text>
+            )}
+          </VStack>
+        </SettingsRow>
+        <SettingsRow
+          label="本地代理"
+          hint="带本地端口的代理（Clash / V2Ray 等）通常比中转更快；留空不使用。"
+        >
+          <VStack align="flex-end" gap="2">
+            <HStack align="center" gap="2" wrap="wrap">
+              <Input
+                aria-label="本地代理"
+                disabled={steamProxySaving}
+                placeholder="本地代理（可选）：http://127.0.0.1:7897"
+                value={steamProxy}
+                width="18rem"
+                onBlur={() => void saveSteamProxy(steamProxy)}
+                onChange={(event) => setSteamProxy(event.currentTarget.value)}
+              />
+              <Button
+                className="pz-steam-relay-action"
+                disabled={steamProxyDetecting}
+                size="sm"
+                variant="outline"
+                onClick={() => void detectSteamProxy()}
+              >
+                {steamProxyDetecting ? "检测中…" : "自动检测"}
+              </Button>
+              {steamProxy && (
+                <Button
+                  className="pz-steam-relay-action"
+                  disabled={steamProxySaving}
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setSteamProxy("");
+                    void saveSteamProxy("");
+                  }}
+                >
+                  清除
+                </Button>
+              )}
+            </HStack>
+            {steamProxyHint && (
+              <Text
+                color={steamProxyHint.startsWith("已选用") ? "green.700" : "gray.600"}
+                fontSize="xs"
+              >
+                {steamProxyHint}
+              </Text>
+            )}
+          </VStack>
+        </SettingsRow>
+      </SettingsSection>
     </Box>
   );
 
@@ -7921,7 +8030,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
-            打开 ↗
+            打开 <ExternalArrowIcon />
           </Button>
         </HStack>
       </Box>
@@ -7936,7 +8045,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
-            打开 ↗
+            打开 <ExternalArrowIcon />
           </Button>
         </HStack>
       </Box>
@@ -7954,7 +8063,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
-            打开 ↗
+            打开 <ExternalArrowIcon />
           </Button>
         </HStack>
       </Box>
@@ -8122,7 +8231,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                       size="sm"
                       variant="ghost"
                     >
-                      打开发布页 ↗
+                      打开发布页 <ExternalArrowIcon />
                     </Button>
                   ) : null}
                 </HStack>
@@ -9726,6 +9835,23 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 />
               </Box>
             )}
+            {developerMode && !jarModsLoading && (jarMods?.length ?? 0) > 0 && (
+              <HStack className="pz-jar-injection-search" gap="2" wrap="wrap">
+                <Input
+                  aria-label="搜索注入项"
+                  maxWidth="480px"
+                  onChange={(event) => setInjectionSearch(event.currentTarget.value)}
+                  placeholder="搜索注入项：如 zombie.util.list.PZArrayList"
+                  size="sm"
+                  value={injectionSearch}
+                />
+                {injectionSearchActive && (
+                  <Badge colorPalette="gray" size="sm">
+                    {injectionMatchedIds?.size ?? 0} 个模组拥有该注入项
+                  </Badge>
+                )}
+              </HStack>
+            )}
             {developerMode && !jarModsLoading && (filteredJarMods?.length ?? 0) > 0 && (
               <Box className={`pz-jar-conflict-panel${jarConflictExpanded ? " is-expanded" : ""}`} role="status">
                 <Button className="pz-jar-conflict-summary" onClick={() => setJarConflictExpanded((expanded) => !expanded)} size="sm" variant="ghost" aria-expanded={jarConflictExpanded}>
@@ -9735,7 +9861,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 <Box className="pz-jar-conflict-details-shell" aria-hidden={!jarConflictExpanded}>
                   <Box className="pz-jar-conflict-details">
                     <Text color="gray.500" fontSize="xs">仅基于已批准模组中解析到的注入器和方法名推断，实际冲突还取决于目标类、注入点和加载顺序。</Text>
-                    {approvedJarModCount < 2 ? <Text color="gray.600" fontSize="xs" mt="2">已批准模组不足两个，暂时无法进行模组间冲突判断。</Text> : jarModConflicts.length === 0 ? <Text color="green.700" fontSize="xs" mt="2">当前没有检测到共享注入器和方法名的潜在冲突。</Text> : <Stack className="pz-jar-conflict-list" gap="1" mt="2">{jarModConflicts.map((conflict) => <HStack align="start" className="pz-jar-conflict-row" gap="2" key={`${conflict.risk}-${conflict.annotation}-${conflict.methodName}-${conflict.modIds.join("-")}`}><Badge colorPalette={jarConflictRiskPalette(conflict.risk)} size="sm">{jarConflictRiskLabel(conflict.risk)}</Badge><Text color="gray.600" fontFamily="mono" fontSize="xs" overflowWrap="anywhere">{conflict.modIds[0]} ↔ {conflict.modIds[1]}：@{conflict.annotation} {conflict.methodName}</Text></HStack>)}</Stack>}
+                    {approvedJarModCount < 2 ? <Text color="gray.600" fontSize="xs" mt="2">已批准模组不足两个，暂时无法进行模组间冲突判断。</Text> : injectionSearchActive && visibleJarModConflicts.length === 0 ? <Text color="gray.600" fontSize="xs" mt="2">没有模组拥有该注入项，或拥有它的模组之间没有检测到冲突。</Text> : jarModConflicts.length === 0 ? <Text color="green.700" fontSize="xs" mt="2">当前没有检测到共享注入器和方法名的潜在冲突。</Text> : <Stack className="pz-jar-conflict-list" gap="1" mt="2">{visibleJarModConflicts.map((conflict) => <HStack align="start" className="pz-jar-conflict-row" gap="2" key={`${conflict.risk}-${conflict.annotation}-${conflict.methodName}-${conflict.modIds.join("-")}`}><Badge colorPalette={jarConflictRiskPalette(conflict.risk)} size="sm">{jarConflictRiskLabel(conflict.risk)}</Badge><Text color="gray.600" fontFamily="mono" fontSize="xs" overflowWrap="anywhere">{conflict.modIds[0]} ↔ {conflict.modIds[1]}：@{conflict.annotation} {conflict.methodName}</Text></HStack>)}</Stack>}
                   </Box>
                 </Box>
               </Box>
@@ -9921,6 +10047,14 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                           {developerMode && mod.luaClasses.length > 0 && (
                             <Text color="gray.500" fontFamily="mono" fontSize="xs" mt="2" overflowWrap="anywhere">
                               @Exposer.LuaClass：{mod.luaClasses.join("、")}
+                            </Text>
+                          )}
+                          {developerMode && mod.classReferences.length > 0 && (
+                            <Text color="gray.500" fontFamily="mono" fontSize="xs" mt="2" overflowWrap="anywhere">
+                              游戏类引用：{mod.classReferences.slice(0, 8).join("、")}
+                              {mod.classReferences.length > 8
+                                ? `…等 ${mod.classReferences.length} 个`
+                                : ""}
                             </Text>
                           )}
                         </Box>
@@ -10227,6 +10361,14 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         />
       ) : null}
 
+      {shaderpackConfigPack ? (
+        <ShaderpackConfigDialog
+          onDismiss={() => setShaderpackConfigPack(null)}
+          onSaved={() => void refreshShaderpackOverrides()}
+          packName={shaderpackConfigPack}
+        />
+      ) : null}
+
       {pzOptRestoreWarning ? (
         <PzOptRestoreWarningDialog
           error={pzOptRestoreWarning}
@@ -10387,7 +10529,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 size="xs"
                 variant="ghost"
               >
-                在浏览器中打开完整页面 ↗
+                在浏览器中打开完整页面 <ExternalArrowIcon />
               </Button>
               <Stack gap="2" mt="3">
                 <Checkbox.Root

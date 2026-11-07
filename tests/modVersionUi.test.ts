@@ -352,7 +352,7 @@ test("version and mod-version deletes run as background operations", () => {
 
 test("privacy consent modal embeds the online policy at 75% with a browser link", () => {
   assert.match(appSource, /src="https:\/\/pzm\.sanyec\.top\/policy\.html\?wall=true"/);
-  assert.match(appSource, /在浏览器中打开完整页面 ↗/);
+  assert.match(appSource, /在浏览器中打开完整页面 <ExternalArrowIcon \/>/);
   assert.match(appSource, /openUrl\("https:\/\/pzm\.sanyec\.top\/policy\.html"\)/);
   // 75% 缩放用 transform（zoom 会把布局盒留成 133.34% 导致内容偏左被裁）。
   assert.match(
@@ -432,8 +432,8 @@ test("confirms are in-app dialogs, not native window.confirm", () => {
   assert.match(appSource, /await gameIsRunning\(\)/);
   // 还原二次确认不再出现双反斜杠的字面量 \\n（会原样显示成 \n）。
   assert.ok(!appSource.includes("\\\\n\\\\n"), "不应再有字面量 \\n\\n 写进字符串");
-  // 错误 toast 不再 3 秒自动消失。
-  assert.match(appSource, /if \(kind !== "error"\)/);
+  // 错误 toast 也自动退场：停留 8 秒（进度条倒计时同步走完），普通提示 3 秒。
+  assert.match(appSource, /kind === "error" \? 8000 : 3000/);
 });
 
 test("opening a new confirm cancels the previous one's unmount timer", () => {

@@ -21,10 +21,13 @@ pub(crate) fn normalize_translation_language(language: &str) -> Option<String> {
         .map(|candidate| (*candidate).to_string())
 }
 
-/// 「通用 › 翻译引擎」的取值：auto = 默认链（必应 → Google → MyMemory）；
+/// 「通用 › 翻译引擎」的取值：auto = 默认链（Google → 必应 → MyMemory）；
 /// 其余为手动指定的优先引擎，失败后仍按默认顺序回退其余引擎。
 /// relay 是中转服务器上的 Argos 离线翻译（批级、只接 zh-CN/en/ru）。
 pub(crate) const TRANSLATION_ENGINES: [&str; 5] = ["auto", "bing", "google", "mymemory", "relay"];
+
+/// 没写过 / 写坏时的默认引擎：Google（2026-11-06 起由「默认链首选必应」改为 Google 优先）。
+pub(crate) const DEFAULT_TRANSLATION_ENGINE: &str = "google";
 
 /// 大小写不敏感地归一化到上面的取值；不在列表里返回 None。
 pub(crate) fn normalize_translation_engine(engine: &str) -> Option<String> {
@@ -35,14 +38,14 @@ pub(crate) fn normalize_translation_engine(engine: &str) -> Option<String> {
         .map(|candidate| (*candidate).to_string())
 }
 
-/// 翻译管线读的当前引擎偏好；读设置失败 / 坏值按 auto（默认链）处理。
+/// 翻译管线读的当前引擎偏好；读设置失败 / 坏值按默认引擎处理。
 pub(crate) fn configured_translation_engine() -> String {
     app_settings_path()
         .and_then(|path| load_app_settings_at(&path))
         .ok()
         .and_then(|settings| settings.translation_engine)
         .and_then(|value| normalize_translation_engine(&value))
-        .unwrap_or_else(|| "auto".to_string())
+        .unwrap_or_else(|| DEFAULT_TRANSLATION_ENGINE.to_string())
 }
 
 /// 字体对比度：0（保持现有配色）到 100（浅色面上的文字压到近黑）。
@@ -209,13 +212,13 @@ pub(crate) fn get_app_settings() -> Result<AppSettings, String> {
             .blur_strength
             .map_or(BLUR_STRENGTH_DEFAULT, normalize_blur_strength),
     );
-    // 翻译引擎：坏值回落默认（auto = 必应 → Google → MyMemory）。
+    // 翻译引擎：坏值回落默认（Google 优先 → 必应 → MyMemory）。
     settings.translation_engine = Some(
         settings
             .translation_engine
             .as_deref()
             .and_then(normalize_translation_engine)
-            .unwrap_or_else(|| "auto".to_string()),
+            .unwrap_or_else(|| DEFAULT_TRANSLATION_ENGINE.to_string()),
     );
     // 模组加载器方案同理，坏值回落默认（ZombieBuddy）。
     settings.mod_loader_scheme = Some(
@@ -309,8 +312,9 @@ pub(crate) fn save_translation_engine(engine: String) -> Result<(), String> {
     let normalized = normalize_translation_engine(&engine)
         .ok_or_else(|| format!("不支持的翻译引擎: {engine}"))?;
     update_app_settings(|settings| settings.translation_engine = Some(normalized))?;
-    // 用户明确切换引擎后，之前必应失败留下的静默期作废：立刻按新选择重试。
+    // 用户明确切换引擎后，之前失败留下的静默期作废：立刻按新选择重试。
     crate::news_translation::clear_bing_backoff();
+    crate::news_translation::clear_google_backoff();
     Ok(())
 }
 

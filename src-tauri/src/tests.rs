@@ -1,7 +1,7 @@
 use super::{
     adopt_jar_mod_state_from_roots, apply_file_transaction, apply_jar_mod_state_to_roots,
     apply_launch_loader_at_paths,
-    build_fast_launch_cache, class_annotations, compose_title_background_at,
+    build_fast_launch_cache, class_annotations, class_references, compose_title_background_at,
     configure_viewpoint_three_d_at_paths, create_fast_launch_backup_at, delete_shaderpack_at,
     discover_mod_info_files, fast_launch_cache_matches, fast_launch_cache_mods_at,
     force_zombie_buddy_policy_at_paths, game_path_from_library, import_shaderpack_to,
@@ -13,13 +13,14 @@ use super::{
     mod_loader_policy_agent, mod_marker_event, mod_poster_path, mod_progress_units,
     normalize_blur_strength, normalize_font_contrast, normalize_font_family,
     normalize_font_scale, normalize_mod_loader_scheme, normalize_translation_engine,
-    normalize_translation_language,
+    normalize_translation_language, DEFAULT_TRANSLATION_ENGINE,
     clamp_window_height, clamp_window_width, order_mod_ids_by_requires,
     normalize_overlay_background_color,
     parse_default_mod_ids, parse_java_mod_info, parse_lua_mod_info, parse_lua_sorting_rules,
     patch_batch_content, patch_batch_content_with_memory, patch_batch_with_agent,
     patch_json_launcher_content, patch_json_launcher_content_with_memory,
     patch_json_launcher_with_agent, patch_steam_launch_options_content,
+    steam_config_has_both, steam_launch_value_has_both,
     patch_steam_launch_options_content_with_memory, pick_lua_mod_id, plan_lua_mod_enable,
     quoted_key, replace_vdf_value,
     pz_optimization_status, read_default_mod_ids, read_fast_launch_cache_at,
@@ -40,6 +41,55 @@ use super::{
 use image::{GenericImageView, RgbaImage};
 use std::{fs, io::Write, path::Path};
 use zip::{write::SimpleFileOptions, ZipWriter};
+
+use super::{
+    apply_shaderpack_overrides_at_dir, candidate_pack_id, classify_key, default_lang_stems,
+    normalize_property_value, observed_minecraft_pack_ids, parse_lang_content,
+    parse_shaders_properties, read_pack_lang, read_pack_shader_meta, read_shaders_properties_from_pack,
+    read_shaderpack_overrides_at, remove_shaderpack_override, resolve_pack_id,
+    restore_viewpoint_live_backup_at, scan_source_options, upsert_shaderpack_override,
+    write_shaderpack_overrides_at, write_viewpoint_live_backup_at, LiveKeyClass,
+    PropertiesDocument, ShaderpackOverrideEntry, SHADERPACK_OVERRIDES_FORMAT,
+};
+use std::collections::BTreeMap;
+
+#[test]
+fn steam_launch_options_status_reads_the_effective_last_duplicate() {
+    // 真实用户文件里出现过两条重复的 LaunchOptions（一条补丁写的、一条 Steam 里设的窗口参数）：
+    // VDF 同名键后者生效，状态判定必须看最后一条，否则安装后依旧显示缺少。
+    let block = |options: &str| {
+        concat!(
+            "\"UserLocalConfigStore\"\n",
+            "{\n",
+            "  \"apps\"\n",
+            "  {\n",
+            "    \"108600\"\n",
+            "    {\n",
+        )
+        .to_string()
+            + options
+            + "\n    }\n  }\n}\n"
+    };
+    let with_agent =
+        "      \"LaunchOptions\" \"-agentlib:zbNative=policy=allow-all -Xmx12288m\"";
+    let without_agent =
+        "      \"LaunchOptions\" \"-screen-width 1920 -screen-height 1080\"";
+
+    // 只有前一条有 agent：生效值（最后一条）没配 → 未配置
+    assert!(!steam_config_has_both(&block(&format!(
+        "{with_agent}\n{without_agent}"
+    ))));
+    // 最后一条有 agent = 生效值已配置
+    assert!(steam_config_has_both(&block(&format!(
+        "{without_agent}\n{with_agent}"
+    ))));
+    // 现行写入格式已不含 `--` 分隔符（B42 Zulu 25 拒绝），单条带 agent 也算已配置
+    assert!(steam_config_has_both(&block(with_agent)));
+    assert!(steam_launch_value_has_both(
+        "-agentlib:zbNative=policy=allow-all -Xmx12288m"
+    ));
+    assert!(!steam_launch_value_has_both("-screen-width 1920"));
+}
 
 #[test]
 fn parses_java_mod_info_fields_case_insensitively() {
@@ -368,6 +418,7 @@ fn scanned_jar(id: &str, decision: Option<bool>, disabled: bool) -> ScannedJarMo
         patch_classes: vec![format!("{}/Patch_A", id.to_lowercase())],
         patch_methods: Vec::new(),
         lua_classes: vec![format!("{}/Lua_A", id.to_lowercase())],
+        class_references: Vec::new(),
         decision,
     }
 }
@@ -575,9 +626,10 @@ fn normalizes_translation_engine_setting() {
         Some("mymemory")
     );
     assert_eq!(normalize_translation_engine("RELAY").as_deref(), Some("relay"));
-    // 设置页没提供的引擎和空值交给默认值（auto）处理。
+    // 设置页没提供的引擎和空值交给默认值（11-06 起默认 Google，见 news_translation 的引擎链）。
     assert_eq!(normalize_translation_engine("yandex"), None);
     assert_eq!(normalize_translation_engine(""), None);
+    assert_eq!(DEFAULT_TRANSLATION_ENGINE, "google");
 }
 
 #[test]
@@ -804,6 +856,72 @@ fn detects_concrete_patch_method_annotations() {
     assert_eq!(inject.patch_methods.len(), 1);
     assert_eq!(inject.patch_methods[0].annotation, "Inject");
     assert_eq!(inject.patch_methods[0].method_name, "enter");
+}
+
+/// 最小可解析 classfile：常量池里塞任意 Utf8 条目，供常量池扫描类测试用。
+fn classfile_with_utf8_entries(values: &[&str]) -> Vec<u8> {
+    fn utf8(bytes: &mut Vec<u8>, value: &str) {
+        bytes.push(1);
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0xcafebabe_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&52_u16.to_be_bytes());
+    // 常量池：#1 类名 → #2 Class(#1)，#3 父类名 → #4 Class(#3)，随后是测试用的 Utf8。
+    // count = 条目数 + 1（index 0 保留槽），和 annotated_class_bytes 的算法一致。
+    bytes.extend_from_slice(&((5 + values.len()) as u16).to_be_bytes());
+    utf8(&mut bytes, "viewpoint/Patch_Foo");
+    bytes.push(7);
+    bytes.extend_from_slice(&1_u16.to_be_bytes());
+    utf8(&mut bytes, "java/lang/Object");
+    bytes.push(7);
+    bytes.extend_from_slice(&3_u16.to_be_bytes());
+    for value in values {
+        utf8(&mut bytes, value);
+    }
+    bytes.extend_from_slice(&0x0021_u16.to_be_bytes());
+    bytes.extend_from_slice(&2_u16.to_be_bytes());
+    bytes.extend_from_slice(&4_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes
+}
+
+#[test]
+fn extracts_game_class_references_from_classfile() {
+    let class_bytes = classfile_with_utf8_entries(&[
+        // 字段描述符：42.22 移除的 PZArrayList 就是这样被 DGVViewpointEyes 引用的。
+        "Lzombie/util/list/PZArrayList;",
+        // 方法描述符 + 泛型签名（同一条 Utf8 里两段类名都要收）。
+        "(Lzombie/network/fields/hit/HitInfo;)V",
+        "Lzombie/util/list/PZArrayList<Lzombie/network/fields/hit/HitInfo;>;",
+        // @Patch 注解值是点分形式。
+        "zombie.gameStates.GameLoadingState",
+        // fmod 命名空间同样算游戏类。
+        "fmod.fmod.FMODSoundEmitter",
+        // 排除项：模组自己的注解 / 路径段 / 更长名字的尾巴 / 普通散文。
+        "Lme/zed_0xff/zombie_buddy/Exposer$LuaClass;",
+        "media/lua/client/zombie.foo",
+        "me.zombie.utils.Helper",
+        "the zombie. end",
+    ]);
+
+    let references = class_references(&class_bytes);
+
+    assert_eq!(
+        references,
+        vec![
+            "fmod.fmod.FMODSoundEmitter",
+            "zombie.gameStates.GameLoadingState",
+            "zombie.network.fields.hit.HitInfo",
+            "zombie.util.list.PZArrayList",
+        ]
+    );
 }
 
 #[test]
@@ -1672,7 +1790,7 @@ fn patches_steam_launch_options_for_project_zomboid() {
 
     assert!(changed);
     assert!(
-        patched.contains(r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -- -novid""#)
+        patched.contains(r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -novid""#)
     );
 
     let (patched_again, changed_again) = patch_steam_launch_options_content(&patched).unwrap();
@@ -1681,7 +1799,41 @@ fn patches_steam_launch_options_for_project_zomboid() {
 }
 
 #[test]
-fn adds_required_separator_after_an_existing_agent() {
+fn strips_bare_double_dash_from_existing_launch_options() {
+    // B42 的 Zulu 25 JRE 直接拒绝 `--`（"Unrecognized option: --"，游戏 1-2 秒内秒退）。
+    // 旧版本启动器曾自动往 agent 后面插 `--`；现在不再插入，并且会把存量 `--` 洗掉，
+    // 用户下次启动时 vdf 自动痊愈，不用手动去 Steam 里清理。
+    let content = r#""UserLocalConfigStore"
+{
+"Apps"
+{
+    "108600"
+    {
+        "LaunchOptions" "-agentlib:zbNative=policy=allow-all -Xmx10240m --"
+    }
+}
+}"#;
+
+    let (patched, changed) = patch_steam_launch_options_content_with_memory(
+        content,
+        Some(12288),
+        &["-agentlib:zbNative".to_string(), "--".to_string()],
+        Some(ZOMBIE_BUDDY_POLICY_AGENT),
+    )
+    .unwrap();
+
+    assert!(changed);
+    let options_line = patched
+        .lines()
+        .find(|line| line.contains("LaunchOptions"))
+        .unwrap();
+    assert!(!options_line.contains("--"), "不应残留任何 --：{options_line}");
+    assert!(options_line.contains("-Xmx12288m"));
+    assert!(options_line.contains("-agentlib:zbNative=policy=allow-all"));
+}
+
+#[test]
+fn does_not_add_separator_after_an_existing_agent() {
     let content = r#""UserLocalConfigStore"
 {
 "Apps"
@@ -1696,9 +1848,12 @@ fn adds_required_separator_after_an_existing_agent() {
     let (patched, changed) = patch_steam_launch_options_content(content).unwrap();
 
     assert!(changed);
-    assert!(
-        patched.contains(r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -- -novid""#)
-    );
+    let options_line = patched
+        .lines()
+        .find(|line| line.contains("LaunchOptions"))
+        .unwrap();
+    assert!(options_line.contains(r#""-agentlib:zbNative=policy=allow-all -novid""#));
+    assert!(!options_line.contains("--"));
 }
 
 #[test]
@@ -1724,7 +1879,7 @@ fn writes_memory_and_extra_arguments_to_steam_launch_options() {
 
     assert!(changed);
     assert!(patched.contains(
-        r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -Xmx8192m -- -novid -debug""#
+        r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -Xmx8192m -novid -debug""#
     ));
 
     let (patched_again, changed_again) = patch_steam_launch_options_content_with_memory(
@@ -1736,7 +1891,7 @@ fn writes_memory_and_extra_arguments_to_steam_launch_options() {
     .unwrap();
     assert!(changed_again);
     assert!(patched_again
-        .contains(r#""-agentlib:zbNative=policy=allow-all -Xmx16384m -- -novid -debug""#));
+        .contains(r#""-agentlib:zbNative=policy=allow-all -Xmx16384m -novid -debug""#));
     assert!(!patched_again.contains("-Xmx8192m"));
 }
 
@@ -1805,7 +1960,7 @@ fn installs_both_targets_and_creates_a_backup() {
         .contains(ZOMBIE_BUDDY_POLICY_AGENT));
     assert!(fs::read_to_string(&steam_config)
         .unwrap()
-        .contains("-agentlib:zbNative=policy=allow-all --"));
+        .contains("-agentlib:zbNative=policy=allow-all"));
     let backup_path = result.backup_path.unwrap();
     assert_eq!(
         fs::read_to_string(Path::new(&backup_path).join("ProjectZomboid64.json")).unwrap(),
@@ -2611,7 +2766,7 @@ fn none_scheme_strips_loader_agent_from_steam_launch_options() {
     assert!(changed);
     // agent 被摘掉、内存照写、其余参数保留；apps（小写）节点也能被识别。
     assert!(!patched.contains("zbNative"));
-    assert!(patched.contains(r#""LaunchOptions" "-Xmx4096m -- -novid""#));
+    assert!(patched.contains(r#""LaunchOptions" "-Xmx4096m -novid""#));
 }
 
 /// 旧版本把含转义引号的 LaunchOptions 行写坏（闭引号后残留原文尾巴）时，
@@ -2631,7 +2786,1175 @@ fn repairs_corrupted_launch_options_line_on_rewrite() {
 
     assert!(changed);
     assert!(patched.contains(
-        r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -- -novid""#
+        r#""LaunchOptions" "-agentlib:zbNative=policy=allow-all -novid""#
     ));
+    assert!(!patched.contains("--"));
     assert!(!patched.contains("my dir"));
 }
+
+// ---------------------------------------------------------------------------
+// 光影包配置解析与启动覆写（shaderpack_config.rs，思路文档 §7 测试清单）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classifies_viewpoint_live_keys_per_document() {
+    assert_eq!(
+        classify_key("minecraft.minecraft-BSL_v8_4.SHADOW"),
+        LiveKeyClass::McParam {
+            pack_id: "minecraft-BSL_v8_4".to_string(),
+            param: "SHADOW".to_string()
+        }
+    );
+    // packId 可能包含点 / 下划线 / 连字符，必须按最后一个点拆（思路文档 §1）。
+    assert_eq!(
+        classify_key("minecraft.minecraft-Bliss_v2_1_2__Chocapic13_Shaders_edit_.TAA"),
+        LiveKeyClass::McParam {
+            pack_id: "minecraft-Bliss_v2_1_2__Chocapic13_Shaders_edit_".to_string(),
+            param: "TAA".to_string()
+        }
+    );
+    // minecraftProfile. 不是 minecraft. 的子情况，要先判断。
+    assert_eq!(
+        classify_key("minecraftProfile.minecraft-BSL_v8_4"),
+        LiveKeyClass::McProfile {
+            pack_id: "minecraft-BSL_v8_4".to_string()
+        }
+    );
+    assert_eq!(classify_key("camera.motion"), LiveKeyClass::Viewpoint);
+    assert_eq!(classify_key("graphics.pack"), LiveKeyClass::Viewpoint);
+    assert_eq!(classify_key("pack.default.SHADOW"), LiveKeyClass::PackParam);
+    assert_eq!(classify_key("minecraft.about"), LiveKeyClass::McUnknown);
+}
+
+#[test]
+fn properties_document_preserves_comments_order_and_newlines() {
+    let content = "# header\r\n\r\ncamera.motion=High\r\nminecraft.minecraft-BSL_v8_4.SHADOW=true\r\n! disabled\r\nminecraft.minecraft-BSL_v8_4.TAA=false\r\n";
+    let mut doc = PropertiesDocument::parse(content);
+    assert_eq!(
+        doc.get("minecraft.minecraft-BSL_v8_4.SHADOW").as_deref(),
+        Some("true")
+    );
+    assert!(doc.set("minecraft.minecraft-BSL_v8_4.SHADOW", "false").unwrap());
+
+    let rendered = doc.render();
+    let lines: Vec<&str> = rendered.lines().collect();
+    assert_eq!(lines[0], "# header");
+    assert_eq!(lines[1], "");
+    assert_eq!(lines[2], "camera.motion=High");
+    assert_eq!(lines[3], "minecraft.minecraft-BSL_v8_4.SHADOW=false");
+    assert_eq!(lines[4], "! disabled");
+    assert_eq!(lines[5], "minecraft.minecraft-BSL_v8_4.TAA=false");
+    // 换行风格（CRLF）保留
+    assert!(rendered.ends_with("\r\n"));
+
+    // LF 风格同样保留
+    let lf = PropertiesDocument::parse("a=1\nb=2\n");
+    assert_eq!(lf.render(), "a=1\nb=2\n");
+    // 无尾换行也保留
+    assert_eq!(PropertiesDocument::parse("a=1").render(), "a=1");
+    // BOM 去掉（写回无 BOM，思路文档 §4.3）
+    assert_eq!(PropertiesDocument::parse("\u{feff}a=1\n").render(), "a=1\n");
+}
+
+#[test]
+fn properties_document_inserts_new_keys_by_section() {
+    let mut doc = PropertiesDocument::parse(
+        "camera.motion=High\nminecraft.minecraft-AAA.OPTION_ONE=1\nminecraft.minecraft-BBB.OTHER=2\nminecraftProfile.minecraft-BBB=HIGH\n",
+    );
+    doc.set("minecraft.minecraft-AAA.OPTION_TWO", "x").unwrap();
+    doc.set("minecraft.minecraft-CCC.NEW", "y").unwrap();
+    doc.set("minecraftProfile.minecraft-AAA", "LOW").unwrap();
+
+    let rendered = doc.render();
+    let lines: Vec<&str> = rendered.lines().collect();
+    // 新参数插到同 packId 最后一行之后
+    assert_eq!(lines[2], "minecraft.minecraft-AAA.OPTION_TWO=x");
+    // 新 pack 插到最后一个 minecraft. 行之后
+    assert_eq!(lines[4], "minecraft.minecraft-CCC.NEW=y");
+    // profile 键插到最后一个 minecraftProfile 行之后
+    assert_eq!(lines[6], "minecraftProfile.minecraft-AAA=LOW");
+}
+
+#[test]
+fn properties_document_handles_duplicate_keys() {
+    let mut doc = PropertiesDocument::parse("k=a\n# keep\nk=b\n");
+    // 重复键逻辑值取最后一次出现
+    assert_eq!(doc.get("k").as_deref(), Some("b"));
+    // 覆写改最后一行
+    doc.set("k", "c").unwrap();
+    assert_eq!(doc.render(), "k=a\n# keep\nk=c\n");
+    // remove 删所有重复行，注释保留
+    assert_eq!(doc.remove("k"), 2);
+    assert_eq!(doc.render(), "# keep\n");
+}
+
+#[test]
+fn normalizes_override_values() {
+    assert_eq!(normalize_property_value("TRUE").unwrap(), "true");
+    assert_eq!(normalize_property_value("False").unwrap(), "false");
+    // 数字 / 枚举保留原字符串（0.60 不变 0.6，大小写敏感）
+    assert_eq!(normalize_property_value("0.60").unwrap(), "0.60");
+    assert_eq!(normalize_property_value("High").unwrap(), "High");
+    assert!(normalize_property_value("a\nb").is_err());
+
+    // 前导空格转义 + 反斜杠双写后能原样读回
+    let mut doc = PropertiesDocument::parse("");
+    doc.set("k", " spaced").unwrap();
+    assert_eq!(doc.get("k").as_deref(), Some(" spaced"));
+    doc.set("p", "C:\\path").unwrap();
+    assert_eq!(doc.get("p").as_deref(), Some("C:\\path"));
+    // 值中的空格与逗号原样保留
+    doc.set("m", "Nearest, mipmapped").unwrap();
+    assert_eq!(doc.get("m").as_deref(), Some("Nearest, mipmapped"));
+    // 空值
+    doc.set("e", "").unwrap();
+    assert_eq!(doc.get("e").as_deref(), Some(""));
+}
+
+#[test]
+fn derives_pack_ids_from_file_names() {
+    assert_eq!(candidate_pack_id("BSL v8.4.zip"), "minecraft-BSL_v8_4");
+    assert_eq!(candidate_pack_id("BSL_v8_4.zip"), "minecraft-BSL_v8_4");
+    assert_eq!(
+        candidate_pack_id("Bliss v2.1.2 (Chocapic13 Shaders edit).zip"),
+        "minecraft-Bliss_v2_1_2__Chocapic13_Shaders_edit_"
+    );
+}
+
+#[test]
+fn resolve_pack_id_prefers_observed_keys() {
+    let doc = PropertiesDocument::parse("minecraft.minecraft-BSL_v8_4.SHADOW=true\n");
+    assert_eq!(
+        resolve_pack_id("BSL v8.4.zip", &doc),
+        ("minecraft-BSL_v8_4".to_string(), true)
+    );
+    let plain = PropertiesDocument::parse("camera.motion=High\n");
+    assert_eq!(
+        resolve_pack_id("BSL v8.4.zip", &plain),
+        ("minecraft-BSL_v8_4".to_string(), false)
+    );
+    assert_eq!(
+        observed_minecraft_pack_ids(&doc),
+        vec!["minecraft-BSL_v8_4".to_string()]
+    );
+}
+
+#[test]
+fn parses_shaders_properties_options_profiles_and_sliders() {
+    let meta = parse_shaders_properties(
+        "# BSL sample\nSHADOWS=true\nshadowMapResolution=2048.0\nsliders=shadowMapResolution SUN_ANGLE\nprofile.LOW=SHADOWS=false !TAA shadowMapResolution=1024.0\nprofile.HIGH=SHADOWS=true TAA shadowMapResolution=4096.0\nscreen=<empty> SHADOWS\nscreen.SHADOW=SHADOWS shadowMapResolution\nprogram.composite.enabled=true\ntexture.noise=texture/noise.png\n",
+    );
+    let names: Vec<&str> = meta.options.iter().map(|option| option.name.as_str()).collect();
+    assert_eq!(names, vec!["SHADOWS", "shadowMapResolution", "TAA"]);
+
+    let shadows = meta.options.iter().find(|o| o.name == "SHADOWS").unwrap();
+    assert_eq!(shadows.default_value.as_deref(), Some("true"));
+    assert_eq!(shadows.values, vec!["true", "false"]);
+    assert!(!shadows.slider);
+
+    let smr = meta
+        .options
+        .iter()
+        .find(|o| o.name == "shadowMapResolution")
+        .unwrap();
+    assert!(smr.slider);
+    assert_eq!(smr.values, vec!["2048.0", "1024.0", "4096.0"]);
+
+    // 只出现在预设里的参数也收进来；`opt` → true，`!opt` → false
+    let taa = meta.options.iter().find(|o| o.name == "TAA").unwrap();
+    assert_eq!(taa.default_value, None);
+    // LOW 的 !TAA 先出现，所以 false 在前
+    assert_eq!(taa.values, vec!["false", "true"]);
+
+    let high = meta.profiles.iter().find(|p| p.name == "HIGH").unwrap();
+    let taa_token = high.tokens.iter().find(|t| t.option == "TAA").unwrap();
+    assert_eq!(taa_token.value, "true");
+    let low = meta.profiles.iter().find(|p| p.name == "LOW").unwrap();
+    let taa_low = low.tokens.iter().find(|t| t.option == "TAA").unwrap();
+    assert_eq!(taa_low.value, "false");
+
+    // 引擎命名空间与 screen 不当作参数
+    assert!(!names.contains(&"program.composite.enabled"));
+    assert!(!names.iter().any(|name| name.starts_with("screen")));
+    assert!(!names.contains(&"texture.noise"));
+}
+
+#[test]
+fn folds_java_properties_continuations_for_screens() {
+    // BSL 主页的真实形态：分类按钮全在 `\` 续行上。
+    // Iris 用 OrderBackedProperties（java.util.Properties 子类）读 shaders.properties，
+    // 续行是 Java load 语义：尾随奇数个反斜杠折叠下一行（剥前导空白）。
+    let meta = parse_shaders_properties(concat!(
+        "SHADOWS=true\n",
+        "screen=<empty> <profile> SHADOWS \\\n",
+        "  [LIGHTING] [MATERIAL]\n",
+        "screen.LIGHTING=SHADOWS\n",
+        "screen.MATERIAL=SHADOWS\n",
+        "sliders=SHADOWS\n",
+    ));
+    let main = &meta.screens[0];
+    let kinds: Vec<&str> = main.tokens.iter().map(|token| token.kind.as_str()).collect();
+    assert_eq!(kinds, vec!["empty", "profile", "option", "screen", "screen"]);
+    assert!(meta.screens.iter().any(|screen| screen.name == "LIGHTING"));
+    assert!(meta.screens.iter().any(|screen| screen.name == "MATERIAL"));
+}
+
+#[test]
+fn parses_java_properties_escapes_and_whitespace_separators() {
+    // java.util.Properties.load 语义：key 也能被空白 / `:` 终止；完整反转义
+    let doc = PropertiesDocument::parse("key1 value1\nkey2\\:name=v2\nkey3=C:\\\\path\n");
+    assert_eq!(doc.get("key1").as_deref(), Some("value1"));
+    assert_eq!(doc.get("key2:name").as_deref(), Some("v2"));
+    assert_eq!(doc.get("key3").as_deref(), Some("C:\\path"));
+    // \uXXXX 反转义
+    let unicode = PropertiesDocument::parse("k=\\u9634\\u5f71\n");
+    assert_eq!(unicode.get("k").as_deref(), Some("阴影"));
+}
+
+#[test]
+fn unknown_screen_tokens_are_skipped_like_iris() {
+    // Iris `OptionMenuContainer` 对每个 token 单独 try/catch：引用未检测到的参数
+    // 只跳过该元素并记日志，菜单照常构建（photon 就带 3 个这种幻影 token）。
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"screen=REAL NOT_DEFINED_ANYWHERE\n").unwrap();
+    archive
+        .start_file("shaders/test.fsh", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"#define REAL // on\n").unwrap();
+    archive.finish().unwrap();
+
+    let meta = read_pack_shader_meta(&pack).unwrap();
+    assert_eq!(meta.screens.len(), 1);
+    assert_eq!(
+        meta.screens[0].tokens,
+        vec![super::ShaderScreenToken {
+            kind: "option".to_string(),
+            name: Some("REAL".to_string())
+        }]
+    );
+}
+
+#[test]
+fn profile_token_without_profiles_is_skipped_like_iris() {
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    // `<profile>` 但包里没有任何 profile.* 定义 → 该元素被跳过，其余照常
+    archive.write_all(b"screen=<profile> REAL\n").unwrap();
+    archive
+        .start_file("shaders/test.fsh", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"#define REAL // on\n").unwrap();
+    archive.finish().unwrap();
+
+    let meta = read_pack_shader_meta(&pack).unwrap();
+    assert_eq!(meta.screens.len(), 1);
+    assert_eq!(
+        meta.screens[0].tokens,
+        vec![super::ShaderScreenToken {
+            kind: "option".to_string(),
+            name: Some("REAL".to_string())
+        }]
+    );
+}
+
+#[test]
+fn all_unknown_tokens_still_yield_a_forced_flat_screen() {
+    // 强制分页兜底：screen= 全引用不存在的参数 → 过滤后所有页都空 →
+    // 必须合成"全部参数"单页，绝不允许落到空状态。
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"screen=GHOST_ONE GHOST_TWO
+").unwrap();
+    archive
+        .start_file("shaders/test.fsh", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"#define SSR_ENABLED // on
+").unwrap();
+    archive.finish().unwrap();
+
+    let meta = read_pack_shader_meta(&pack).unwrap();
+    assert_eq!(meta.options.len(), 1);
+    assert_eq!(meta.screens.len(), 1);
+    assert_eq!(
+        meta.screens[0].tokens,
+        vec![super::ShaderScreenToken {
+            kind: "option".to_string(),
+            name: Some("SSR_ENABLED".to_string())
+        }]
+    );
+}
+
+#[test]
+fn source_only_packs_chunk_into_button_pages_when_overflowing() {
+    // 强制分页形态：没有自带布局且参数超过一页容量时，主页变成"第 N 页"按钮页
+    //（与截图中 Bliss / photon 的分类按钮页同款），点进去才是该页的参数网格。
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/test.fsh", SimpleFileOptions::default())
+        .unwrap();
+    let mut defines = String::new();
+    for index in 0..13 {
+        defines.push_str(&format!("#define OPTION_{index} // on
+"));
+    }
+    archive.write_all(defines.as_bytes()).unwrap();
+    archive.finish().unwrap();
+
+    let meta = read_pack_shader_meta(&pack).unwrap();
+    assert_eq!(meta.options.len(), 13);
+    assert_eq!(meta.screens.len(), 3);
+    // 主页：两个"第 N 页"按钮
+    assert_eq!(
+        meta.screens[0].tokens,
+        vec![
+            super::ShaderScreenToken { kind: "screen".to_string(), name: Some("auto_page_1".to_string()) },
+            super::ShaderScreenToken { kind: "screen".to_string(), name: Some("auto_page_2".to_string()) },
+        ]
+    );
+    assert_eq!(meta.screens[1].label.as_deref(), Some("第 1 页"));
+    assert_eq!(meta.screens[1].tokens.len(), 10);
+    assert_eq!(meta.screens[2].label.as_deref(), Some("第 2 页"));
+    assert_eq!(meta.screens[2].tokens.len(), 3);
+}
+
+#[test]
+fn source_only_packs_get_a_flat_screen() {
+    // EclipseShaders 这类没有 shaders.properties 的纯源码包：
+    // 选项能扫出来，布局合成一份"全部参数"单页，而不是空界面。
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/test.fsh", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"#define SSR_ENABLED // on\n").unwrap();
+    archive.finish().unwrap();
+
+    let meta = read_pack_shader_meta(&pack).unwrap();
+    assert_eq!(meta.options.len(), 1);
+    assert_eq!(meta.screens.len(), 1);
+    assert_eq!(
+        meta.screens[0].tokens,
+        vec![super::ShaderScreenToken {
+            kind: "option".to_string(),
+            name: Some("SSR_ENABLED".to_string())
+        }]
+    );
+}
+
+/// 本地真实 Steam 配置抽查（默认忽略，只读不写）：拿真实的 localconfig.vdf 走一遍
+/// "补丁 → 状态判定" 回环，确认修复后安装闭环成立、用户自设参数不丢。
+#[test]
+#[ignore]
+fn real_world_steam_config_round_trips_status() {
+    let steam_root = std::path::Path::new("c:/program files (x86)/steam");
+    let Some(userdata) = steam_root.join("userdata").read_dir().ok() else {
+        return;
+    };
+    let mut checked = 0;
+    for entry in userdata.flatten() {
+        let config = entry.path().join("config").join("localconfig.vdf");
+        let Ok(content) = fs::read_to_string(&config) else {
+            continue;
+        };
+        let (patched, changed) = patch_steam_launch_options_content(&content).unwrap();
+        // 安装后状态必须判定为已配置（agent 已写入生效的那条 LaunchOptions）
+        assert!(
+            steam_config_has_both(&patched),
+            "{} 补丁后状态仍是缺少",
+            config.display()
+        );
+        // 用户自设的参数（如 -screen-width）不能被清掉
+        if content.contains("screen-width") {
+            assert!(patched.contains("screen-width"), "{} 丢了用户的窗口参数", config.display());
+        }
+        let _ = changed;
+        checked += 1;
+    }
+    assert!(checked > 0, "没有找到任何 localconfig.vdf");
+}
+
+/// 诊断指定真实包的解析结果（默认忽略）：选项数 / 分页数 / 各分页 token 数。
+#[test]
+#[ignore]
+fn real_world_diagnose_two_packs() {
+    for path in [
+        r"C:\Users\SanyeSAMA\Zomboid\viewpoint-shaderpacks\EclipseShaders.zip",
+        r"C:\Users\SanyeSAMA\Zomboid\viewpoint-shaderpacks\photon_v1.0a.zip",
+    ] {
+        let path = std::path::Path::new(path);
+        if !path.is_file() {
+            continue;
+        }
+        // properties 层独立诊断：screen= / screen.* 是否被解析出来
+        if let Ok(Some(content)) = read_shaders_properties_from_pack(path) {
+            let parsed = parse_shaders_properties(&content);
+            println!(
+                "  properties 层：选项 {} 个，分页 {} 个（{:?}）",
+                parsed.options.len(),
+                parsed.screens.len(),
+                parsed.screens.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        // 预检：properties 层的 screen token 里哪些不在（合并后）选项集合里
+        if let (Ok(Some(content)), Ok(meta)) = (
+            read_shaders_properties_from_pack(path),
+            read_pack_shader_meta(path),
+        ) {
+            let parsed = parse_shaders_properties(&content);
+            let known: std::collections::HashSet<&str> =
+                meta.options.iter().map(|option| option.name.as_str()).collect();
+            let mut unresolved: Vec<String> = Vec::new();
+            for screen in &parsed.screens {
+                for token in &screen.tokens {
+                    if token.kind == "option" {
+                        if let Some(name) = &token.name {
+                            if !known.contains(name.as_str())
+                                && !unresolved.iter().any(|probe| probe == name)
+                            {
+                                unresolved.push(name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            if !unresolved.is_empty() {
+                println!("  校验不过的 token：{unresolved:?}");
+            }
+        }
+        match read_pack_shader_meta(path) {
+            Ok(meta) => {
+                println!(
+                    "{}: 选项 {} 个，分页 {} 个（{:?}）",
+                    path.file_name().unwrap().to_string_lossy(),
+                    meta.options.len(),
+                    meta.screens.len(),
+                    meta.screens
+                        .iter()
+                        .map(|screen| screen.name.as_str())
+                        .collect::<Vec<_>>()
+                );
+                // 找出 screen 里引用了但选项集合里没有的 token（触发 Iris 回退的原因）
+                let known: std::collections::HashSet<&str> =
+                    meta.options.iter().map(|option| option.name.as_str()).collect();
+                let mut unresolved: Vec<&str> = Vec::new();
+                for screen in &meta.screens {
+                    for token in &screen.tokens {
+                        if token.kind == "option" {
+                            if let Some(name) = &token.name {
+                                if !known.contains(name.as_str())
+                                    && !unresolved.contains(&name.as_str())
+                                {
+                                    unresolved.push(name.as_str());
+                                }
+                            }
+                        }
+                    }
+                }
+                if !unresolved.is_empty() {
+                    println!("  screen 引用但未检测到的参数：{unresolved:?}");
+                }
+            }
+            Err(error) => println!("{}: 解析失败：{error}", path.file_name().unwrap().to_string_lossy()),
+        }
+    }
+}
+
+/// 本地真实包语言覆盖率抽查（默认忽略）：每个包统计参数总数 / 有显示名 / 有说明的数量，
+/// 用来定位"标签没应用"是解析问题还是包本身没翻译。
+#[test]
+#[ignore]
+fn real_world_shaderpacks_report_lang_coverage() {
+    let dir = std::path::Path::new("H:\\.minecraft\\versions\\1.20.1-Fabric机械美化\\shaderpacks");
+    if !dir.is_dir() {
+        return;
+    }
+    for entry in fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let Ok(meta) = read_pack_shader_meta(&path) else {
+            continue;
+        };
+        // 与命令同一套语言选择：默认中文 → en_US 键级回退
+        let pack_lang = read_pack_lang(&path, &["zh_CN".to_string(), "zh_TW".to_string()]);
+        let Ok(Some(pack_lang)) = pack_lang else {
+            println!("{name}: (没有 lang 文件)");
+            continue;
+        };
+        let mut labels = pack_lang.labels.clone();
+        if !pack_lang.chosen.eq_ignore_ascii_case("en_US") {
+            if let Ok(Some(base)) = read_pack_lang(&path, &["en_US".to_string()]) {
+                labels = super::ShaderLangLabels::merged_lang_fallback(&base.labels, labels);
+            }
+        }
+        let total = meta.options.len();
+        let labelled = meta
+            .options
+            .iter()
+            .filter(|option| labels.option_label(&option.name).is_some())
+            .count();
+        let commented = meta
+            .options
+            .iter()
+            .filter(|option| labels.option_comment(&option.name).is_some())
+            .count();
+        let without_label: Vec<&String> = meta
+            .options
+            .iter()
+            .filter(|option| labels.option_label(&option.name).is_none())
+            .map(|option| &option.name)
+            .collect();
+        println!(
+            "{name}: chosen={} 参数 {total}，有显示名 {labelled}，有说明 {commented}；无显示名前 15 个：{:?}",
+            pack_lang.chosen,
+            &without_label[..without_label.len().min(15)]
+        );
+        // 用户可见层：screen 布局实际引用的参数里，还有多少没拿到语言文本
+        let on_screen: Vec<String> = meta
+            .screens
+            .iter()
+            .flat_map(|screen| &screen.tokens)
+            .filter_map(|token| token.name.clone())
+            .collect();
+        let visible: Vec<String> = on_screen
+            .into_iter()
+            .filter(|name| meta.options.iter().any(|option| &option.name == name))
+            .collect();
+        let visible_total = visible.len();
+        let visible_unlabelled: Vec<&String> = visible
+            .iter()
+            .filter(|name| labels.option_label(name).is_none())
+            .collect();
+        println!(
+            "{name}: 界面可见参数 {visible_total}，其中无显示名 {} 个 {:?}",
+            visible_unlabelled.len(),
+            &visible_unlabelled[..visible_unlabelled.len().min(15)]
+        );
+    }
+}
+
+/// 本地真实包抽查（依赖个人机器上的目录，默认忽略）：
+/// `cargo test --lib -- --ignored real_world`
+#[test]
+#[ignore]
+fn real_world_shaderpacks_keep_their_screen_layouts() {
+    let dir = std::path::Path::new("H:\\.minecraft\\versions\\1.20.1-Fabric机械美化\\shaderpacks");
+    if !dir.is_dir() {
+        return;
+    }
+    for entry in fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let Ok(meta) = read_pack_shader_meta(&path) else {
+            // 没有 shaders.properties 的包（Bliss-Shader-Unstable / photon-voxy-support）本来就会失败
+            continue;
+        };
+        // 有 screen 布局的包（BSL / Bliss / Alpha Piscium / Complementary）：解析后必须保留子屏分页
+        if name.starts_with("BSL") || name.starts_with("Bliss") || name.starts_with("Alpha Piscium") || name.starts_with("Complementary") {
+            assert!(
+                meta.screens.len() > 1,
+                "{name} 的子屏丢了：只剩 {} 个 screen",
+                meta.screens.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn parses_screens_like_optifine_layout() {    let meta = parse_shaders_properties(concat!(
+        "SHADOWS=true\n",
+        "shadowMapResolution=2048\n",
+        "TAA=true\n",
+        "screen.columns=4\n",
+        "screen=<empty> <profile> SHADOWS [DETAIL]\n",
+        "screen.DETAIL=shadowMapResolution TAA\n",
+        "screen.DETAIL.columns=3\n",
+    ));
+
+    // 主页 + 子屏（按出现顺序）
+    assert_eq!(meta.screens.len(), 2);
+    let main = &meta.screens[0];
+    assert_eq!(main.name, "screen");
+    // screen.columns 设主页列数
+    assert_eq!(main.columns, 4);
+    // <empty> / <profile> / 参数 / [子屏] 四种 token；shadowMapResolution 与 TAA 已被
+    // screen.DETAIL 引用，不重复追加主页
+    assert_eq!(
+        main.tokens,
+        vec![
+            super::ShaderScreenToken { kind: "empty".to_string(), name: None },
+            super::ShaderScreenToken { kind: "profile".to_string(), name: None },
+            super::ShaderScreenToken { kind: "option".to_string(), name: Some("SHADOWS".to_string()) },
+            super::ShaderScreenToken { kind: "screen".to_string(), name: Some("DETAIL".to_string()) },
+        ]
+    );
+    let detail = &meta.screens[1];
+    assert_eq!(detail.name, "DETAIL");
+    // screen.<name>.columns 设子屏列数
+    assert_eq!(detail.columns, 3);
+    assert_eq!(detail.tokens.len(), 2);
+
+    // 没有 screen= → 合成一份"全部参数"的单页主页
+    let flat = parse_shaders_properties("A=1\nB=2\n");
+    assert_eq!(flat.screens.len(), 1);
+    assert_eq!(flat.screens[0].tokens.len(), 2);
+}
+
+#[test]
+fn reads_shaders_properties_from_zip() {
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/gbuffers.frag", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"void main() {}").unwrap();
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"SHADOWS=true\nsliders=SHADOWS\n").unwrap();
+    archive.finish().unwrap();
+
+    let content = read_shaders_properties_from_pack(&pack).unwrap().unwrap();
+    let meta = parse_shaders_properties(&content);
+    assert_eq!(meta.options.len(), 1);
+    assert_eq!(meta.options[0].name, "SHADOWS");
+    assert!(meta.options[0].slider);
+
+    // 没有 shaders.properties 的包（如 Viewpoint 内置包）返回 None
+    let plain = temp.path().join("plain.zip");
+    let file = fs::File::create(&plain).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("readme.txt", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"nothing").unwrap();
+    archive.finish().unwrap();
+    assert!(read_shaders_properties_from_pack(&plain).unwrap().is_none());
+}
+
+#[test]
+fn applies_shaderpack_overrides_only_to_minecraft_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let zomboid = temp.path();
+    fs::create_dir_all(zomboid.join("viewpoint-shaderpacks")).unwrap();
+    let live = zomboid.join("viewpoint-live.properties");
+    let original = concat!(
+        "# Viewpoint live settings\r\n",
+        "camera.motion=High\r\n",
+        "keys.cameraTrace=\r\n",
+        "models.filter=Nearest, mipmapped\r\n",
+        "graphics.pack=vivid\r\n",
+        "minecraft.minecraft-BSL_v8_4.SHADOW=true\r\n",
+        "minecraftProfile.minecraft-BSL_v8_4=LOW\r\n",
+        "minecraft.minecraft-Other_pack.OLD=yes\r\n",
+    );
+    fs::write(&live, original).unwrap();
+
+    // 包里带 shaders.properties，用于参数白名单校验
+    let pack = zomboid.join("viewpoint-shaderpacks").join("BSL v8.4.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(b"SHADOW=true\nSHADOW_DISTANCE=256.0\nTAA=true\n")
+        .unwrap();
+    archive.finish().unwrap();
+
+    let overrides = vec![ShaderpackOverrideEntry {
+        pack_name: "BSL v8.4.zip".to_string(),
+        profile: Some("HIGH".to_string()),
+        values: BTreeMap::from([
+            ("SHADOW".to_string(), "false".to_string()),
+            ("SHADOW_DISTANCE".to_string(), "512.0".to_string()),
+            ("NOT_IN_PACK".to_string(), "1".to_string()),
+        ]),
+    }];
+    let outcome = apply_shaderpack_overrides_at_dir(zomboid, &overrides, false).unwrap();
+    assert!(outcome.applied);
+    assert_eq!(outcome.packs, 1);
+    // profile + SHADOW + SHADOW_DISTANCE；白名单外的 NOT_IN_PACK 被跳过
+    assert_eq!(outcome.keys, 3);
+
+    let written = fs::read_to_string(&live).unwrap();
+    // Viewpoint 自身键一字未动（思路文档 §1）
+    assert!(written.contains("camera.motion=High\r\n"));
+    assert!(written.contains("keys.cameraTrace=\r\n"));
+    assert!(written.contains("models.filter=Nearest, mipmapped\r\n"));
+    assert!(written.contains("graphics.pack=vivid\r\n"));
+    assert!(written.contains("minecraft.minecraft-Other_pack.OLD=yes\r\n"));
+    // 目标键：既有键原位改，profile 与新参数按区域插入
+    assert!(written.contains("minecraft.minecraft-BSL_v8_4.SHADOW=false\r\n"));
+    assert!(written.contains("minecraftProfile.minecraft-BSL_v8_4=HIGH\r\n"));
+    assert!(written.contains("minecraft.minecraft-BSL_v8_4.SHADOW_DISTANCE=512.0\r\n"));
+    assert!(!written.contains("NOT_IN_PACK"));
+    // 注释与换行风格保留
+    assert!(written.starts_with("# Viewpoint live settings\r\n"));
+
+    // 备份与清单已生成
+    let backup_dir = zomboid.join(".pzmanager").join("viewpoint-live-backups");
+    assert!(backup_dir.join("manifest.json").is_file());
+    assert_eq!(
+        fs::read_dir(&backup_dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("viewpoint-live.properties.bak."))
+            .count(),
+        1
+    );
+
+    // 回读校验通过：文档 get 取到新值
+    let doc = PropertiesDocument::parse(&written);
+    assert_eq!(
+        doc.get("minecraft.minecraft-BSL_v8_4.SHADOW_DISTANCE").as_deref(),
+        Some("512.0")
+    );
+}
+
+#[test]
+fn applies_overrides_creates_and_restores_missing_live_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let zomboid = temp.path();
+    let overrides = vec![ShaderpackOverrideEntry {
+        pack_name: "BSL v8.4.zip".to_string(),
+        profile: None,
+        values: BTreeMap::from([("SHADOW".to_string(), "true".to_string())]),
+    }];
+    let outcome = apply_shaderpack_overrides_at_dir(zomboid, &overrides, false).unwrap();
+    assert!(outcome.applied);
+
+    let live = zomboid.join("viewpoint-live.properties");
+    assert!(live.is_file());
+    assert!(fs::read_to_string(&live)
+        .unwrap()
+        .contains("minecraft.minecraft-BSL_v8_4.SHADOW=true"));
+
+    // 整文件还原：原本不存在 → 删除覆写生成的文件
+    let message = restore_viewpoint_live_backup_at(zomboid).unwrap().unwrap();
+    assert!(message.contains("移除"));
+    assert!(!live.exists());
+    // 没有待还原的备份 → None（还原是空操作）
+    assert!(restore_viewpoint_live_backup_at(zomboid).unwrap().is_none());
+}
+
+#[test]
+fn restores_whole_file_after_game_rewrites_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let zomboid = temp.path();
+    let live = zomboid.join("viewpoint-live.properties");
+    fs::write(&live, "camera.motion=High\n").unwrap();
+    write_viewpoint_live_backup_at(zomboid).unwrap();
+
+    // 模拟游戏内改动（Viewpoint 在 Delete 菜单保存时重写整个文件）
+    fs::write(
+        &live,
+        "camera.motion=Right\nminecraft.minecraft-BSL_v8_4.SHADOW=false\n",
+    )
+    .unwrap();
+
+    restore_viewpoint_live_backup_at(zomboid).unwrap().unwrap();
+    assert_eq!(fs::read_to_string(&live).unwrap(), "camera.motion=High\n");
+    // 还原后清单清掉，再次还原是空操作
+    assert!(restore_viewpoint_live_backup_at(zomboid).unwrap().is_none());
+}
+
+#[test]
+fn skips_override_apply_while_game_running() {
+    let temp = tempfile::tempdir().unwrap();
+    let overrides = vec![ShaderpackOverrideEntry {
+        pack_name: "a.zip".to_string(),
+        profile: None,
+        values: BTreeMap::from([("P".to_string(), "1".to_string())]),
+    }];
+    let outcome = apply_shaderpack_overrides_at_dir(temp.path(), &overrides, true).unwrap();
+    assert!(!outcome.applied);
+    assert!(outcome.reason.contains("运行"));
+    assert!(!temp.path().join("viewpoint-live.properties").exists());
+}
+
+#[test]
+fn apply_restores_leftover_backup_before_overwriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let zomboid = temp.path();
+    let live = zomboid.join("viewpoint-live.properties");
+    fs::write(&live, "camera.motion=High\n").unwrap();
+    write_viewpoint_live_backup_at(zomboid).unwrap();
+    // 上次启动器中途退出的残留：覆写值还在、没来得及还原
+    fs::write(
+        &live,
+        "camera.motion=High\nminecraft.minecraft-BSL_v8_4.SHADOW=true\n",
+    )
+    .unwrap();
+
+    let overrides = vec![ShaderpackOverrideEntry {
+        pack_name: "BSL v8.4.zip".to_string(),
+        profile: None,
+        values: BTreeMap::from([("SHADOW".to_string(), "false".to_string())]),
+    }];
+    let outcome = apply_shaderpack_overrides_at_dir(zomboid, &overrides, false).unwrap();
+    assert!(outcome.applied);
+
+    // 先恢复了遗留备份再覆写：camera 行不变，minecraft 键存在且是新值
+    let doc = PropertiesDocument::parse(&fs::read_to_string(&live).unwrap());
+    assert_eq!(doc.get("camera.motion").as_deref(), Some("High"));
+    assert_eq!(
+        doc.get("minecraft.minecraft-BSL_v8_4.SHADOW").as_deref(),
+        Some("false")
+    );
+}
+
+#[test]
+fn keeps_only_recent_viewpoint_live_backups() {
+    let temp = tempfile::tempdir().unwrap();
+    let zomboid = temp.path();
+    let live = zomboid.join("viewpoint-live.properties");
+    fs::write(&live, "k=v\n").unwrap();
+    for _ in 0..7 {
+        write_viewpoint_live_backup_at(zomboid).unwrap();
+        // 纳秒时间戳做文件名，稍等保证不重名
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let backup_dir = zomboid.join(".pzmanager").join("viewpoint-live-backups");
+    let backups: Vec<_> = fs::read_dir(&backup_dir)
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("viewpoint-live.properties.bak.")
+        })
+        .collect();
+    assert_eq!(backups.len(), 5);
+    assert!(backup_dir.join("manifest.json").is_file());
+}
+
+#[test]
+fn shaderpack_overrides_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("shaderpack-overrides.json");
+    // 缺失 = 默认空配置
+    let mut state = read_shaderpack_overrides_at(&path).unwrap();
+    assert!(state.packs.is_empty());
+    assert_eq!(state.format_version, SHADERPACK_OVERRIDES_FORMAT);
+
+    upsert_shaderpack_override(
+        &mut state,
+        "a.zip",
+        Some(" HIGH ".to_string()),
+        BTreeMap::from([
+            ("P".to_string(), "1".to_string()),
+            ("".to_string(), "x".to_string()),
+        ]),
+    );
+    upsert_shaderpack_override(&mut state, "b.zip", None, BTreeMap::new());
+    write_shaderpack_overrides_at(&path, &state).unwrap();
+
+    let loaded = read_shaderpack_overrides_at(&path).unwrap();
+    assert_eq!(loaded.packs.len(), 2);
+    assert_eq!(loaded.packs[0].profile.as_deref(), Some("HIGH"));
+    assert!(!loaded.packs[0].values.contains_key(""));
+    assert_eq!(loaded.packs[1].pack_name, "b.zip");
+
+    let mut trimmed = loaded;
+    assert!(remove_shaderpack_override(&mut trimmed, "a.zip"));
+    assert!(!remove_shaderpack_override(&mut trimmed, "missing.zip"));
+    assert_eq!(trimmed.packs.len(), 1);
+}
+
+#[test]
+fn default_lang_stems_prefer_chinese() {
+    // 弹窗默认中文（简体 → 繁体），没有中文时由 read_pack_lang 回退 en_US / 第一个
+    assert_eq!(
+        default_lang_stems(),
+        vec!["zh_CN".to_string(), "zh_TW".to_string()]
+    );
+}
+
+#[test]
+fn parses_lang_content_keys_and_values() {
+    let labels = parse_lang_content(
+        "# comment\noption.SHADOWS=Shadows\noption.SHADOWS.comment=Enable shadows.\nvalue.SHADOWS.true=ON\nvalue.true=On\n",
+    );
+    assert_eq!(labels.option_label("SHADOWS").as_deref(), Some("Shadows"));
+    assert_eq!(
+        labels.option_comment("SHADOWS").as_deref(),
+        Some("Enable shadows.")
+    );
+    assert_eq!(labels.value_label("SHADOWS", "true", 0).as_deref(), Some("ON"));
+    // 通用 value.<VALUE> 兜底（lang 里常配 value.true=On / value.false=Off）
+    assert_eq!(labels.value_label("OTHER_OPT", "true", 0).as_deref(), Some("On"));
+    assert_eq!(labels.value_label("OTHER_OPT", "false", 1), None);
+    // 按序号的键形态（Bliss：value.RESOURCEPACK_SKY.0=不使用）
+    let indexed = parse_lang_content("value.STYLE.0=Original\nvalue.STYLE.1=Classic\n");
+    assert_eq!(indexed.value_label("STYLE", "0", 0).as_deref(), Some("Original"));
+    assert_eq!(indexed.value_label("STYLE", "1", 1).as_deref(), Some("Classic"));
+    assert_eq!(indexed.value_label("STYLE", "9", 1).as_deref(), Some("Classic"));
+    // 键级语言回退：chosen 缺的键用 base 补，chosen 有的键覆盖 base
+    let base = parse_lang_content("option.A=Base A\noption.B=Base B\n");
+    let chosen = parse_lang_content("option.A=中文 A\n");
+    let merged = super::ShaderLangLabels::merged_lang_fallback(&base, chosen);
+    assert_eq!(merged.option_label("A").as_deref(), Some("中文 A"));
+    assert_eq!(merged.option_label("B").as_deref(), Some("Base B"));
+    // 值里的冒号不被当分隔符（第一个分隔符是 =）
+    let colon = parse_lang_content("option.X=A: B\n");
+    assert_eq!(colon.option_label("X").as_deref(), Some("A: B"));
+}
+
+#[test]
+fn reads_lang_labels_preferring_user_language() {
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("BSL_v8.4.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(b"SHADOWS=true\nshadowMapResolution=2048.0\nsliders=shadowMapResolution\n")
+        .unwrap();
+    archive
+        .start_file("shaders/lang/en_US.lang", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(
+            concat!(
+                "option.SHADOWS=Shadows\n",
+                "option.SHADOWS.comment=Enable shadow casting.\n",
+                "value.SHADOWS.true=ON\n",
+                "option.shadowMapResolution=Shadow resolution\n",
+                "value.shadowMapResolution.2048=2K\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    archive
+        .start_file("shaders/lang/zh_CN.lang", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(
+            concat!(
+                "option.SHADOWS=阴影\n",
+                "value.SHADOWS.true=开\n",
+                "profile.HIGH=高画质\n",
+                // lang 键大小写本应敏感，但有些包写得很随意：小写键兜底
+                "option.shadows.comment=阴影开关说明\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    archive.finish().unwrap();
+
+    // 用户语言 zh_CN 优先；小写键兜底也能命中
+    let zh = read_pack_lang(&pack, &["zh_CN".to_string(), "en_US".to_string()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(zh.chosen, "zh_CN");
+    // 包里可用语言按出现顺序去重
+    assert_eq!(zh.available, vec!["en_US".to_string(), "zh_CN".to_string()]);
+    assert_eq!(zh.labels.option_label("SHADOWS").as_deref(), Some("阴影"));
+    assert_eq!(
+        zh.labels.option_comment("SHADOWS").as_deref(),
+        Some("阴影开关说明")
+    );
+    assert_eq!(zh.labels.value_label("SHADOWS", "true", 0).as_deref(), Some("开"));
+    assert_eq!(zh.labels.profile_label("HIGH").as_deref(), Some("高画质"));
+    // zh 没有这个键，也没有通用 value.false → None（前端回退原值）
+    assert_eq!(zh.labels.value_label("SHADOWS", "false", 1), None);
+
+    // 没配用户语言 → en_US 兜底；数值尾零变体（2048.0 → 2048）能命中 lang 里的 2048
+    let en = read_pack_lang(&pack, &["ja_JP".to_string()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(en.chosen, "en_US");
+    assert_eq!(en.labels.option_label("SHADOWS").as_deref(), Some("Shadows"));
+    assert_eq!(en.labels.value_label("SHADOWS", "true", 0).as_deref(), Some("ON"));
+    assert_eq!(
+        en.labels.value_label("shadowMapResolution", "2048.0", 1).as_deref(),
+        Some("2K")
+    );
+    assert_eq!(en.labels.value_label("shadowMapResolution", "4096", 3), None);
+
+    // 没有任何 lang 文件的包 → None
+    let plain = temp.path().join("plain.zip");
+    let file = fs::File::create(&plain).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"SHADOWS=true\n").unwrap();
+    archive.finish().unwrap();
+    assert!(read_pack_lang(&plain, &["zh_CN".to_string()])
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn lang_labels_fall_back_to_first_available_language() {
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/lang/fr_FR.lang", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"option.SHADOWS=Ombres\n").unwrap();
+    archive.finish().unwrap();
+
+    // 候选语言都不存在（没有 en_US）→ 取目录里第一个 .lang
+    let labels = read_pack_lang(&pack, &["zh_CN".to_string()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(labels.chosen, "fr_FR");
+    assert_eq!(labels.labels.option_label("SHADOWS").as_deref(), Some("Ombres"));
+}
+
+#[test]
+fn scans_source_options_like_viewpoint_iris_options() {
+    // 照搬 Viewpoint `IrisOptions` 的三类声明（正则语义一致）
+    let options = scan_source_options(concat!(
+        "#define SHADOWS // 阴影开关\n",
+        "//  中间夹一行普通注释\n",
+        "//#define TAA // 默认关闭\n",
+        "#  define SPACED // # 与 define 之间允许空白\n",
+        "#define SHADOW_QUALITY 1.0 // 质量 [0.5 1.0 1.5]\n",
+        "#define BLOOM true // [true false]\n",
+        "#define PI 3.14\n",
+        "#define NOT_OPTION 5 // 没有方括号\n",
+        "//#define COMMENTED_VALUE 2 // [1 2]\n",
+        "const int shadowMapResolution = 2048; // 分辨率 [1024 2048 4096]\n",
+        "const float SUN_ANGLE = 30.0; //[0.0 30.0 60.0]\n",
+        "const bool OLD_LIGHTING = true; // [true false]\n",
+        "const vec3 NOT_OPTION2 = vec3(1.0);\n",
+    ));
+
+    let find = |name: &str| options.iter().find(|option| option.name == name).unwrap();
+
+    // TOGGLE：默认开；注释掉的默认关；# 与 define 之间允许空白
+    assert_eq!(find("SHADOWS").default_value, "true");
+    assert_eq!(find("SHADOWS").comment.as_deref(), Some("阴影开关"));
+    assert_eq!(find("TAA").default_value, "false");
+    assert_eq!(find("SPACED").default_value, "true");
+    // 普通宏 / 无方括号 / 注释掉的带值声明 / 非 const 类型 → 都不是选项
+    assert!(!options.iter().any(|option| option.name == "PI"));
+    assert!(!options.iter().any(|option| option.name == "NOT_OPTION"));
+    assert!(!options.iter().any(|option| option.name == "COMMENTED_VALUE"));
+    assert!(!options.iter().any(|option| option.name == "NOT_OPTION2"));
+
+    // VALUE：默认值 + 方括号允许值
+    let quality = find("SHADOW_QUALITY");
+    assert_eq!(quality.default_value, "1.0");
+    assert_eq!(quality.allowed, vec!["0.5", "1.0", "1.5"]);
+    assert_eq!(quality.comment.as_deref(), Some("质量"));
+    let bloom = find("BLOOM");
+    assert_eq!(bloom.default_value, "true");
+    assert_eq!(bloom.allowed, vec!["true", "false"]);
+
+    // CONST：int / float / bool 三种类型
+    let resolution = find("shadowMapResolution");
+    assert_eq!(resolution.default_value, "2048");
+    assert_eq!(resolution.allowed, vec!["1024", "2048", "4096"]);
+    let angle = find("SUN_ANGLE");
+    assert_eq!(angle.default_value, "30.0");
+    assert_eq!(angle.allowed, vec!["0.0", "30.0", "60.0"]);
+    assert_eq!(find("OLD_LIGHTING").default_value, "true");
+}
+
+#[test]
+fn read_pack_shader_meta_merges_source_scan_and_properties() {
+    let temp = tempfile::tempdir().unwrap();
+    let pack = temp.path().join("pack.zip");
+    let file = fs::File::create(&pack).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("shaders/shaders.properties", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(concat!(
+            "profile.LOW=SHADOWS=false shadowMapResolution=1024\n",
+            "profile.HIGH=SHADOWS=true shadowMapResolution=4096\n",
+            "sliders=shadowMapResolution\n",
+            "PROPERTY_ONLY_OPTION=3\n",
+        ).as_bytes())
+        .unwrap();
+    // 子目录（shaders/lib）里的文件同样要扫到
+    archive
+        .start_file("shaders/lib/settings.glsl", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(concat!(
+            "#define SHADOWS // 阴影\n",
+            "const int shadowMapResolution = 2048; // [1024 2048 4096]\n",
+        ).as_bytes())
+        .unwrap();
+    archive.finish().unwrap();
+
+    let meta = read_pack_shader_meta(&pack).unwrap();
+    let names: Vec<&str> = meta.options.iter().map(|option| option.name.as_str()).collect();
+    // 源码声明的在前，properties 独有的在后
+    assert_eq!(names, vec!["SHADOWS", "shadowMapResolution", "PROPERTY_ONLY_OPTION"]);
+
+    // sliders= 对源码扫出的选项同样生效；默认值与允许值来自源码
+    let shadows = meta.options.iter().find(|o| o.name == "SHADOWS").unwrap();
+    assert!(!shadows.slider);
+    assert_eq!(shadows.default_value.as_deref(), Some("true"));
+    assert_eq!(shadows.values, vec!["true", "false"]);
+    assert_eq!(shadows.comment.as_deref(), Some("阴影"));
+    let resolution = meta.options.iter().find(|o| o.name == "shadowMapResolution").unwrap();
+    assert!(resolution.slider);
+    assert_eq!(resolution.default_value.as_deref(), Some("2048"));
+    // 默认值已在方括号允许值里 → 保持包声明的顺序
+    assert_eq!(resolution.values, vec!["1024", "2048", "4096"]);
+    // properties 独有的默认值声明照常收进来
+    let property_only = meta.options.iter().find(|o| o.name == "PROPERTY_ONLY_OPTION").unwrap();
+    assert_eq!(property_only.default_value.as_deref(), Some("3"));
+    // 预设来自 shaders.properties，token 里出现过的取值并进选项
+    assert_eq!(meta.profiles.len(), 2);
+    assert_eq!(meta.profiles[0].name, "LOW");
+    assert!(resolution.values.contains(&"4096".to_string()));
+
+    // 既没有 shaders.properties 也没有源码声明的包 → 报错（内置包 / 非 MC 光影包）
+    let plain = temp.path().join("plain.zip");
+    let file = fs::File::create(&plain).unwrap();
+    let mut archive = ZipWriter::new(file);
+    archive
+        .start_file("readme.txt", SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(b"nothing").unwrap();
+    archive.finish().unwrap();
+    assert!(read_pack_shader_meta(&plain).is_err());
+}
+
+

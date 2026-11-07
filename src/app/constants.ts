@@ -12,13 +12,13 @@ export const TRANSLATION_LANGUAGE_OPTIONS = [
 
 export const DEFAULT_TRANSLATION_LANGUAGE = "zh-CN";
 
-/** 「通用 › 翻译引擎」：auto = 默认链（必应 → Google → MyMemory）；手动指定时该引擎优先，失败按默认链回退。 */
-export const DEFAULT_TRANSLATION_ENGINE = "auto";
+/** 「通用 › 翻译引擎」：auto = 默认链（Google → 必应 → MyMemory）；手动指定时该引擎优先，失败按默认链回退。 */
+export const DEFAULT_TRANSLATION_ENGINE = "google";
 
 export const TRANSLATION_ENGINE_OPTIONS: WorkshopMenuOption[] = [
   { value: "auto", label: "默认（自动回退）" },
-  { value: "bing", label: "必应翻译" },
   { value: "google", label: "Google 翻译" },
+  { value: "bing", label: "必应翻译" },
   { value: "mymemory", label: "MyMemory" },
   { value: "relay", label: "中转翻译（离线）" },
 ];
@@ -145,7 +145,10 @@ export const CUSTOM_TRANSLATION_MAX_CHARS = 20000;
 
 export const CUSTOM_TRANSLATION_CHUNK_CHARS = 1800;
 
-export const TRANSLATION_BATCH_SIZE = 15;
+/** 每次发给后端的翻译句数 = 后端拼成一段、发一次引擎请求的句子数。20 句一批：
+ * 必须与后端 src-tauri 的 BATCH_SIZE / JOIN_BATCH（都是 20）保持一致，
+ * 否则整批会被「翻译批次上限」拒绝，或拼接分组对不上。 */
+export const TRANSLATION_BATCH_SIZE = 20;
 
 export const newsEngineLabels: Record<string, string> = {
   relay: "中转翻译",

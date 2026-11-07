@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   analyzeJarModConflicts,
+  filterJarModsByInjectionItem,
+  jarModMatchesInjectionItem,
   jarScanStatusLabel,
   toggleJarModExpansion,
 } from "../src/jarModUi.ts";
+import { appSource } from "./sourceText.ts";
 
 test("formats the four-frame jar scan status animation", () => {
   assert.equal(jarScanStatusLabel(0, 1, 4), "后台扫描中：1 / 4");
@@ -105,4 +108,65 @@ test("analyzes approved jar mods by shared patch method risk", () => {
       modIds: ["Inject Mod", "Second Inject Mod"],
     },
   ]);
+});
+
+function injectionFixture(id: string, fields: Partial<Parameters<typeof jarModMatchesInjectionItem>[0]>) {
+  return {
+    id,
+    classReferences: [],
+    patchClasses: [],
+    luaClasses: [],
+    patchMethods: [],
+    ...fields,
+  };
+}
+
+test("matches injection items across game class references and mod class names", () => {
+  const mod = injectionFixture("DGVViewpointEyes", {
+    classReferences: [
+      "zombie.util.list.PZArrayList",
+      "zombie.network.fields.hit.HitInfo",
+      "fmod.fmod.FMODSoundEmitter",
+    ],
+    patchClasses: ["dgveyes.Patch_Foo"],
+    luaClasses: ["dgveyes.DGVEReach"],
+    patchMethods: [{ annotation: "Inject", methodName: "onEnter" }],
+  });
+
+  // 点分 / 斜杠 / 大小写：三种输入形式都能命中。
+  assert.equal(jarModMatchesInjectionItem(mod, "zombie.util.list.PZArrayList"), true);
+  assert.equal(jarModMatchesInjectionItem(mod, "zombie/util/list/PZArrayList"), true);
+  assert.equal(jarModMatchesInjectionItem(mod, "  PZARRAYLIST  "), true);
+  assert.equal(jarModMatchesInjectionItem(mod, "fmod.FMODSoundEmitter"), true);
+  // 模组自身类名 / 方法名也在搜索范围（诊断可能点名 dgveyes.DGVEReach）。
+  assert.equal(jarModMatchesInjectionItem(mod, "dgveyes.DGVEReach"), true);
+  assert.equal(jarModMatchesInjectionItem(mod, "onEnter"), true);
+  // 未引用的类不命中。
+  assert.equal(jarModMatchesInjectionItem(mod, "zombie.ai.StateMachine"), false);
+});
+
+test("empty injection query keeps every mod", () => {
+  const mods = [
+    injectionFixture("A", { classReferences: ["zombie.util.list.PZArrayList"] }),
+    injectionFixture("B", {}),
+  ];
+  assert.deepEqual(filterJarModsByInjectionItem(mods, ""), mods);
+  assert.deepEqual(filterJarModsByInjectionItem(mods, "   "), mods);
+  assert.deepEqual(
+    filterJarModsByInjectionItem(mods, "PZArrayList").map((mod) => mod.id),
+    ["A"],
+  );
+});
+
+test("injection search box sits above the conflict panel and filters both views", () => {
+  // 搜索框挂在冲突面板正上方，共用扫描完成后的可见性门控。
+  const searchIndex = appSource.indexOf('aria-label="搜索注入项"');
+  const panelIndex = appSource.indexOf('pz-jar-conflict-panel${jarConflictExpanded');
+  assert.ok(searchIndex >= 0, "应存在注入项搜索框");
+  assert.ok(panelIndex > searchIndex, "搜索框应在冲突分析面板上方");
+  // 列表与冲突对都要按注入项过滤。
+  assert.match(appSource, /filterJarModsByInjectionItem\(/);
+  assert.match(appSource, /visibleJarModConflicts/);
+  // 详情行展示游戏类引用，命中结果可核对。
+  assert.match(appSource, /游戏类引用：/);
 });

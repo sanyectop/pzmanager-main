@@ -218,7 +218,11 @@ pub(crate) fn batch_has_agent(content: &str) -> bool {
 }
 
 pub(crate) fn steam_config_has_both(content: &str) -> bool {
+    // VDF 同名键**后者生效**（真实用户文件里出现过两条 LaunchOptions：一条是补丁写的，
+    // 一条是用户自己在 Steam 里设的窗口参数）。Steam 实际采用最后一条，所以判定也看
+    // 最后一条，而不是"任意一条满足即可"——否则状态会在 Steam 覆写后失真。
     let mut app_depth: Option<i32> = None;
+    let mut last_launch_options: Option<String> = None;
 
     for line in content.lines() {
         if app_depth.is_none() && quoted_key(line, PROJECT_ZOMBOID_APP_ID) {
@@ -229,13 +233,12 @@ pub(crate) fn steam_config_has_both(content: &str) -> bool {
         if let Some(depth) = app_depth {
             let next_depth = depth + brace_delta(line);
             if quoted_key(line, "LaunchOptions") {
-                let value = parse_quoted_tokens(line)
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_default();
-                if steam_launch_value_has_both(&value) {
-                    return true;
-                }
+                last_launch_options = Some(
+                    parse_quoted_tokens(line)
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
             }
 
             if next_depth <= 0 {
@@ -246,7 +249,7 @@ pub(crate) fn steam_config_has_both(content: &str) -> bool {
         }
     }
 
-    false
+    last_launch_options.is_some_and(|value| steam_launch_value_has_both(&value))
 }
 
 pub(crate) fn zombie_buddy_status(

@@ -390,22 +390,57 @@ export function versionDeltaChainDepth(versions: VersionRecord[]): number {
   return depth;
 }
 
-/** 版本操作的时间估算：按进度事件的百分比变化率做指数平滑，换步骤/进度回退时重置。 */
+/** 版本操作的时间估算：本步骤的累计平均速率，每 0.5s 结算一次、只在结算时更新显示值。 */
 export type VersionEtaTracker = {
   startedAt: number | null;
-  lastAt: number;
+  /** 本步骤的起点（时间 + 起始百分比）：整体平均速率的分母与分子基准。 */
+  stepStartAt: number;
+  stepStartPercent: number;
   lastPercent: number;
   lastStep: number;
-  ratePerMs: number | null;
-  /** 上一次对外展示的估算值：新估算与它按 4:6 混合，压掉显示抖动。 */
-  smoothedEtaSeconds: number | null;
+  /** 上次结算时间：结算节流到 0.5s 一次，两次结算之间展示值保持不变。 */
+  settledAt: number;
+  /** 最近一次结算出的剩余秒数（展示值）。 */
+  etaSeconds: number | null;
 };
 
+/** 结算节流：无论进度事件多密，估算最多每 0.5s 更新一次。 */
+const ETA_SAMPLE_INTERVAL_MS = 500;
+
 export function createVersionEtaTracker(): VersionEtaTracker {
-  return { startedAt: null, lastAt: 0, lastPercent: 0, lastStep: 0, ratePerMs: null, smoothedEtaSeconds: null };
+  return {
+    startedAt: null,
+    stepStartAt: 0,
+    stepStartPercent: 0,
+    lastPercent: 0,
+    lastStep: 0,
+    settledAt: 0,
+    etaSeconds: null,
+  };
 }
 
-/** 每条进度事件喂一次；返回当前步骤的剩余秒数（还估不出来时是 null）。 */
+/** 未取整的进度百分比：整数进度条长期不动时，估算仍能拿到细微推进。 */
+export function versionProgressFraction(update: VersionOperationUpdate | null): number {
+  if (!update) {
+    return 0;
+  }
+  if (update.status === "completed") {
+    return 100;
+  }
+  if (update.totalBytes > 0) {
+    return Math.min(100, Math.max(0, (update.processedBytes / update.totalBytes) * 100));
+  }
+  if (update.totalFiles > 0) {
+    return Math.min(100, Math.max(0, (update.processedFiles / update.totalFiles) * 100));
+  }
+  return 0;
+}
+
+/** 每条进度事件喂一次；返回当前步骤的剩余秒数（还估不出来时是 null）。
+ *
+ * 速率 = 本步骤开始到现在的**累计平均速度**（真·整体平均）：数字极稳，越到后面越不动；
+ * 代价是步骤内前快后慢时会偏乐观、恢复慢——这是选定整体平均时接受的取舍。
+ * 结算每 0.5s 一次；两次结算之间原样返回上次结算值，界面不会每条事件跳一次。 */
 export function updateVersionEta(
   tracker: VersionEtaTracker,
   update: VersionOperationUpdate | null,
@@ -414,50 +449,50 @@ export function updateVersionEta(
     return null;
   }
   const now = Date.now();
-  const percent = versionProgressPercent(update);
+  const percent = versionProgressFraction(update);
   const step = update.step ?? 1;
   if (update.status === "started") {
     tracker.startedAt = now;
   }
   tracker.startedAt ??= now;
-  // 换步骤（哈希 → 复制）或进度回退时，旧速率对新阶段没有意义，重新积累样本。
+  // 换步骤（哈希 → 复制）或进度回退时，旧平均对新阶段没有意义，从头累计。
   if (update.status === "started" || step !== tracker.lastStep || percent < tracker.lastPercent) {
-    tracker.lastAt = now;
+    tracker.stepStartAt = now;
+    tracker.stepStartPercent = percent;
     tracker.lastPercent = percent;
     tracker.lastStep = step;
-    tracker.ratePerMs = null;
-    tracker.smoothedEtaSeconds = null;
+    tracker.settledAt = 0;
+    tracker.etaSeconds = null;
     return null;
   }
-  // 百分比是整数，多数事件里它根本没动；把「距离上次百分比变化」的时间攒起来测速率，
-  // 而不是每次事件都重置计时，否则间隔永远达不到采样阈值、速率永远积累不出来。
-  if (percent > tracker.lastPercent) {
-    const elapsedMs = now - tracker.lastAt;
-    if (elapsedMs >= 300) {
-      const instantaneous = (percent - tracker.lastPercent) / elapsedMs;
-      tracker.ratePerMs =
-        tracker.ratePerMs === null ? instantaneous : 0.35 * instantaneous + 0.65 * tracker.ratePerMs;
-      tracker.lastAt = now;
-      tracker.lastPercent = percent;
-    }
+  tracker.lastPercent = percent;
+
+  if (now - tracker.settledAt < ETA_SAMPLE_INTERVAL_MS) {
+    // 未到结算点：保持上次结算的展示值。
+    return tracker.etaSeconds;
   }
-  if (tracker.ratePerMs === null || tracker.ratePerMs <= 0 || percent >= 100) {
+  tracker.settledAt = now;
+
+  const spanMs = now - tracker.stepStartAt;
+  if (spanMs < ETA_SAMPLE_INTERVAL_MS) {
+    // 起步 0.5s 内没有像样的分母，不给估算。
+    tracker.etaSeconds = null;
     return null;
   }
-  const etaMs = (100 - percent) / tracker.ratePerMs;
+  const ratePerMs = (percent - tracker.stepStartPercent) / spanMs;
+  if (ratePerMs <= 0) {
+    // 本步骤还没有任何推进：如实返回「估不出来」。
+    tracker.etaSeconds = null;
+    return null;
+  }
+  const etaMs = (100 - percent) / ratePerMs;
   // 速率太慢或样本太少时给出的大数没有参考价值，宁可不显示。
   if (!Number.isFinite(etaMs) || etaMs > 6 * 60 * 60 * 1000) {
+    tracker.etaSeconds = null;
     return null;
   }
-  const rawEta = Math.max(1, Math.round(etaMs / 1000));
-  // 和上一次展示的估算按 4:6 混合：单次速率波动不会直接打在界面上，
-  // 连续偏快/偏慢仍会在几轮内收敛到新水平。
-  const smoothed =
-    tracker.smoothedEtaSeconds === null
-      ? rawEta
-      : Math.max(1, Math.round(0.4 * rawEta + 0.6 * tracker.smoothedEtaSeconds));
-  tracker.smoothedEtaSeconds = smoothed;
-  return smoothed;
+  tracker.etaSeconds = Math.max(1, Math.round(etaMs / 1000));
+  return tracker.etaSeconds;
 }
 
 /** 把剩余秒数转成人话；超过一小时就不给精确数了。 */

@@ -117,7 +117,7 @@ pzm/
 | 启动 `launch` | — | 账户/内存上限/启动参数、启动与停止游戏、覆盖层会话进度面板 |
 | 支持库 `overview` | — | 探测到的本机路径、ZombieBuddy Viewpoint/PZ_Optimization 状态与一键配置；三项安装内容收在同一个「支持组件」面板里，每行沿用模组行的卡片外观（`.pz-mod-row`），默认折叠（折叠态：名称 + 一句话说明 + 状态标签 + ⋯ 详情按钮）。加载器那行只报状态并指路「设置 › 模组加载器」，不在本页做安装 |
 | 截图管理 `shots` | — | Viewpoint 截图列表、预览、复制到剪贴板 |
-| 光影管理 `shaderpacks` | — | 光影包导入（zip）/删除、图标与搜索词推导 |
+| 光影管理 `shaderpacks` | — | 光影包导入（zip）/删除、图标与搜索词推导；每包「配置」弹窗解析 shaders.properties 并保存参数覆写（启动时写入 viewpoint-live.properties，游戏退出后整文件还原） |
 | 资源中心 `workshop` | `workshop \| shaderDownload \| developerNews` | 工坊筛选浏览 / Modrinth·CurseForge 光影下载 / Steam 新闻 + 翻译 |
 | 模组管理 `mods` | `lua \| jar` | Lua 加载顺序与启停、JAR 审批决策与冲突分析 |
 | 设置 `settings` | `general \| console \| downloader \| modLoader` | 通用、加载控制台、下载器、模组加载器（加载器方案 + 该方案加载器的状态与安装） |
@@ -148,7 +148,7 @@ pzm/
 
 统一 `invoke<T>("命令名", { camelCase 参数 })`，事件用 `listen`。前端一共用到 ~45 个命令（与注册清单一致）。约定：
 
-* 后端 `Err(String)` 会被 Tauri 原样抛出，前端统一转成 `Error` 后交给 Toast；
+* 后端 `Err(String)` 会被 Tauri 原样抛出，前端统一转成 `Error` 后交给 Toast；Toast 全部自动退场（普通 3 秒、错误 8 秒，底部进度条即倒计时），历史进通知中心可回看；
 * 二进制媒体（海报/截图/背景）走 `invoke<ArrayBuffer>` 拿字节，再在组件里转 Blob URL；
 * 后台扫描类命令返回 `scanId: number`，进度通过事件推送。
 
@@ -163,11 +163,12 @@ pzm/
 | [resource.rs](../src-tauri/src/resource.rs) | Modrinth + CurseForge 光影资源检索 | 注释明确对齐 PCL2 的 `DlSourceModGet` |
 | [downloader.rs](../src-tauri/src/downloader.rs) | 多线程分块 HTTP 下载（`RANGE`/`CONTENT-RANGE`）+ 进度事件 | 供光影下载器使用 |
 | [news.rs](../src-tauri/src/news.rs) | Steam 新闻 API + 正文清洗，切分成可翻译片段 | 夹具 `tests/fixtures/news_split_cases.json` |
-| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（15 条/批，单条 ≤2000 字），默认引擎链：必应（手机版 `cn.bing.com` 页取 IG/IID/token，再 POST `ttranslatev3`，单段 ≤1000 字自动切分）→ Google `translate_a/single` → MyMemory（按文字系统猜源语言）；「通用 › 翻译引擎」可手动指定优先引擎（`translationEngine`：auto/bing/google/mymemory/relay），指定引擎排链首、失败后按默认链回退；relay（`steam-relay` 的 `/translate` → 本机 Argos，只接 zh/en/ru）仅在手动指定时在批级先试。必应走**独立的 no-proxy 客户端**（系统代理/境外出口会被必应判成机房 IP 直接 401，参考实现也是直连），失败只静默 60 秒（切换引擎会立即解除）；Google / relay 失败熔断 10 分钟。译文缓存键 = (原文, 语言, 引擎偏好)：切换引擎后会重新翻译，不会拿旧引擎结果冒充。`engine == "none"` 视为失败触发逐句重试，`none` 结果不进缓存 | 带内存缓存 |
+| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（命令上限与前端均为 **20 句/批**，`TRANSLATION_BATCH_SIZE` = `BATCH_SIZE` = `JOIN_BATCH` = 20，三处必须同步；单条 ≤2000 字；超 2000 字的批次会先按 20 句 / 2000 字重切再拼），默认引擎链：Google `translate_a/single` → 必应（手机版 `cn.bing.com` 页取 IG/IID/token，再 POST `ttranslatev3`，单段 ≤1000 字自动切分）→ MyMemory（按文字系统猜源语言）；**每 20 句拼成一段发一次引擎请求**，拼接译文按 `\n` 拆回，**行数对不上（必应 LLM 后端偶尔合并换行）或引擎全败时整组作废，退回逐句并发（4 句一波）补翻**——曾因"15 句拼接失败后逐句串行重试"慢到像"没在翻译"；「通用 › 翻译引擎」可手动指定优先引擎（`translationEngine`：auto/bing/google/mymemory/relay，默认 google），指定引擎排链首、失败后按默认链回退；relay（`steam-relay` 的 `/translate` → 本机 Argos，只接 zh/en/ru）仅在手动指定时在批级先试。必应走**独立的 no-proxy 客户端**（系统代理/境外出口会被必应判成机房 IP 直接 401，参考实现也是直连），失败只静默 60 秒（切换引擎会立即解除）；Google / relay 失败熔断 10 分钟。译文缓存键 = (原文, 语言, 引擎偏好)，条目 **10 分钟过期**：切换引擎后会重新翻译，不会拿旧引擎结果冒充；故障期间回退引擎的结果也不会永久顶替已恢复的引擎（否则必应恢复后仍永远命中 MyMemory 的旧缓存）。`engine == "none"`（引擎全败）的结果不进缓存。任一引擎从可用转入熔断时向 launcher.log 写一条带原因的日志（如「必应」：引导失败 / HTTP 401 / 429 / 响应异常），熔断期内的重复失败不重复记录；网络链路另有手动冒烟测试 `cargo test bing_live -- --ignored --nocapture`（必应 bootstrap → ttranslatev3）与 `cargo test translate_batch_live -- --ignored --nocapture`（整条命令管线）
 | [overlay.rs](../src-tauri/src/overlay.rs) | 注入入口：路径校验、进程轮询（优先 `ProjectZomboid64.exe`，其次 `javaw.exe`，都找不到时按窗口标题 `Project Zomboid` **精确匹配**兜底——无 Xbox 服务的机器上游戏进程显示为 wsappx，按进程名找不到）、重复注入检测 | 编译期二选一注入后端 |
 | `overlay_inject_win32.rs` / `overlay_inject_dll_syringe.rs` | 两套等价后端，对外都是 `inject_dll(pid, dll_path)` | 后者需 nightly |
 | [overlay_session.rs](../src-tauri/src/overlay_session.rs) | 会话编排：等窗口 → 注入 → 解析控制台 → 写状态文件 → 判定完成 → 发停止事件；并提供游戏进程查询/停止命令；顺带记录「检测到窗口 → 移除覆盖层」的启动时长（落盘 `startup-timing.json`，发 `startup-timing` 事件，`startup_timing` 命令读回） | ⚠️ 正在大改 |
 | [memclean.rs](../src-tauri/src/memclean.rs) | 系统内存状态（`GlobalMemoryStatusEx`）与工作集清理（`SetProcessWorkingSetSizeEx(-1,-1)`，等价 `EmptyWorkingSet`）；激进模式追加系统级四步（`MemoryEmptyWorkingSets` / `SetSystemFileCacheSize(-1,-1,0)` / `MemoryFlushModifiedList` / `MemoryPurgeStandbyList`）；静默清理后台线程；`is_elevated` / `restart_as_admin` 管提权 | 形态对齐 PCL2 的「内存优化」；清理**跳过游戏进程与自身** |
+| [task_store.rs](../src-tauri/src/task_store.rs) | 任务中心落盘：tasks.json 的 `load_saved_tasks` / `save_tasks`（不透明 JSON 文档，模型由前端持有）；非对象条目丢弃、裁剪到 200 条、临时文件 + 改名原子写；读失败按无历史处理并写 WARN | 前端清洗在 `src/taskHistory.ts` 的 `sanitizeSavedTasks` |
 | `main.rs` | 仅 `pzmanager_lib::run()` | 5 行 |
 
 ### 6.2 Steam 发现链
@@ -184,7 +185,7 @@ pzm/
 
 ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只加载第一个 agent，因此方案是 `zombieBuddy` 时启动器在**三个位置**都把 agent 归一化成 `-agentlib:zbNative=policy=allow-all`：
 
-1. Steam `LaunchOptions`（`patch_steam_launch_options_content_with_memory`，注意 `--` 结束符与已有 agent 的归并）；
+1. Steam `LaunchOptions`（`patch_steam_launch_options_content_with_memory`，agent 归并到 `policy=allow-all`；**裸 `--` 一律剥掉**——B42 的 Zulu 25 JRE 直接报 "Unrecognized option: --" 拒绝创建 JVM，游戏秒退，2026-11-07 实测）；状态判定（`steam_config_has_both`）同步只验 agent 存在、且看 108600 块内**最后一条** LaunchOptions（VDF 同名键后者生效，真实文件出现过补丁与用户自设参数两条并存）；
 2. 游戏目录 `ProjectZomboid64.json` 的 `vmArgs`；
 3. 游戏目录 `ProjectZomboid64.bat` 的 `SET _JAVA_OPTIONS`。
 
@@ -288,13 +289,14 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 * 工坊浏览：`browse_workshop`（排序/必需与排除标签/分页/搜索词），`workshop_options` 返回可选项（含标签表），结果 5 分钟内存缓存。
 * 工坊详情（列表项右键 →「在窗口内打开」）：`fetch_workshop_item_detail` 调 `ISteamRemoteStorage/GetPublishedFileDetails`，取 `description`（新版接口叫 `file_description`，两个都认）里的 BBCode 原文走 `bbcode_to_html` + `add_translation_spans` 切段，前端再复用 `translate_developer_news_batch` 分批翻译、按 `sid` 回填 HTML（`replaceNewsTranslation`）。标题和正文共用一套 sid 方案（`w<id>_title` / `w<id>_t<node>_s<idx>`），所以标题会跟着一起翻译；工坊标题是纯文本，**不做** BBCode 剥离，否则 `[B42]` 这类后缀会被吃掉。
 * 光影下载：`fetch_shader_resources` / `fetch_shader_resource_files` 走 Modrinth 优先、CurseForge 兜底；`download_shader_file` 多线程下载到 `%USERPROFILE%\Zomboid\viewpoint-shaderpacks`，进度用事件推送。
-* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。翻译引擎可在「通用 › 翻译引擎」（`settings.json` 的 `translationEngine`）手动指定；默认链是**必应 → Google → MyMemory**：必应走手机版 `cn.bing.com` 的 `ttranslatev3`（国内直连、质量好于 MyMemory；单次文本按 900 字切段，令牌过期/401 自动刷新重试一次，失败熔断 10 分钟），Google 不可用时同样落到 MyMemory。手动指定某个引擎时它排链首，失败后按默认链回退其余引擎；「中转翻译」（relay，`{relay}/translate` → 本机 Argos，一次翻整批、失败熔断 10 分钟）只接 `zh-CN`/`en`/`ru`，仅在选择它时在批级先试。翻译来源在新闻卡片上按占比显示（`relay` 标为「中转翻译」，`bing` 标为「必应」）。
+* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。翻译引擎可在「通用 › 翻译引擎」（`settings.json` 的 `translationEngine`）手动指定，没写过 / 坏值按 `google` 处理；默认链是**Google → 必应 → MyMemory**：Google 不可用（被墙 / 超时，熔断 10 分钟）时落到必应，必应走手机版 `cn.bing.com` 的 `ttranslatev3`（国内直连、质量好于 MyMemory；单次文本按 900 字切段，令牌过期/401 自动刷新重试一次，失败熔断 60 秒），再不行落到 MyMemory。手动指定某个引擎时它排链首，失败后按默认链回退其余引擎；「中转翻译」（relay，`{relay}/translate` → 本机 Argos，一次翻整批、失败熔断 10 分钟）只接 `zh-CN`/`en`/`ru`，仅在选择它时在批级先试。翻译来源在新闻卡片上按占比显示（`relay` 标为「中转翻译」，`bing` 标为「必应」）。
 
 ### 6.6 背景图与截图/光影
 
 * 背景：自定义图存 `%USERPROFILE%\Zomboid\.pzmanager\backgrounds\<kind>\`；工坊模组的 title 图会被拼成四象限合成图（`compose_title_background_at`）；`set_background_path` 把选中项记进 `settings.json`；二进制经 `read_background` 回传。
 * 内置背景：图片随前端打包在 `public/backgrounds/` 下（当前一张 `default.jpg`，来源是用户给的 `IMG_20261013_134024.png`，转 JPEG q92 存原生 1666×944、494KB）。`settings.json` 里存成 `builtin:<id>` 哨兵值——磁盘上没有对应文件，前端直接用打包 URL 渲染，所以 `set_background_path` 对 `builtin:` 前缀跳过 `background_path_allowed` 目录校验；`backgroundPath` 为 `null`（老配置或没选过）时前端回落这张内置图当默认外观，应用不提供"纯色/无背景"选项。
 * 截图/光影：只允许操作托管目录内的文件（`managed_file_path` / `background_path_allowed` 做目录穿越防护），截图上限按支持格式过滤。
+* 光影包配置覆写（`shaderpack_config.rs`）：光影包页每包「配置」弹窗的选项检测**照搬 Viewpoint `IrisOptions` 的方法**——扫描 zip 内源码（.vsh/.fsh/.gsh/.csh/.tcs/.tes/.glsl；`shaders/` 根与子目录都算，包根支持一层顶层目录包裹 `Wrapper/shaders/…`）里的三类声明：`#define NAME // 注释` / `//#define NAME`（注释掉 = 默认关）为开关、`#define NAME 值 // 注释 [允许值...]` 为取值、`const int|float|bool NAME = 值; // [允许值]` 为常量，再合并 `shaders.properties` 的 `profile.*` 预设 / `sliders` 滑块 / 顶层默认值声明（`read_pack_shader_meta`，源码声明的注释作为说明兜底）。`shaders.properties` 的解析语义照 Iris 1.7.6 逆向结果：`OrderBackedProperties extends java.util.Properties`，即完整 Java `Properties.load` 规则（`\` 续行折叠——BSL/Bliss 的 screen 布局全靠它、`#`/`!` 注释、空白/`=`/`:` 分隔符、`\uXXXX` 等转义）。`shaders/lang/*.lang` 把参数名 / 取值 / 预设替换成用户能看懂的描述。弹窗内可**切换描述语言**（`read_shaderpack_config` 的 `lang` 参数，切换只换标签不动已改的值）：默认中文（`zh_CN` → `zh_TW`），没有中文回退 `en_US` → 包里第一个 .lang；键大小写不敏感兜底，数值匹配自动去尾零，`option.*`/`option.*.comment`/`value.*.*`/`profile.*`；取值标签兼容**按值**（BSL：`value.shadowMapResolution.512=…`）与**按序号**（Bliss：`value.RESOURCEPACK_SKY.0=…`，序号 = 允许值列表下标）两种键形态，缺失的键按 MC 语义用 `en_US.lang` 键级回退。lang 标签里可能带 MC `§` 彩字/格式码：前端 `parseMinecraftFormatting`（`shaderpackConfigUi.ts`）按 Java 版语义解析渲染（颜色码 §0-§f 会禁用既有格式、§r 全重置、格式码叠加保留颜色、未知码字面保留），`McText` 组件渲染彩色 span；原生 `<option>` / title 等渲染不了样式的场合用 `stripMinecraftFormatting` 剥码留文字；纯格式码标签按"没有标签"回退原值。**界面为 Iris 同款分页配置**：解析 `screen=` 主页与 `screen.<name>=` 子屏布局（token 解析照 Iris `OptionMenuElement.create`：参数名 / `[子屏]` / `<empty>` / `<profile>`，`screen.<name>.columns` 列数，没写 screen 时单页铺开全部参数），弹窗内网格分页（每页 5 行 × 列数，**分页条常驻**——分页设计强制适用于所有光影包）、子屏进栈导航 + 返回、`‹ x/y ›` 翻页；token 解析不了（引用未检测到的参数、`<profile>` 但无预设）时按 Iris `OptionMenuContainer` 的**逐元素 try/catch 跳过该元素**（记 launcher.log 警告），菜单照常构建；布局里没列出的参数（MC_NORMAL_MAP / FSH / VSH 等内部 define）保持隐藏——Iris 的 GUI 只渲染布局里列出的元素；**分页形态强制**：没有 `shaders.properties` 的纯源码包（EclipseShaders 类）或过滤后所有页为空时，强制合成截图同款的按钮分页——参数 ≤10（2 列 × 5 行）直接单页铺开，超过则主页变成"第 N 页"按钮页（`auto_page_N` + label），点进去才是该页参数网格；`profile.*` 预设支持**继承**（`profile.Medium=profile.Low …` 展开被继承预设的参数值）。覆写值存 `.pzmanager/shaderpack-overrides.json`。`launch_project_zomboid` 在 `apply_launch_loader` 之后、拉起 Steam 之前调 `apply_shaderpack_overrides_for_launch()`：游戏运行中跳过（Viewpoint 退出时会重写整个文件）、先还原上次遗留备份，再对 `viewpoint-live.properties` 做**行级覆写**——只碰 `minecraft.<packId>.*` / `minecraftProfile.<packId>`，保留注释、顺序与换行风格，`camera.*`/`pack.*`/`graphics.*` 等 Viewpoint 自身键一字不动（键分类与拆分规则见模块注释，packId 优先用 live 文件已观测键反查、按文件名 sanitize 兜底）。写入走 备份（`.pzmanager/viewpoint-live-backups/`，整文件 + manifest，保留 5 份）→ `apply_file_transaction` 原子替换 → 回读校验，失败用备份还原。覆写成功后启动 `pz-shaderpack-restore` 监听线程（`overlay_session.rs`）：等游戏进程出现 → 等退出（24h 兜底）→ 整文件还原；启动器中途退出则由下次启动的覆写流程先还原遗留备份。
 
 ### 6.7 命令参考（⚠️ 快照自 `lib.rs` 的 `generate_handler!`；实际条数以代码为准）
 
@@ -306,7 +308,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | 模组管理（8） | `start_zombie_buddy_jar_scan`、`list_lua_mods`、`set_lua_mod_enabled`、`set_lua_mods_enabled`、`save_lua_mod_order`、`set_zombie_buddy_mod_decision`、`set_zombie_buddy_mods_decisions`、`apply_jar_mod_file_state` |
 | 媒体读取（4） | `read_background`、`read_jar_mod_poster`、`read_lua_mod_poster`、`read_viewpoint_shot` |
 | 背景图（4） | `list_custom_backgrounds`、`scan_workshop_backgrounds`、`start_workshop_background_scan`、`import_custom_background` |
-| 截图/光影（4） | `list_viewpoint_shots`、`list_viewpoint_shaderpacks`、`import_viewpoint_shaderpack`、`delete_viewpoint_shaderpack` |
+| 截图/光影（8） | `list_viewpoint_shots`、`list_viewpoint_shaderpacks`、`import_viewpoint_shaderpack`、`delete_viewpoint_shaderpack`、`read_shaderpack_config`、`get_shaderpack_overrides`、`save_shaderpack_override`、`clear_shaderpack_override` |
 | 资源中心（7） | `workshop_options`、`browse_workshop`、`fetch_workshop_item_detail`、`resource_options`、`fetch_shader_resources`、`fetch_shader_resource_files`、`fetch_minecraft_versions` |
 | 下载器（1） | `download_shader_file` |
 | 新闻（2） | `fetch_developer_news`、`translate_developer_news_batch` |
@@ -314,6 +316,7 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | 版本隔离（12） | `get_version_status`、`save_version_store_path`、`save_version_parallel`、`start_version_snapshot`、`start_version_capture`、`start_version_restore`、`start_version_verify`、`start_version_rebase`、`cancel_version_operation`、`delete_version`、`delete_version_through`、`is_project_zomboid_running` |
 | 启动器日志（4） | `read_launcher_log`、`clear_launcher_log`、`open_launcher_log_folder`、`log_frontend_message` |
 | 启动时长（1） | `startup_timing`（最近一次「窗口 → 主菜单」时长 + 上一次，供右下角对比显示） |
+| 任务中心持久化（2） | `load_saved_tasks`、`save_tasks`——tasks.json（`%USERPROFILE%\Zomboid\.pzmanager\`）的不透明 JSON 文档读写：模型由前端持有，后端只裁剪到 200 条并原子写（临时文件 + 改名）；读失败按无历史任务处理并写 WARN 日志。启动时前端经 `sanitizeSavedTasks`（`src/taskHistory.ts`）清洗条目，退出时还在 `running` 的任务标成「失败：应用退出时任务被中断」（光影下载保留 `request`，重启后重试按钮仍可用）；前端在任务变化后 0.6s 防抖落盘，首次装载完成前不写，装载后把任务 id 计数器拨到历史最大号之后避免撞 id |
 
 版本隔离的存储模型、增量格式与还原流程见 [version-isolation.md](version-isolation.md)。
 
@@ -354,6 +357,9 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 | `%USERPROFILE%\Zomboid\console.txt` | 游戏 | 启动器（tail） | `[ZB]` 进度与完成标记的唯一来源；启动器只**追加**自己的 `[PZManager]` 记录 |
 | `%USERPROFILE%\Zomboid\mods\default.txt` | 游戏/启动器 | 启动器 | Lua 模组启用列表与顺序；启动器只替换 `mods{}` 块 |
 | `%USERPROFILE%\Zomboid\viewpoint-shaderpacks\` | 启动器 | 启动器 | 光影包托管目录（下载与导入都落这里） |
+| `%USERPROFILE%\Zomboid\viewpoint-live.properties` | **Viewpoint（游戏）** | 启动器（行级覆写）/ Viewpoint | Viewpoint 的实时设置总表；启动器启动前只覆写 `minecraft.<packId>.*` / `minecraftProfile.<packId>` 键（行级编辑保留注释与顺序），游戏退出后整文件还原为启动前备份 |
+| `%USERPROFILE%\Zomboid\.pzmanager\shaderpack-overrides.json` | 启动器 | 启动器 | 每个光影包的参数覆写配置（packName / profile / values） |
+| `%USERPROFILE%\Zomboid\.pzmanager\viewpoint-live-backups\` | 启动器 | 启动器 | 覆写前的整文件备份（`viewpoint-live.properties.bak.<纳秒>`，保留最近 5 份）+ `manifest.json`（还原凭据：原文件是否存在 + 备份文件名）；还原线程 / 下次启动用 |
 | `%USERPROFILE%\Zomboid\.pzmanager\settings.json` | 启动器 | 启动器 | 内存上限、背景图、开发模式、账户隐藏、下载器设置；设置 › 开发者选项的「清除启动器用户数据」会删除整个 `.pzmanager` 目录后重建 |
 | `%USERPROFILE%\Zomboid\.pzmanager\jar-mod-state.json` | 启动器 | 启动器 | JAR 模组审批决策；默认以磁盘当前状态为基准，关闭「启动时保留 JAR 模组启用状态」后改为重新套用记录 |
 | `%USERPROFILE%\Zomboid\.pzmanager\backgrounds\<kind>\` | 启动器 | 启动器 | 导入/合成的背景图 |

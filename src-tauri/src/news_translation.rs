@@ -11,15 +11,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const BATCH_SIZE: usize = 15;
+/// 命令单次调用的句数上限，与前端 `TRANSLATION_BATCH_SIZE`（20）对应——
+/// 调大前端批次时必须同步调这里，否则整批会被「翻译批次上限」直接拒绝。
+const BATCH_SIZE: usize = 20;
 const MAX_TEXT_LEN: usize = 2000;
+/// 拼接翻译的分组大小：20 句拼成一段、走一次引擎请求（用户指定的一批 = 20 句拼接）。
+/// 前端一批 20 句进来后经 batches() 按 20 句 / 2000 字重切，这里正好整批一组；
+/// 超过 2000 字的组会被 batches() 拆小，保证单次拼接请求的文本长度可控。
+const JOIN_BATCH: usize = 20;
+/// 逐句回退的并发宽度：拼接结果行数对不上时按 4 句一波补翻。
+const TRANSLATE_CONCURRENCY: usize = 4;
 const TIMEOUT: Duration = Duration::from_secs(8);
 const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(5);
 const GOOGLE_URL: &str = "https://translate.googleapis.com/translate_a/single";
 const MYMEMORY_URL: &str = "https://api.mymemory.translated.net/get";
 /// relay 自带的离线翻译接口（`steam-relay/server.js` → `translate/app.py`，Argos）。
 const RELAY_TRANSLATE_PATH: &str = "/translate";
-/// 一批 15 句在 CPU 上通常 1–5 秒；Argos 冷启动第一句会更慢一点。
+/// 一批 20 句在 CPU 上通常 1–5 秒；Argos 冷启动第一句会更慢一点。
 const RELAY_TRANSLATE_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ---- 必应翻译 -------------------------------------------------------------
@@ -63,8 +71,14 @@ fn bing_client() -> &'static Client {
 /// 译文缓存键：(原文, 目标语言, 引擎偏好)。
 /// 引擎偏好也进键：切换「通用 › 翻译引擎」后必须重新翻译，不能把旧引擎的结果
 /// 直接当成新引擎的结果返回（否则选了必应也看不到必应）。
-static CACHE: OnceLock<Mutex<HashMap<(String, String, String), (String, String)>>> =
+static CACHE: OnceLock<Mutex<HashMap<(String, String, String), (String, String, Instant)>>> =
     OnceLock::new();
+
+/// 缓存条目时效。没有它，故障期间回退引擎的结果会以「用户偏好」为键永久驻留：
+/// 比如偏好必应时必应恰好挂了，MyMemory 的结果被缓存进 (原文, 语言, "bing")，
+/// 之后必应恢复了也永远命中这条旧缓存——必应看起来「永远不可用」。
+/// 10 分钟后视为失效重新走引擎链，既兜住故障期，也不会高频重翻。
+const CACHE_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 struct BingSession {
@@ -95,7 +109,7 @@ pub(crate) struct TranslationResult {
     pub(crate) engine: String,
 }
 
-fn cache() -> &'static Mutex<HashMap<(String, String, String), (String, String)>> {
+fn cache() -> &'static Mutex<HashMap<(String, String, String), (String, String, Instant)>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -418,7 +432,7 @@ fn append_spans(
     }
 }
 
-/// Google 不可用（超时 / 被墙 / 限流）后的熔断时长：期间所有请求直接走 MyMemory，
+/// Google 不可用（超时 / 被墙 / 限流）后的熔断时长：期间所有请求直接走必应 / MyMemory，
 /// 不再每次都等 Google 超时（一次超时 5 秒，新闻页十几批就是一两分钟）。
 const GOOGLE_BACKOFF: Duration = Duration::from_secs(600);
 /// Google 熔断的截止时刻（Instant），None = 未熔断。
@@ -432,15 +446,28 @@ fn google_enabled_now() -> bool {
     }
 }
 
-fn disable_google_for_a_while() {
+fn disable_google_for_a_while(reason: &str) {
     if let Ok(mut until) = GOOGLE_DISABLED_UNTIL.lock() {
+        let already = matches!(*until, Some(deadline) if Instant::now() < deadline);
+        if !already {
+            crate::launcher_log::info(&format!(
+                "翻译引擎「Google」请求失败（{reason}），接下来 10 分钟内直接回退其它引擎。"
+            ));
+        }
         *until = Some(Instant::now() + GOOGLE_BACKOFF);
+    }
+}
+
+/// 用户在设置里明确切换引擎（或重新指定 Google）后调用：清掉之前的熔断，立刻按新选择重试。
+pub(crate) fn clear_google_backoff() {
+    if let Ok(mut until) = GOOGLE_DISABLED_UNTIL.lock() {
+        *until = None;
     }
 }
 
 /// 中转翻译失败后的熔断时长：期间直接走 Google / MyMemory。
 ///
-/// 新闻一批 15 句，失败后逐句重试时会再撞 15 次同样的失败，
+/// 新闻一批 20 句，失败后逐句重试时会再撞 20 次同样的失败，
 /// 所以和 Google 一样：失败一次就先停掉一段时间。
 const RELAY_TRANSLATE_BACKOFF: Duration = Duration::from_secs(600);
 static RELAY_TRANSLATE_DISABLED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
@@ -452,8 +479,14 @@ fn relay_translate_enabled_now() -> bool {
     }
 }
 
-fn disable_relay_translate_for_a_while() {
+fn disable_relay_translate_for_a_while(reason: &str) {
     if let Ok(mut until) = RELAY_TRANSLATE_DISABLED_UNTIL.lock() {
+        let already = matches!(*until, Some(deadline) if Instant::now() < deadline);
+        if !already {
+            crate::launcher_log::info(&format!(
+                "翻译引擎「中转翻译」请求失败（{reason}），接下来 10 分钟内直接回退其它引擎。"
+            ));
+        }
         *until = Some(Instant::now() + RELAY_TRANSLATE_BACKOFF);
     }
 }
@@ -537,7 +570,7 @@ async fn relay_translate_pending(
         .map(|job| job.text.clone())
         .collect::<Vec<_>>();
     let Some(translated) = relay_translate(&texts, target).await else {
-        disable_relay_translate_for_a_while();
+        disable_relay_translate_for_a_while("请求失败或响应异常");
         return false;
     };
     for (job, text) in pending.iter().zip(translated) {
@@ -549,7 +582,7 @@ async fn relay_translate_pending(
                     language.to_string(),
                     engine_preference.to_string(),
                 ),
-                value.clone(),
+                (value.0.clone(), value.1.clone(), Instant::now()),
             );
         }
         values.insert(job.sid.clone(), value);
@@ -584,7 +617,7 @@ async fn google(client: &Client, text: &str, language: &str) -> Option<String> {
         .collect::<String>();
     (!value.is_empty()).then_some(value)
 }
-/// 必应熔断：失败一次先停一段时间，避免一批 15 句逐句白等超时。
+/// 必应熔断：失败一次先停一段时间，避免一批 20 句逐句白等超时。
 fn bing_enabled_now() -> bool {
     match BING_DISABLED_UNTIL.lock() {
         Ok(until) => until.map_or(true, |deadline| Instant::now() >= deadline),
@@ -593,8 +626,16 @@ fn bing_enabled_now() -> bool {
     }
 }
 
-fn disable_bing_for_a_while() {
+fn disable_bing_for_a_while(reason: &str) {
     if let Ok(mut until) = BING_DISABLED_UNTIL.lock() {
+        // 只在「可用 → 熔断」的转折点记一条日志：熔断期内的重复失败不刷屏。
+        // 这行日志是用户排查「为什么必应没走」的唯一线索（launcher.log 可见）。
+        let already = matches!(*until, Some(deadline) if Instant::now() < deadline);
+        if !already {
+            crate::launcher_log::info(&format!(
+                "翻译引擎「必应」请求失败（{reason}），接下来 1 分钟内直接回退其它引擎。"
+            ));
+        }
         *until = Some(Instant::now() + BING_BACKOFF);
     }
 }
@@ -794,11 +835,14 @@ fn parse_bing_translation(value: &Value) -> Option<String> {
 }
 
 /// 调一次 `ttranslatev3`。401 / statusCode 205 刷新令牌重试一次；429 等 2 秒重试一次。
-async fn bing_translate_chunk(text: &str, target: &str) -> Option<String> {
+/// 失败时返回具体原因（进 launcher.log 的熔断日志），排查页面改版 / 风控时不用猜。
+async fn bing_translate_chunk(text: &str, target: &str) -> Result<String, String> {
     let client = bing_client();
     let mut retried = false;
     loop {
-        let session = bing_session().await?;
+        let session = bing_session()
+            .await
+            .ok_or_else(|| "引导失败：cn.bing.com 取不到翻译页令牌（页面改版或被拦截）".to_string())?;
         let sequence = BING_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
         let sfx = sequence.to_string();
         let mut request = client
@@ -825,12 +869,15 @@ async fn bing_translate_chunk(text: &str, target: &str) -> Option<String> {
         if !session.cookies.is_empty() {
             request = request.header(COOKIE, &session.cookies);
         }
-        let response = request.send().await.ok()?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => return Err(format!("网络请求失败：{error}")),
+        };
         let status = response.status();
 
         if status == StatusCode::TOO_MANY_REQUESTS {
             if retried {
-                return None;
+                return Err("HTTP 429：限流（等待重试后仍失败）".into());
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
             retried = true;
@@ -838,26 +885,29 @@ async fn bing_translate_chunk(text: &str, target: &str) -> Option<String> {
         }
         if status == StatusCode::UNAUTHORIZED {
             if retried {
-                return None;
+                return Err("HTTP 401：令牌被风控拦截（刷新令牌后仍失败）".into());
             }
             clear_bing_session();
             retried = true;
             continue;
         }
         if !status.is_success() {
-            return None;
+            return Err(format!("HTTP {status}"));
         }
 
-        let value: Value = response.json().await.ok()?;
+        let value: Value = match response.json().await {
+            Ok(value) => value,
+            Err(error) => return Err(format!("响应不是合法 JSON：{error}")),
+        };
         if value.get("statusCode").and_then(Value::as_i64) == Some(205) {
             if retried {
-                return None;
+                return Err("令牌过期（statusCode 205），刷新令牌后仍失败".into());
             }
             clear_bing_session();
             retried = true;
             continue;
         }
-        return parse_bing_translation(&value);
+        return parse_bing_translation(&value).ok_or_else(|| "响应里没有译文".to_string());
     }
 }
 
@@ -874,9 +924,9 @@ async fn bing(text: &str, language: &str) -> Option<String> {
     let mut output = String::new();
     for chunk in chunks {
         match bing_translate_chunk(&chunk, &target).await {
-            Some(value) => output.push_str(&value),
-            None => {
-                disable_bing_for_a_while();
+            Ok(value) => output.push_str(&value),
+            Err(reason) => {
+                disable_bing_for_a_while(&reason);
                 return None;
             }
         }
@@ -884,10 +934,11 @@ async fn bing(text: &str, language: &str) -> Option<String> {
     (!output.trim().is_empty()).then_some(output)
 }
 
-/// 默认引擎链：必应（cn.bing.com 国内直连、质量远好于 MyMemory）→ Google → MyMemory。
+/// 默认引擎链：Google（译文质量最好，但大陆网络常被墙，失败熔断后立刻落到必应）→
+/// 必应（cn.bing.com 国内直连、质量远好于 MyMemory）→ MyMemory。
 /// 中转翻译（relay）不在默认链里：它是批级引擎、只接 zh-CN/en/ru，
 /// 只在「通用 › 翻译引擎」手动指定时才先试。
-const DEFAULT_ENGINE_CHAIN: [&str; 3] = ["bing", "google", "mymemory"];
+const DEFAULT_ENGINE_CHAIN: [&str; 3] = ["google", "bing", "mymemory"];
 
 /// 手动指定的引擎排到最前，其余按默认顺序跟上；
 /// auto / relay（relay 在批级单独处理）/ 未知值都走默认链。
@@ -926,8 +977,8 @@ async fn translate_one(
                         return (value, "google".into());
                     }
                     // Google 这次没成功（超时 / 被墙 / 限流）：接下来一段时间不再等它超时，
-                    // 否则一批 15 句逐句重试时每句都要先白等满一个超时，回退看起来像卡死。
-                    disable_google_for_a_while();
+                    // 否则一批 20 句逐句重试时每句都要先白等满一个超时，回退看起来像卡死。
+                    disable_google_for_a_while("请求失败（超时 / 被墙 / 限流）");
                 }
             }
             "bing" => {
@@ -961,9 +1012,11 @@ async fn translate_jobs(
                 language.to_string(),
                 engine_preference.to_string(),
             ))
+            // 超过时效的条目按未命中处理，重新走引擎链（结果会覆盖旧条目）。
+            .filter(|(_, _, cached_at)| cached_at.elapsed() < CACHE_TTL)
             .cloned()
         }) {
-            values.insert(job.sid.clone(), value);
+            values.insert(job.sid.clone(), (value.0, value.1));
         } else {
             pending.push(job.clone());
         }
@@ -978,18 +1031,23 @@ async fn translate_jobs(
         };
         if !relayed {
             let chain = engine_chain(engine_preference);
-            let joined = pending
-                .iter()
-                .map(|job| job.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let (translated, engine) = translate_one(client, &joined, language, &chain).await;
-            let parts = translated.split('\n').collect::<Vec<_>>();
-            // 引擎全失败时 translate_one 返回 (原文, "none")，而原文按 \n 拆开的行数
-            // 恰好等于任务数——会伪装成"翻译成功"。必须把 engine == "none" 视为失败，
-            // 落到下面的逐句重试，否则后面的引擎根本没有出场机会，还会把 none 写进缓存。
-            if engine != "none" && parts.len() == pending.len() {
-                for (job, text) in pending.iter().zip(parts) {
+            // 首选：5 句拼成一段（JOIN_BATCH）发一次引擎请求。请求数少、一组之内
+            // 来源引擎一致；Google / MyMemory 保留换行，按 \n 拆回去行数刚好对上。
+            // 必应 2026-11 起的 LLM 后端偶尔会合并换行——行数对不上就整组作废，
+            // 退回逐句并发补翻，绝不错位拼接。
+            for group in pending.chunks(JOIN_BATCH) {
+                let joined = group
+                    .iter()
+                    .map(|job| job.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let (translated, engine) =
+                    translate_one(client, &joined, language, &chain).await;
+                let parts = translated.split('\n').collect::<Vec<_>>();
+                if engine == "none" || parts.len() != group.len() {
+                    continue;
+                }
+                for (job, text) in group.iter().zip(parts) {
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
                         continue;
@@ -1002,16 +1060,26 @@ async fn translate_jobs(
                                 language.to_string(),
                                 engine_preference.to_string(),
                             ),
-                            value.clone(),
+                            (value.0.clone(), value.1.clone(), Instant::now()),
                         );
                     }
                     values.insert(job.sid.clone(), value);
                 }
-            } else {
-                for job in pending {
-                    // 批量请求失败时，刚试过的引擎已各自触发熔断，
-                    // 逐句重试会直接落到链上下一个可用引擎，不会白等超时。
-                    let value = translate_one(client, &job.text, language, &chain).await;
+            }
+            // 拼接没吃掉的句子（引擎全败 / 行数不匹配 / 个别句子空缺）：
+            // 逐句并发补齐（4 句一波），句子按 sid 各自对应，不会错位；
+            // 拼接失败时相关引擎已熔断，这里直接落到链上下一个可用引擎。
+            let missing = pending
+                .iter()
+                .filter(|job| !values.contains_key(&job.sid))
+                .collect::<Vec<_>>();
+            for wave in missing.chunks(TRANSLATE_CONCURRENCY) {
+                let translations = futures_util::future::join_all(
+                    wave.iter()
+                        .map(|job| translate_one(client, &job.text, language, &chain)),
+                )
+                .await;
+                for (job, value) in wave.iter().zip(translations) {
                     if value.1 != "none" {
                         if let Ok(mut map) = cache().lock() {
                             map.insert(
@@ -1020,7 +1088,7 @@ async fn translate_jobs(
                                     language.to_string(),
                                     engine_preference.to_string(),
                                 ),
-                                value.clone(),
+                                (value.0.clone(), value.1.clone(), Instant::now()),
                             );
                         }
                     }
@@ -1086,7 +1154,7 @@ mod tests {
         GOOGLE_DISABLED_UNTIL.lock().unwrap().take();
         assert!(google_enabled_now());
 
-        disable_google_for_a_while();
+        disable_google_for_a_while("测试");
         assert!(!google_enabled_now());
 
         *GOOGLE_DISABLED_UNTIL.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
@@ -1104,19 +1172,19 @@ mod tests {
         assert_eq!(relay_target_language("ja"), None);
     }
 
-    /// 默认链是必应 → Google → MyMemory；手动指定的引擎排最前，
+    /// 默认链是 Google → 必应 → MyMemory；手动指定的引擎排最前，
     /// 其余保持默认相对顺序；relay 在批级单独处理，不进逐句链。
     #[test]
     fn engine_chain_prefers_manual_engine_then_default_order() {
-        let default = vec!["bing", "google", "mymemory"];
+        let default = vec!["google", "bing", "mymemory"];
         assert_eq!(engine_chain("auto"), default);
-        assert_eq!(engine_chain("bing"), default);
+        assert_eq!(engine_chain("google"), default);
         // relay 只在批级先试（translate_jobs），逐句链走默认顺序。
         assert_eq!(engine_chain("relay"), default);
         assert_eq!(engine_chain("不存在的引擎"), default);
 
-        assert_eq!(engine_chain("google"), vec!["google", "bing", "mymemory"]);
-        assert_eq!(engine_chain("mymemory"), vec!["mymemory", "bing", "google"]);
+        assert_eq!(engine_chain("bing"), vec!["bing", "google", "mymemory"]);
+        assert_eq!(engine_chain("mymemory"), vec!["mymemory", "google", "bing"]);
     }
 
     #[test]
@@ -1144,7 +1212,7 @@ mod tests {
         RELAY_TRANSLATE_DISABLED_UNTIL.lock().unwrap().take();
         assert!(relay_translate_enabled_now());
 
-        disable_relay_translate_for_a_while();
+        disable_relay_translate_for_a_while("测试");
         assert!(!relay_translate_enabled_now());
 
         *RELAY_TRANSLATE_DISABLED_UNTIL.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
@@ -1183,6 +1251,95 @@ mod tests {
 
         // 缺令牌（页面改版 / 被拦截）必须失败，交给后续引擎。
         assert_eq!(parse_bing_tokens("<html>blocked</html>"), None);
+    }
+
+    /// 真实网络冒烟测试（手动跑：`cargo test bing_live -- --ignored --nocapture`）：
+    /// 完整走一遍 bootstrap → ttranslatev3，页面改版 / 接口风控时第一时间暴露
+    /// 是哪一步断的，而不是只看到「必应不可用」。
+    #[test]
+    #[ignore]
+    fn bing_live_smoke() {
+        clear_bing_session();
+        let session = tauri::async_runtime::block_on(async {
+            bing_bootstrap().await.expect("bootstrap 失败：取不到令牌")
+        });
+        println!(
+            "bootstrap OK: origin={} iid={} cookies={}",
+            session.origin,
+            session.iid,
+            session.cookies.is_empty()
+        );
+        let translated = tauri::async_runtime::block_on(async {
+            bing_translate_chunk("Hello, world. Nice to meet you.", "zh-Hans")
+                .await
+                .expect("ttranslatev3 失败")
+        });
+        println!("translate OK: {translated}");
+        assert!(!translated.is_empty());
+    }
+
+    /// 故障期间回退引擎写进缓存的条目必须过期：否则必应恢复后依然永远命中
+    /// MyMemory 的旧结果，表现为「必应永远不可用」。
+    #[test]
+    fn cache_entries_expire_after_ttl() {
+        let key = (
+            "cache_ttl_probe".to_string(),
+            "zh-CN".to_string(),
+            "bing".to_string(),
+        );
+        // 未来时间戳的条目命中；超过 CACHE_TTL 的条目按未命中处理。
+        let fresh = ("新".to_string(), "bing".to_string(), Instant::now());
+        let stale_at = Instant::now().checked_sub(CACHE_TTL).unwrap();
+        let stale = ("旧".to_string(), "mymemory".to_string(), stale_at);
+        {
+            let mut map = cache().lock().unwrap();
+            map.insert(key.clone(), stale);
+            let hit = map
+                .get(&key)
+                .filter(|(_, _, cached_at)| cached_at.elapsed() < CACHE_TTL)
+                .cloned();
+            assert!(hit.is_none(), "过期条目不应命中");
+            map.insert(key.clone(), fresh);
+        }
+        let hit = cache()
+            .lock()
+            .unwrap()
+            .get(&key)
+            .filter(|(_, _, cached_at)| cached_at.elapsed() < CACHE_TTL)
+            .cloned();
+        assert!(hit.is_some(), "新鲜条目应命中");
+        assert_eq!(hit.unwrap().1, "bing");
+        cache().lock().unwrap().remove(&key);
+    }
+
+    /// 真实网络端到端（手动跑：`cargo test translate_batch_live -- --ignored --nocapture`）：
+    /// 用一段典型工坊描述直接调命令本体 translate_batch，验证详情窗走的整条管线。
+    #[test]
+    #[ignore]
+    fn translate_batch_live() {
+        let jobs = vec![
+            TranslationJob { sid: "w1_title".into(), text: "Brita's Weapon Pack [B42]".into() },
+            TranslationJob {
+                sid: "w1_0".into(),
+                text: "Adds over 150 weapons, attachments and magazines to Project Zomboid. \
+                       All weapons spawn in the loot tables of military containers and zombies."
+                    .into(),
+            },
+            TranslationJob {
+                sid: "w1_1".into(),
+                text: "This mod requires Brita's Armor Pack to work properly. Report bugs in the \
+                       discussion tab. Compatible with build 42 multiplayer."
+                    .into(),
+            },
+        ];
+        let started = Instant::now();
+        let results = tauri::async_runtime::block_on(translate_batch(jobs, "zh-CN".into()))
+            .expect("translate_batch 失败");
+        for result in &results {
+            println!("{} [{}] {}", result.sid, result.engine, result.text);
+        }
+        println!("耗时 {:.1}s", started.elapsed().as_secs_f32());
+        assert!(results.iter().all(|result| result.engine != "none"));
     }
 
     #[test]
@@ -1226,7 +1383,7 @@ mod tests {
         BING_DISABLED_UNTIL.lock().unwrap().take();
         assert!(bing_enabled_now());
 
-        disable_bing_for_a_while();
+        disable_bing_for_a_while("测试");
         assert!(!bing_enabled_now());
 
         *BING_DISABLED_UNTIL.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
@@ -1254,6 +1411,7 @@ mod tests {
     }
     #[test]
     fn groups_at_fifty() {
+        // 51 句按 BATCH_SIZE=20 切批：20 + 20 + 11。
         let jobs = (0..51)
             .map(|i| TranslationJob {
                 sid: i.to_string(),
@@ -1262,7 +1420,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             batches(&jobs).iter().map(Vec::len).collect::<Vec<_>>(),
-            vec![15, 15, 15, 6]
+            vec![20, 20, 11]
         );
     }
     #[test]

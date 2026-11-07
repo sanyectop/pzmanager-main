@@ -96,7 +96,8 @@ test("applies the relay fallback to workshop preview images in the app", () => {
 });
 
 test("general settings › network section collapses its explanation into a hint", () => {
-  assert.match(appSource, /<Text color="gray\.800" fontSize="sm" fontWeight="700">网络<\/Text>/);
+  // 分区卡片重构后：网络是独立分区（标题在卡片外），说明收进问号气泡。
+  assert.match(appSource, /SettingsSection\s*\n?\s*title="网络"/);
   assert.match(appSource, /label="网络中转说明"/);
   assert.match(appSource, /大陆网络直连 Steam 创意工坊会失败/);
   // 说明只留在问号提示里，不再作为可见段落占位。

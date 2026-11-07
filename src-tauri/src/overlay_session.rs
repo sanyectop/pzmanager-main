@@ -9,6 +9,38 @@ pub const SESSION_EVENT: &str = "overlay-session";
 /// ZombieBuddy 加载进度事件（来自控制台的 `[ZB]` 输出）。
 pub const PROGRESS_EVENT: &str = "overlay-zb-progress";
 
+/// 游戏进程停止原因（见 docs/exit-reason-classification.md）。
+///
+/// 只对「游戏进程已退出」类收尾给值；覆盖层看门狗/超时等收尾游戏还在跑，
+/// 属 `None`，前端不弹提示。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StopReason {
+    /// 正常退出（游戏内退出 / WM_CLOSE 优雅关闭，退出码 0）。
+    NormalExit,
+    /// JVM 内 Java 层异常退出（console.txt 有崩溃签名）。
+    JavaCrash,
+    /// 原生崩溃（hs_err dump / 退出码为 NT 异常码）。
+    NativeCrash,
+    /// 被外部终止（任务管理器结束进程 / Steam 强退 / 关机，退出码 1 且无崩溃证据）。
+    ExternalTerminate,
+    /// 证据不足，无法归类。
+    Unknown,
+}
+
+impl StopReason {
+    /// 事件载荷 / 日志里的标识（与 serde 序列化一致）。
+    pub fn label(self) -> &'static str {
+        match self {
+            StopReason::NormalExit => "normalExit",
+            StopReason::JavaCrash => "javaCrash",
+            StopReason::NativeCrash => "nativeCrash",
+            StopReason::ExternalTerminate => "externalTerminate",
+            StopReason::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySessionUpdate {
@@ -18,6 +50,12 @@ pub struct OverlaySessionUpdate {
     pub process_name: Option<String>,
     pub zb_lines: u64,
     pub elapsed_ms: u64,
+    /// 游戏停止原因，仅「游戏进程已退出」时给出。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    /// 游戏进程退出码；进程消亡后拿不到时为 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<u32>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -85,6 +123,147 @@ fn record_startup_timing(duration_ms: u64) -> StartupTiming {
     timing
 }
 
+// ---- 游戏停止原因归类（见 docs/exit-reason-classification.md） ------------------
+
+/// JVM 原生崩溃时以异常码退出（hs_err dump 的 `Exception Code` 同源）。
+/// 任务管理器 `TerminateProcess` 固定用退出码 1，不会落进这组值。
+const NATIVE_CRASH_EXIT_CODES: [u32; 6] = [
+    0xC000_0005, // EXCEPTION_ACCESS_VIOLATION
+    0xC000_0409, // STATUS_STACK_BUFFER_OVERRUN
+    0xC000_00FD, // STATUS_STACK_OVERFLOW
+    0x8000_0003, // STATUS_BREAKPOINT
+    0xE043_4352, // CLR 异常（理论上不该出现在 PZ，一并兜住）
+    0xE06D_7363, // MSVC C++ EH（同上）
+];
+
+/// 退出码是否是原生崩溃异常码。`STILL_ACTIVE`（259）不是有效退出码，永不算。
+fn is_native_crash_exit_code(code: u32) -> bool {
+    code != 259 && NATIVE_CRASH_EXIT_CODES.contains(&code)
+}
+
+/// 归类一次「游戏进程已退出」：强信号优先，退出码只做输入、不做裁判。
+///
+/// 退出码 1 有歧义（JVM `System.exit(1)` 与任务管理器 `TerminateProcess(h, 1)`
+/// 无法靠退出码区分），所以只有在 hs_err / console 签名两处都没有崩溃证据时，
+/// 才把它判成「被外部结束」。
+fn classify_game_exit(
+    exit_code: Option<u32>,
+    has_console_signature: bool,
+    has_hs_err_dump: bool,
+) -> StopReason {
+    if has_hs_err_dump {
+        return StopReason::NativeCrash;
+    }
+    if has_console_signature {
+        return StopReason::JavaCrash;
+    }
+    match exit_code {
+        Some(code) if is_native_crash_exit_code(code) => StopReason::NativeCrash,
+        Some(0) => StopReason::NormalExit,
+        Some(1) => StopReason::ExternalTerminate,
+        _ => StopReason::Unknown,
+    }
+}
+
+/// JVM 崩溃 dump 的文件名（自带崩溃进程的 pid，天然防吃旧会话的 dump）。
+fn hs_err_log_name(pid: u32) -> String {
+    format!("hs_err_pid{pid}.log")
+}
+
+/// 按 pid 在候选目录里找本次会话的 hs_err dump，附提取出的异常摘要。
+///
+/// `session_start` 往前留 2 秒余量：崩溃紧接注入发生时，粗粒度的 mtime
+/// 可能和会话起点同秒。找不到 / 太旧（上次崩溃的遗留）都返回 `None`。
+fn find_hs_err_log(
+    directories: &[std::path::PathBuf],
+    pid: u32,
+    session_start: std::time::SystemTime,
+) -> Option<(std::path::PathBuf, String)> {
+    let name = hs_err_log_name(pid);
+    let earliest = session_start - std::time::Duration::from_secs(2);
+    for directory in directories {
+        let path = directory.join(&name);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if modified < earliest {
+            continue;
+        }
+        if let Some(summary) = parse_hs_err_summary(&path) {
+            return Some((path, summary));
+        }
+    }
+    None
+}
+
+/// hs_err 目录候选：游戏目录（实测 JVM 的 dump 都写在这里）为主，
+/// 用户 Zomboid 目录和 %TEMP% 兜底。
+fn hs_err_search_directories() -> Vec<std::path::PathBuf> {
+    let mut directories = Vec::new();
+    #[cfg(windows)]
+    if let Some(path) = crate::fast_launch::project_zomboid_install_path() {
+        directories.push(path);
+    }
+    if let Ok(path) = crate::user_zomboid_directory() {
+        directories.push(path);
+    }
+    directories.push(std::env::temp_dir());
+    directories
+}
+
+/// 从 hs_err dump 头部提取异常行（如 `EXCEPTION_ACCESS_VIOLATION (0xc0000005) at …`）。
+fn parse_hs_err_summary(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 8 * 1024];
+    let length = file.read(&mut head).unwrap_or(0);
+    let text = String::from_utf8_lossy(&head[..length]);
+    // 异常行形如 `#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=…`。
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix("# "))
+        .map(str::trim)
+        .find(|line| line.contains("EXCEPTION") && line.contains("0x"))
+        .map(str::to_string)
+}
+
+/// 停止原因之外给用户的一句可操作诊断（拼在会话结果 reason 后面）。
+fn exit_reason_diagnosis(
+    reason: StopReason,
+    exit_code: Option<u32>,
+    console_diagnosis: Option<&str>,
+    hs_err: Option<&(std::path::PathBuf, String)>,
+) -> String {
+    let code_text = exit_code
+        .map(|code| format!("{code}(0x{code:08X})"))
+        .unwrap_or_else(|| "不可得".to_string());
+    match reason {
+        // 正常退出不加戏。
+        StopReason::NormalExit => String::new(),
+        // console 签名的文案本身就是完整诊断，直接沿用。
+        StopReason::JavaCrash => console_diagnosis.unwrap_or_default().to_string(),
+        StopReason::NativeCrash => match hs_err {
+            Some((path, summary)) => format!(
+                "诊断：游戏原生崩溃（{summary}）。崩溃详情在 {}，可随反馈一起上传。",
+                path.display()
+            ),
+            None => format!(
+                "诊断：游戏以异常码 {code_text} 结束（原生崩溃），建议提交反馈排查。"
+            ),
+        },
+        StopReason::ExternalTerminate => {
+            "诊断：游戏被外部结束（退出码 1，无崩溃证据）——可能是任务管理器「结束进程」、\
+Steam 强制更新或系统关机；如非本人操作请留意。"
+                .to_string()
+        }
+        StopReason::Unknown => format!(
+            "诊断：游戏退出原因未知（退出码 {code_text}），可提交反馈附启动器日志排查。"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod timing_tests {
     use super::{next_startup_timing, StartupTiming};
@@ -99,6 +278,140 @@ mod timing_tests {
         let second = next_startup_timing(first, 66_000);
         assert_eq!(second.last_ms, Some(66_000));
         assert_eq!(second.previous_ms, Some(90_000));
+    }
+}
+
+#[cfg(test)]
+mod exit_classification_tests {
+    use super::{
+        classify_game_exit, exit_reason_diagnosis, find_hs_err_log, hs_err_log_name, StopReason,
+    };
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn exit_code_alone_classifies_unambiguous_cases() {
+        assert_eq!(
+            classify_game_exit(Some(0), false, false),
+            StopReason::NormalExit
+        );
+        assert_eq!(
+            classify_game_exit(Some(1), false, false),
+            StopReason::ExternalTerminate
+        );
+        assert_eq!(
+            classify_game_exit(Some(0xC000_0005), false, false),
+            StopReason::NativeCrash
+        );
+        assert_eq!(
+            classify_game_exit(Some(0xC000_00FD), false, false),
+            StopReason::NativeCrash
+        );
+        // STILL_ACTIVE（259）不是有效退出码；拿不到退出码也归类为未知。
+        assert_eq!(
+            classify_game_exit(Some(259), false, false),
+            StopReason::Unknown
+        );
+        assert_eq!(classify_game_exit(None, false, false), StopReason::Unknown);
+    }
+
+    #[test]
+    fn crash_evidence_beats_exit_code() {
+        // 退出码 1 的歧义（JVM System.exit(1) vs TerminateProcess(h, 1)）：
+        // 有崩溃证据时一律按崩溃归类，退出码只做输入。
+        assert_eq!(
+            classify_game_exit(Some(1), true, false),
+            StopReason::JavaCrash
+        );
+        assert_eq!(
+            classify_game_exit(Some(1), true, true),
+            StopReason::NativeCrash
+        );
+        assert_eq!(
+            classify_game_exit(Some(0), false, true),
+            StopReason::NativeCrash
+        );
+    }
+
+    #[test]
+    fn stop_reason_labels_match_serde_payload() {
+        assert_eq!(StopReason::NormalExit.label(), "normalExit");
+        assert_eq!(StopReason::JavaCrash.label(), "javaCrash");
+        assert_eq!(StopReason::NativeCrash.label(), "nativeCrash");
+        assert_eq!(StopReason::ExternalTerminate.label(), "externalTerminate");
+        assert_eq!(StopReason::Unknown.label(), "unknown");
+    }
+
+    #[test]
+    fn finds_fresh_hs_err_dump_for_pid() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(hs_err_log_name(4242));
+        std::fs::write(
+            &path,
+            "#\n\
+             # A fatal error has been detected by the Java Runtime Environment:\n\
+             #\n\
+             #  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x00007ff6ab12cd34\n",
+        )
+        .unwrap();
+        let session_start = SystemTime::now() - Duration::from_secs(3600);
+
+        let (found, summary) =
+            find_hs_err_log(&[directory.path().to_path_buf()], 4242, session_start).unwrap();
+        assert_eq!(found, path);
+        assert!(summary.contains("EXCEPTION_ACCESS_VIOLATION"), "{summary}");
+        assert!(summary.contains("0xc0000005"), "{summary}");
+        assert!(!summary.starts_with('#'), "{summary}");
+    }
+
+    #[test]
+    fn ignores_stale_or_foreign_hs_err_dumps() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(hs_err_log_name(4242)),
+            "#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x1\n",
+        )
+        .unwrap();
+
+        // 会话「尚未开始」：这份 dump 只能是上次崩溃的遗留，不能吃。
+        let future_start = SystemTime::now() + Duration::from_secs(3600);
+        assert!(find_hs_err_log(&[directory.path().to_path_buf()], 4242, future_start).is_none());
+        // pid 对不上：别的进程的 dump。
+        let past_start = SystemTime::now() - Duration::from_secs(3600);
+        assert!(find_hs_err_log(&[directory.path().to_path_buf()], 777, past_start).is_none());
+        // dump 缺失：不报错，返回 None。
+        assert!(find_hs_err_log(&[directory.path().to_path_buf()], 999, past_start).is_none());
+    }
+
+    #[test]
+    fn diagnosis_text_covers_each_stop_reason() {
+        let code = Some(0xC000_0005);
+        let dump = (
+            PathBuf::from("C:\\game\\hs_err_pid4242.log"),
+            "EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x1".to_string(),
+        );
+
+        // 正常退出不加戏。
+        assert!(exit_reason_diagnosis(StopReason::NormalExit, code, None, None).is_empty());
+        // Java 崩溃直接沿用 console 签名的文案。
+        let java = exit_reason_diagnosis(
+            StopReason::JavaCrash,
+            code,
+            Some("诊断：游戏缺少类 zombie.util.list.PZArrayList……"),
+            None,
+        );
+        assert!(java.contains("PZArrayList"), "{java}");
+        // 原生崩溃带 dump 摘要 / 退出码兜底。
+        let native = exit_reason_diagnosis(StopReason::NativeCrash, code, None, Some(&dump));
+        assert!(native.contains("EXCEPTION_ACCESS_VIOLATION"), "{native}");
+        let native_no_dump = exit_reason_diagnosis(StopReason::NativeCrash, code, None, None);
+        assert!(native_no_dump.contains("0xC0000005"), "{native_no_dump}");
+        // 外部终止 / 未知各有独立文案，且不点名只有任务管理器一种可能。
+        let external = exit_reason_diagnosis(StopReason::ExternalTerminate, Some(1), None, None);
+        assert!(external.contains("任务管理器"), "{external}");
+        assert!(external.contains("Steam"), "{external}");
+        let unknown = exit_reason_diagnosis(StopReason::Unknown, None, None, None);
+        assert!(unknown.contains("不可得"), "{unknown}");
     }
 }
 
@@ -118,7 +431,7 @@ mod imp {
     };
     use windows::Win32::System::Threading::{
         CreateEventW, GetExitCodeProcess, OpenProcess, SetEvent, WaitForSingleObject,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
@@ -126,8 +439,9 @@ mod imp {
     };
 
     use super::{
-        record_startup_timing, OverlaySessionUpdate, OverlayZbProgress, PROGRESS_EVENT,
-        SESSION_EVENT, STARTUP_EVENT,
+        classify_game_exit, exit_reason_diagnosis, find_hs_err_log, hs_err_search_directories,
+        record_startup_timing, OverlaySessionUpdate, OverlayZbProgress, StopReason,
+        PROGRESS_EVENT, SESSION_EVENT, STARTUP_EVENT,
     };
     use crate::overlay::imp as overlay_imp;
 
@@ -149,6 +463,11 @@ mod imp {
     const STARTED_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
     /// 覆盖层从注入起的最长持续时间（DLL 侧另有 10 分钟安全上限）。
     const SESSION_MAX_DURATION: Duration = Duration::from_secs(540);
+    /// 静默兜底的 console 停更守卫：`[ZB]` 静默达到兜底时长后，还要求 console.txt
+    /// 也已停止更新这么久才允许收尾（console 还在长 = 游戏还在加载）。
+    const CONSOLE_QUIET_GUARD: Duration = Duration::from_secs(30);
+    /// 覆盖层收尾后继续监视游戏退出的上限（对齐光影包还原监听的 24 小时兜底）。
+    const POST_SESSION_WATCH_MAX: Duration = Duration::from_secs(24 * 60 * 60);
     /// 进度事件最小发送间隔，避免刷爆前端。
     const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
     /// 覆盖层达到 100% 后继续显示的时间。
@@ -183,6 +502,61 @@ mod imp {
         zb_lines: u64,
         pid: u32,
         process_name: String,
+        /// 游戏停止原因；仅「游戏进程已退出」收尾给值（见 `classify_game_exit`）。
+        stop_reason: Option<super::StopReason>,
+        /// 退出码；句柄失效等拿不到时为 `None`。
+        exit_code: Option<u32>,
+    }
+
+    /// 游戏进程退出监视：注入成功后开一把常驻句柄，退出瞬间取退出码。
+    ///
+    /// 为什么不沿用 `process_alive`（开句柄→查→立刻关）：轮询发现「已死」再去
+    /// `OpenProcess` 时进程对象可能已经消亡，退出码永久丢失。常驻句柄还能顺带
+    /// 防 PID 复用——句柄在，进程对象就不会被销毁。
+    struct ExitWatch {
+        pid: u32,
+        handle: Option<HANDLE>,
+    }
+
+    impl ExitWatch {
+        /// `PROCESS_SYNCHRONIZE` 用于等待退出，`PROCESS_QUERY_LIMITED_INFORMATION` 用于取退出码。
+        fn open(pid: u32) -> Self {
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                    false,
+                    pid,
+                )
+            }
+            .ok();
+            Self { pid, handle }
+        }
+
+        /// `None` = 仍在运行；`Some(code)` = 已退出，code 为退出码
+        /// （`GetExitCodeProcess` 失败等拿不到时为 `Some(None)`）。
+        fn check(&self) -> Option<Option<u32>> {
+            let Some(handle) = self.handle else {
+                // 开句柄失败（权限/时序）：退回旧的轮询判断，只是拿不到退出码。
+                return (!process_alive(self.pid)).then_some(None);
+            };
+            if unsafe { WaitForSingleObject(handle, 0) } != WAIT_OBJECT_0 {
+                return None;
+            }
+            let mut exit_code = 0u32;
+            let code = unsafe { GetExitCodeProcess(handle, &mut exit_code) }
+                .ok()
+                .filter(|_| exit_code != STILL_ACTIVE)
+                .map(|_| exit_code);
+            Some(code)
+        }
+    }
+
+    impl Drop for ExitWatch {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle {
+                let _ = unsafe { CloseHandle(handle) };
+            }
+        }
     }
 
     /// 读取 DLL 回写的渲染速率（hook 调用/秒）。采样过期或不存在时返回 None。
@@ -401,7 +775,8 @@ mod imp {
     /// 启动一次覆盖层会话（在独立线程中运行，命令立即返回）。
     pub(super) fn run_session(app: AppHandle, dll_path: String) {
         let started = Instant::now();
-        match run_session_inner(&app, &dll_path, started) {
+        let result = run_session_inner(&app, &dll_path, started);
+        match &result {
             Ok(outcome) => emit_session(
                 &app,
                 "finished",
@@ -410,10 +785,93 @@ mod imp {
                 Some(&outcome.process_name),
                 outcome.zb_lines,
                 started.elapsed(),
+                outcome.stop_reason,
+                outcome.exit_code,
             ),
             Err(message) => {
-                emit_session(&app, "error", &message, None, None, 0, started.elapsed());
+                emit_session(&app, "error", &message, None, None, 0, started.elapsed(), None, None);
             }
+        }
+        // 覆盖层已收尾但游戏还在跑：继续监视到游戏退出，之后的崩溃也有崩溃报告。
+        // （会话内游戏退出的 outcome 自带 stop_reason，不在这里重复监视。）
+        if let Ok(outcome) = &result {
+            if outcome.stop_reason.is_none() {
+                watch_game_after_overlay(&app, outcome.pid, started);
+            }
+        }
+    }
+
+    /// 「游戏进程已退出」的统一归类 + 诊断组装：会话内收尾与会话后监视共用。
+    fn classify_and_diagnose_exit(
+        exit_code: Option<u32>,
+        pid: u32,
+        console_path: Option<&Path>,
+        session_start: SystemTime,
+    ) -> (StopReason, String) {
+        let console_diagnosis =
+            console_path.and_then(|path| diagnose_game_exit_from_console(path));
+        let hs_err = find_hs_err_log(&hs_err_search_directories(), pid, session_start);
+        let stop_reason =
+            classify_game_exit(exit_code, console_diagnosis.is_some(), hs_err.is_some());
+        let diagnosis = exit_reason_diagnosis(
+            stop_reason,
+            exit_code,
+            console_diagnosis.as_deref(),
+            hs_err.as_ref(),
+        );
+        (stop_reason, diagnosis)
+    }
+
+    /// 覆盖层收尾后继续监视游戏进程，直到它退出（上限 24 小时）。
+    ///
+    /// 之前会话线程随「加载完成」一起结束，之后游戏再崩溃就没人管——停止原因
+    /// 归类和主界面报错只活在覆盖层存续期内（2026-11-07 实测踩坑）。这里补上
+    /// 空窗：退出后走同一套归类（console 签名 / hs_err / 退出码），发
+    /// `game-exited` 事件让前端弹报；正常退出只记日志不弹。
+    fn watch_game_after_overlay(app: &AppHandle, pid: u32, started: Instant) {
+        let console_path =
+            crate::user_zomboid_directory().ok().map(|dir| dir.join("console.txt"));
+        let exit_watch = ExitWatch::open(pid);
+        let watch_started = Instant::now();
+        loop {
+            if let Some(exit_code) = exit_watch.check() {
+                let session_start = SystemTime::now() - started.elapsed();
+                let (stop_reason, diagnosis) =
+                    classify_and_diagnose_exit(exit_code, pid, console_path.as_deref(), session_start);
+                let mut reason = String::from("游戏进程已退出。");
+                if !diagnosis.is_empty() {
+                    reason.push(' ');
+                    reason.push_str(&diagnosis);
+                }
+                let code_text = exit_code
+                    .map(|code| format!("{code}(0x{code:08X})"))
+                    .unwrap_or_else(|| "不可得".to_string());
+                crate::launcher_log::info(&format!(
+                    "覆盖层会话后游戏退出：停止原因={}，退出码={}，{reason}",
+                    stop_reason.label(),
+                    code_text,
+                ));
+                if let Some(path) = &console_path {
+                    append_console_record(path, &format!("[PZManager] 游戏已退出：{reason}"));
+                }
+                emit_session(
+                    app,
+                    "game-exited",
+                    &reason,
+                    Some(pid),
+                    None,
+                    0,
+                    watch_started.elapsed(),
+                    Some(stop_reason),
+                    exit_code,
+                );
+                return;
+            }
+            if watch_started.elapsed() >= POST_SESSION_WATCH_MAX {
+                crate::launcher_log::info("覆盖层会话后监视游戏已达 24 小时上限，停止监视。");
+                return;
+            }
+            thread::sleep(Duration::from_secs(1));
         }
     }
 
@@ -438,6 +896,8 @@ mod imp {
             None,
             0,
             started.elapsed(),
+            None,
+            None,
         );
 
         let deadline = Instant::now() + PROCESS_WAIT_TIMEOUT;
@@ -471,6 +931,8 @@ mod imp {
             Some(process_name),
             0,
             started.elapsed(),
+            None,
+            None,
         );
 
         let deadline = Instant::now() + WINDOW_WAIT_TIMEOUT;
@@ -502,6 +964,8 @@ mod imp {
             Some(process_name),
             0,
             started.elapsed(),
+            None,
+            None,
         );
 
         // 目标进程已有同名模块时不再重复注入（极速启动经 -agentpath 预载是正常情况）；
@@ -559,6 +1023,8 @@ mod imp {
             Some(process_name),
             0,
             started.elapsed(),
+            None,
+            None,
         );
 
         // 精确进度分母：由日志里 "[ZB] java mod list to load:" 的 jar 列表计算（见 track_console），
@@ -582,15 +1048,19 @@ mod imp {
             Err(error) => crate::launcher_log::warn(&format!("覆盖层会话失败：{error}")),
         }
 
-        // 游戏中途退出 = 闪退：从 console 尾部找已知崩溃签名，把可操作的诊断
-        // 拼进会话结果（启动面板 / 日志 / console 记录都会带上），而不是只说
-        // 「游戏进程已退出」让用户猜。
-        let mut outcome = outcome.map(|mut value| {
+        // 游戏中途退出 = 停止事件：归类停止原因（见 docs/exit-reason-classification.md），
+        // 并把可操作的诊断拼进会话结果（主界面报错模态框 / 启动面板 / 日志 / console 记录
+        // 都会带上），而不是只说「游戏进程已退出」让用户猜。正常退出不加诊断文案，
+        // 前端也不弹提示。
+        let outcome = outcome.map(|mut value| {
             if value.reason.contains("游戏进程已退出") {
-                if let Some(diagnosis) = diagnose_game_exit_from_console(&console_path) {
+                let (stop_reason, diagnosis) =
+                    classify_and_diagnose_exit(value.exit_code, pid, Some(&console_path), session_start);
+                if !diagnosis.is_empty() {
                     value.reason.push(' ');
                     value.reason.push_str(&diagnosis);
                 }
+                value.stop_reason = Some(stop_reason);
             }
             value
         });
@@ -606,8 +1076,20 @@ mod imp {
         let render_rate = read_render_rate()
             .map(|rate| format!("{rate}/s"))
             .unwrap_or_else(|| "无采样".to_string());
+        // 游戏停止事件多带一段「退出码 / 停止原因」，排查闪退时不用再翻事件载荷。
+        let exit_detail = outcome
+            .as_ref()
+            .ok()
+            .and_then(|value| Some((value.stop_reason?, value.exit_code)))
+            .map(|(reason, code)| {
+                let code_text = code
+                    .map(|code| format!("{code}(0x{code:08X})"))
+                    .unwrap_or_else(|| "不可得".to_string());
+                format!("，停止原因={}，退出码={}", reason.label(), code_text)
+            })
+            .unwrap_or_default();
         crate::launcher_log::info(&format!(
-            "覆盖层会话详情：ZB 行数={}，阶段={}，advice 分母={}，渲染≈{}，耗时={:.1}s，结果={}",
+            "覆盖层会话详情：ZB 行数={}，阶段={}，advice 分母={}，渲染≈{}，耗时={:.1}s，结果={}{}",
             outcome.as_ref().map(|value| value.zb_lines).unwrap_or(0),
             status.phase(),
             advices,
@@ -617,6 +1099,7 @@ mod imp {
                 .as_ref()
                 .map(|value| value.reason.as_str())
                 .unwrap_or("失败"),
+            exit_detail,
         ));
 
         if let Ok(outcome) = &outcome {
@@ -645,10 +1128,11 @@ mod imp {
         // 例外：游戏中途退出（闪退）不算一次「启动」——把"从窗口出现到崩溃"的时长
         // 记成启动用时是垃圾数据，用户看到的启动时间对比会失真。崩溃时跳过记录，
         // 前端保留上一次真实启动的数值。
-        if !outcome
-            .as_ref()
-            .is_ok_and(|value| value.reason.contains("游戏进程已退出"))
-        {
+        if !outcome.as_ref().is_ok_and(|value| {
+            value.reason.contains("游戏进程已退出")
+                // 静默兜底收尾（不判定加载完成）记的"启动用时"也是垃圾数据。
+                || value.reason.contains("不判定加载完成")
+        }) {
             let startup_ms = window_detected_at.elapsed().as_millis() as u64;
             let timing = record_startup_timing(startup_ms);
             let _ = app.emit(STARTUP_EVENT, timing);
@@ -687,6 +1171,8 @@ mod imp {
         status: &mut StatusFile,
         expected_advices: &Arc<Mutex<Option<usize>>>,
     ) -> Result<SessionOutcome, String> {
+        // 常驻句柄从现在起锁住进程对象：退出瞬间取退出码，也防 PID 复用。
+        let exit_watch = ExitWatch::open(pid);
         // 等 console.txt 被本次启动重写；迟迟没变化就退化为读取现有内容。
         //
         // 有些机器游戏根本不写这个文件（整场只有启动器自己追加的几行），此时旧逻辑
@@ -707,8 +1193,8 @@ mod imp {
                     break;
                 }
             }
-            if !process_alive(pid) {
-                return Ok(outcome("游戏进程已退出。", 0, pid, String::new()));
+            if let Some(exit_code) = exit_watch.check() {
+                return Ok(outcome_exited(0, pid, exit_code));
             }
             early_watch.observe(Instant::now());
             if early_watch.sustained(Instant::now()) {
@@ -752,11 +1238,13 @@ mod imp {
         let mut pending_jars: Vec<String> = Vec::new();
         // 主循环里的渲染看门狗：console.txt 有更新但始终没有 [ZB] 行时同样靠它收尾。
         let mut render_watch = RenderWatch::new();
+        // console.txt 最近一次增长时刻：静默兜底的守卫输入（console 还在长 = 还在加载）。
+        let mut last_console_growth_at = Some(Instant::now());
 
         loop {
             status.heartbeat();
-            if !process_alive(pid) {
-                return Ok(outcome("游戏进程已退出。", zb_lines, pid, String::new()));
+            if let Some(exit_code) = exit_watch.check() {
+                return Ok(outcome_exited(zb_lines, pid, exit_code));
             }
             render_watch.observe(Instant::now());
 
@@ -773,6 +1261,8 @@ mod imp {
                     None,
                     zb_lines,
                     started.elapsed(),
+                    None,
+                    None,
                 );
             }
             if !overlay_started && injected_at.elapsed() >= STARTED_WAIT_TIMEOUT {
@@ -831,6 +1321,7 @@ mod imp {
             }
 
             if size > offset {
+                last_console_growth_at = Some(Instant::now());
                 file.seek(SeekFrom::Start(offset))
                     .map_err(|error| format!("定位控制台输出失败: {error}"))?;
                 let read = file
@@ -946,11 +1437,29 @@ mod imp {
                 }
             }
 
-            if idle_completion(overlay_started, &phase, last_zb_at, Instant::now()) {
+            if idle_completion_with_console(
+                overlay_started,
+                &phase,
+                last_zb_at,
+                Instant::now(),
+                last_console_growth_at,
+            ) {
+                // 里程碑阶段（注册 Lua 接口 / 初始化完成回调）静默 = ZombieBuddy 真正完成；
+                // 其余阶段的兜底只说明「没输出、console 也停了」，不判定加载完成——
+                // 把它当成功会提前移除覆盖层并把兜底时长记成启动用时。
+                let milestone =
+                    overlay_core::SILENCE_COMPLETION_PHASES.contains(&phase.as_str());
                 return Ok(outcome(
-                    &format!(
-                        "[ZB] 输出静默（阶段：{phase}，共 {zb_lines} 条），判定 ZombieBuddy 加载完成。"
-                    ),
+                    &if milestone {
+                        format!(
+                            "[ZB] 输出静默（阶段：{phase}，共 {zb_lines} 条），判定 ZombieBuddy 加载完成。"
+                        )
+                    } else {
+                        format!(
+                            "[ZB] 输出静默（阶段：{phase}，共 {zb_lines} 条），控制台也已停止更新，\
+                             结束覆盖（不判定加载完成）。"
+                        )
+                    },
                     zb_lines,
                     pid,
                     String::new(),
@@ -967,7 +1476,17 @@ mod imp {
             zb_lines,
             pid,
             process_name: String::new(),
+            stop_reason: None,
+            exit_code: None,
         }
+    }
+
+    /// 「游戏进程已退出」收尾：带上 `ExitWatch` 抓到的退出码；
+    /// 停止原因由 `run_session_inner` 收尾时的 `classify_game_exit` 补齐。
+    fn outcome_exited(zb_lines: u64, pid: u32, exit_code: Option<u32>) -> SessionOutcome {
+        let mut value = outcome("游戏进程已退出。", zb_lines, pid, String::new());
+        value.exit_code = exit_code;
+        value
     }
 
     /// 游戏中途退出时，从 console.txt 尾部找已知崩溃签名，给用户一句可操作的诊断。
@@ -1073,6 +1592,34 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
         overlay_core::idle_completion(overlay_started, phase, last_zb_at, now)
     }
 
+    /// 静默兜底收尾的 console 守卫版（仅 launcher 侧调用点；DLL fallback 路径不动）。
+    ///
+    /// 实测教训（2026-11-07）：「加载中」阶段游戏加载模组会出现 >60 秒的 `[ZB]` 空档，
+    /// 而 console.txt 一直在持续输出——旧的 60s 兜底把会话误判成「加载完成」提前收尾，
+    /// 覆盖层控制台定格在 Loading mods，之后的崩溃也没人监视。守卫：非里程碑阶段的
+    /// 兜底额外要求 console 已停更 ≥ `CONSOLE_QUIET_GUARD`；console 还在长 = 还在加载。
+    fn idle_completion_with_console(
+        overlay_started: bool,
+        phase: &str,
+        last_zb_at: Option<Instant>,
+        now: Instant,
+        last_console_growth_at: Option<Instant>,
+    ) -> bool {
+        if !idle_completion(overlay_started, phase, last_zb_at, now) {
+            return false;
+        }
+        // 里程碑阶段（注册 Lua 接口 / 初始化完成回调）是强信号，10 秒静默即完成，
+        // 不看 console（游戏主菜单阶段 console 本来就可能长时间不写）。
+        if overlay_core::SILENCE_COMPLETION_PHASES.contains(&phase) {
+            return true;
+        }
+        match last_console_growth_at {
+            Some(at) => now.duration_since(at) >= CONSOLE_QUIET_GUARD,
+            // console 从未增长过（部分机器根本不写 console.txt）：沿用旧兜底行为。
+            None => true,
+        }
+    }
+
     /// 从 `[ZB]` 行推导当前加载阶段（用于前端显示）。
     fn zb_phase(line: &str) -> &'static str {
         overlay_core::zb_phase(line)
@@ -1129,7 +1676,7 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
     }
 
     /// 游戏进程是否仍在运行。
-    fn process_alive(pid: u32) -> bool {
+    pub(super) fn process_alive(pid: u32) -> bool {
         unsafe {
             let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
                 return false;
@@ -1240,6 +1787,8 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
         process_name: Option<&str>,
         zb_lines: u64,
         elapsed: Duration,
+        stop_reason: Option<StopReason>,
+        exit_code: Option<u32>,
     ) {
         let _ = app.emit(
             SESSION_EVENT,
@@ -1250,6 +1799,8 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
                 process_name: process_name.map(str::to_string),
                 zb_lines,
                 elapsed_ms: elapsed.as_millis() as u64,
+                stop_reason,
+                exit_code,
             },
         );
     }
@@ -1257,12 +1808,108 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
     #[cfg(test)]
     mod tests {
         use super::{
-            completion_marker, extract_jar_path, idle_completion, is_game_window_title,
-            on_game_init_complete, parse_advice_count, zb_phase, RenderWatch, StatusFile,
-            COMPLETION_HOLD, RENDER_READY_HOLD, RENDER_READY_RATE,
+            completion_marker, extract_jar_path, idle_completion, idle_completion_with_console,
+            is_game_window_title, on_game_init_complete, parse_advice_count, zb_phase, ExitWatch,
+            RenderWatch, StatusFile, COMPLETION_HOLD, CONSOLE_QUIET_GUARD, RENDER_READY_HOLD,
+            RENDER_READY_RATE,
         };
         use overlay_core::{ZB_IDLE_TIMEOUT, ZB_IDLE_TIMEOUT_ANY_PHASE};
         use std::time::{Duration, Instant};
+
+        #[test]
+        fn console_growth_guards_the_any_phase_idle_fallback() {
+            let now = Instant::now();
+            let idle_60s = now - ZB_IDLE_TIMEOUT_ANY_PHASE;
+
+            // 里程碑阶段（注册 Lua 接口）：10 秒静默即完成，不看 console。
+            let milestone_silence = now - ZB_IDLE_TIMEOUT;
+            assert!(idle_completion_with_console(
+                true,
+                "注册 Lua 接口",
+                Some(milestone_silence),
+                now,
+                Some(now), // console 还在长也不拦里程碑
+            ));
+
+            // 非里程碑阶段：[ZB] 静默 60s，但 console 30s 内还在增长 → 不收尾。
+            assert!(!idle_completion_with_console(
+                true,
+                "加载中",
+                Some(idle_60s),
+                now,
+                Some(now - (CONSOLE_QUIET_GUARD - Duration::from_secs(5))),
+            ));
+            // console 也已停更 ≥ 30s → 兜底收尾放行。
+            assert!(idle_completion_with_console(
+                true,
+                "加载中",
+                Some(idle_60s),
+                now,
+                Some(now - (CONSOLE_QUIET_GUARD + Duration::from_secs(5))),
+            ));
+            // console 从未增长过（不写 console.txt 的机器）：沿用旧兜底行为。
+            assert!(idle_completion_with_console(true, "加载中", Some(idle_60s), now, None));
+
+            // 兜底前提不满足（渲染未开始 / [ZB] 没静默够）一律不收尾。
+            assert!(!idle_completion_with_console(
+                false,
+                "加载中",
+                Some(idle_60s),
+                now,
+                None,
+            ));
+            assert!(!idle_completion_with_console(
+                true,
+                "加载中",
+                Some(now - Duration::from_secs(10)),
+                now,
+                None,
+            ));
+        }
+
+        #[test]
+        fn exit_watch_captures_child_exit_code() {
+            let mut child = std::process::Command::new("cmd")
+                .args(["/C", "exit", "42"])
+                .spawn()
+                .expect("spawn test child");
+            let watch = ExitWatch::open(child.id());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(code) = watch.check() {
+                    assert_eq!(code, Some(42), "退出码应在进程对象存续期间被抓到");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "子进程退出未被 ExitWatch 感知");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            child.wait().expect("回收子进程");
+        }
+
+        #[test]
+        fn exit_watch_reports_running_process() {
+            let watch = ExitWatch::open(std::process::id());
+            assert_eq!(watch.check(), None, "自己当然还在运行");
+        }
+
+        #[test]
+        fn exit_watch_falls_back_without_handle() {
+            // 无句柄分支：退回 process_alive 轮询。直接构造 handle=None——
+            // 真实路径依赖 conhost 何时释放子进程句柄（全量并发跑时会导致程闪失败）。
+            // 0xFFFFFFFF 不是合法 Windows PID（pid 按 4 对齐），OpenProcess 必然失败。
+            let watch = ExitWatch {
+                pid: 0xFFFF_FFFF,
+                handle: None,
+            };
+            assert_eq!(watch.check(), Some(None), "目标进程不存在 → 已退出但拿不到退出码");
+
+            // 另一半分支：无句柄但目标进程活着 → check() 返回 None（仍在运行）。
+            let running = ExitWatch {
+                pid: std::process::id(),
+                handle: None,
+            };
+            assert_eq!(running.check(), None);
+        }
 
         #[test]
         fn game_window_title_is_an_exact_match() {
@@ -1616,3 +2263,62 @@ pub fn start_overlay_session(app: tauri::AppHandle, dll_path: String) -> Result<
         Err("覆盖层会话只支持 Windows x64".to_string())
     }
 }
+
+/// 光影包覆写还原是否已有监听线程在跑（防止连点启动按钮开出多个线程）。
+static SHADERPACK_RESTORE_WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 等待游戏进程出现的上限：Steam 拉起可能很慢，超时就直接还原（下次启动还会再覆写）。
+const SHADERPACK_RESTORE_WAIT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+/// 等待游戏退出的上限：兜底 24 小时后无条件还原。
+const SHADERPACK_RESTORE_EXIT_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+
+/// 光影包覆写后的还原监听：等游戏进程出现 → 等它退出 → 把 viewpoint-live.properties
+/// 整文件还原为启动前的备份。只在覆写真正写入后由启动命令调用；
+/// 启动器中途退出时，下次启动的覆写流程会先还原遗留备份。
+#[cfg(windows)]
+pub(crate) fn start_shaderpack_restore_watcher() {
+    use std::sync::atomic::Ordering;
+    if SHADERPACK_RESTORE_WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("pz-shaderpack-restore".to_string())
+        .spawn(|| {
+            let started = std::time::Instant::now();
+            let mut pid = None;
+            while started.elapsed().as_millis() < SHADERPACK_RESTORE_WAIT_TIMEOUT_MS as u128 {
+                if let Some((found, _)) = imp::find_game_candidate() {
+                    pid = Some(found);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            match pid {
+                Some(pid) => {
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(SHADERPACK_RESTORE_EXIT_TIMEOUT_SECS);
+                    while imp::process_alive(pid) && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                    // 退出瞬间 Viewpoint 可能还在收尾写文件，留一点宽限再还原。
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                None => crate::launcher_log::warn("光影包还原：等待游戏进程超时，先恢复原样。"),
+            }
+            let restored = crate::user_zomboid_directory()
+                .and_then(|zomboid_dir| crate::restore_viewpoint_live_backup_at(&zomboid_dir));
+            match restored {
+                Ok(Some(message)) => crate::launcher_log::info(&format!("光影包还原：{message}")),
+                Ok(None) => {}
+                Err(error) => crate::launcher_log::error(&format!("光影包还原失败：{error}")),
+            }
+            SHADERPACK_RESTORE_WATCHING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        SHADERPACK_RESTORE_WATCHING.store(false, Ordering::SeqCst);
+        crate::launcher_log::warn("光影包还原监听线程启动失败，游戏退出后要等下次启动才会还原。");
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn start_shaderpack_restore_watcher() {}
