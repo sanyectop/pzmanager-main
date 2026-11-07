@@ -2179,6 +2179,19 @@ body {
   max-width: 52rem;
 }
 
+/* 设置 › 通用：分区标题在卡片外，行放白卡片里、行间细分隔线（参考 PCL2 的分组布局）。 */
+.pz-settings-card {
+  background: #fff;
+  border: 1px solid var(--chakra-colors-gray-200, #e2e8f0);
+  border-radius: 0.5rem;
+  margin-top: 0.75rem;
+  overflow: hidden;
+}
+
+.pz-settings-row + .pz-settings-row {
+  border-top: 1px solid var(--chakra-colors-gray-100, #edf2f7);
+}
+
 /* 「百宝箱」（设置 › 百宝箱）：翻译器 / 下载器 / 控制台三张卡片。
    单列全宽，不做瀑布流：三件工具的内容长度差异大，并排时一列会被另一列拖着留白；
    每张卡片占满设置正文可用宽度，标题→说明→内容的阅读顺序也更稳定。 */
@@ -3095,6 +3108,16 @@ body {
   z-index: calc(var(--pz-z-menu) + 1) !important;
 }
 
+/* 多级子菜单的隐形悬停桥：悬停判定区向四周外扩 14px。
+   子菜单（尤其翻转展开到父菜单左侧时）与父菜单边缘之间存在焦点切换死角，
+   鼠标斜穿接缝上角会短暂同时离开两级菜单，Ark 判定离开就播隐藏动画、
+   指针落进子菜单又重播显示动画。外扩后指针全程算在菜单内容内，不再闪断。 */
+.pz-background-menu-layer::before {
+  content: "";
+  position: absolute;
+  inset: -14px;
+}
+
 .pz-background-menu-content {
   min-width: 220px;
   max-width: min(320px, calc(100vw - 1rem));
@@ -3272,6 +3295,15 @@ body {
   flex: 0 0 auto;
 }
 
+/* 文本按钮里的「到外部打开」箭头：与工坊「在 Steam 中打开」同一枚图标，
+   尺寸随字号走，紧跟在文字后面。 */
+.pz-external-arrow-icon {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  vertical-align: -0.05em;
+}
+
 .pz-workshop-list-meta {
   line-height: 1.35;
 }
@@ -3417,6 +3449,8 @@ body {
 
 .pz-toast-error .pz-toast-progress {
   background: var(--pz-danger);
+  /* 错误停留 8 秒（与 App.tsx 的自动退场定时一致）：进度条走完即消失 */
+  animation-duration: 8s;
 }
 
 @keyframes pz-toast-progress {
