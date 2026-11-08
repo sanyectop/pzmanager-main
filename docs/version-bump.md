@@ -1,11 +1,11 @@
 # 版本号修改清单（发版必读）
 
-> 最近一次适用：`1.0.261025 → 1.1.261025`（2026-10-25）。
+> 最近一次适用：`1.5.261107 → 1.6.261108`（2026-11-08）。
 > 以后每次改版本号，按本文档逐项过一遍，最后用文末的校验命令确认没有漏网之鱼。
 
 ## 版本命名规则
 
-- 格式：`{主版本}.{次版本}.{YYMMDD}`，例如 `1.1.261025`（2026-10-25 构建）。
+- 格式：`{主版本}.{次版本}.{YYMMDD}`，例如 `1.6.261108`（2026-11-08 构建）。
 - **配置文件里不带 `v` 前缀**（package.json / Cargo.toml / tauri.conf.json 都是裸 semver）；
   **`v` 前缀只出现在展示层**：关于页徽标（`v{appManifest.version}`）、发布页文案、DLL 日志首行。
 
@@ -55,20 +55,20 @@ grep -rn "1\.0\.261025" --include="*.json" --include="*.toml" --include="*.md" \
   | grep -v node_modules | grep -v "\.zcode" | grep -v "release/"
 
 # 2) lockfile 都已同步（三处都应输出新版本号）
-grep -m1 '"version": "1.1.261025"' package-lock.json
-grep -A1 'name = "pzmanager"'  src-tauri/Cargo.lock    | grep 1.1.261025
-grep -A1 'name = "pz_overlay"' overlay-dll/Cargo.lock  | grep 1.1.261025
+grep -m1 '"version": "1.6.261108"' package-lock.json
+grep -A1 'name = "pzmanager"'  src-tauri/Cargo.lock    | grep 1.6.261108
+grep -A1 'name = "pz_overlay"' overlay-dll/Cargo.lock  | grep 1.6.261108
 
 # 3) 新 DLL 内含版本字符串（Windows/Git Bash）
-grep -a -o "pz_overlay v1.1.261025" overlay-dll/target/x86_64-pc-windows-msvc/release/pz_overlay.dll
+grep -a -o "pz_overlay v1.6.261108" overlay-dll/target/x86_64-pc-windows-msvc/release/pz_overlay.dll
 
 # 4) 安装包 / 便携包文件名带新版本号
 ls release/
 ```
 
-运行期抽查：启动器「设置 › 关于」徽标显示 `v1.1.261025`；启动游戏后 `%TEMP%\overlay.log` 首行是
-`pz_overlay v1.1.261025 已加载（pid=…）`；`curl -sS https://pzmapi.sanyec.top/api/latest.json` 返回
-`"version": "1.1.261025"`，且「设置 › 关于 › 检查更新」提示已是最新。
+运行期抽查：启动器「设置 › 关于」徽标显示 `v1.6.261108`；启动游戏后 `%TEMP%\overlay.log` 首行是
+`pz_overlay v1.6.261108 已加载（pid=…）`；`curl -sS https://pzmapi.sanyec.top/api/latest.json` 返回
+`"version": "1.6.261108"`，且「设置 › 关于 › 检查更新」提示已是最新。
 
 ## 六、备注
 

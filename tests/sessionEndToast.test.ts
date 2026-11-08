@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  extractSuspectClass,
   formatGameStopDialogBody,
   GAME_LAUNCH_FAIL_TITLE,
   GAME_STOP_DIALOG_TITLE,
   shouldReportSessionEnd,
   stopReasonLabel,
 } from "../src/sessionEnd.ts";
-import { appSource, rustSource } from "./sourceText.ts";
+import { appSource, cssSource, rustSource } from "./sourceText.ts";
 
 function sessionEnd(
   phase: string,
@@ -79,18 +80,30 @@ test("stop reason labels cover the backend enum", () => {
   assert.equal(stopReasonLabel(null), "");
 });
 
-test("listener opens confirm dialogs for both stop phases instead of toasting", () => {
+test("listener routes stop events to the crash report and launch failures to the confirm dialog", () => {
   const listener = appSource.slice(
     appSource.indexOf('listen<OverlaySessionUpdate>("overlay-session"'),
     appSource.indexOf('listen<OverlayZbProgress>("overlay-zb-progress"'),
   );
-  // 两种停止事件都走模态框（showConfirm），不再 showToast。
+  // 停止事件走崩溃报告（正文在 openCrashReport 里由 formatGameStopDialogBody 排版）。
   assert.ok(listener.includes("shouldReportSessionEnd(update)"), "监听器应调用 shouldReportSessionEnd");
-  assert.ok(listener.includes("title: GAME_STOP_DIALOG_TITLE"), "停止事件应有专属模态框标题");
+  assert.ok(listener.includes("openCrashReport(update)"), "停止事件应打开崩溃报告");
+  assert.doesNotMatch(
+    listener,
+    /shouldReportSessionEnd[\s\S]*showConfirm\(/,
+    "停止事件不应再走通用确认框",
+  );
+  // 会话失败（注入失败等）保持确认框。
   assert.ok(listener.includes("title: GAME_LAUNCH_FAIL_TITLE"), "会话失败应有专属模态框标题");
-  assert.ok(listener.includes("formatGameStopDialogBody(update)"), "正文应拆分结果与诊断");
-  assert.ok(listener.includes("showConfirm({"), "报错应弹模态框");
+  assert.ok(listener.includes("showConfirm({"), "启动失败应弹确认框");
   assert.ok(!listener.includes("showToast("), "停止/失败报错不应再走 toast");
+  // 正文排版与标题常量都在 openCrashReport 里用到。
+  const opener = appSource.slice(
+    appSource.indexOf("function openCrashReport("),
+    appSource.indexOf("async function askConfirm("),
+  );
+  assert.ok(opener.includes("formatGameStopDialogBody(update)"), "正文应拆分结果与诊断");
+  assert.ok(opener.includes("title: GAME_STOP_DIALOG_TITLE"), "崩溃报告应使用停止弹窗标题");
 });
 
 test("console panel knows the game-exited phase", () => {
@@ -109,4 +122,62 @@ test("backend watches the game after the overlay session ends", () => {
   // 静默兜底有 console 停更守卫，不再把加载中的空档误判成加载完成。
   assert.match(rustSource, /fn idle_completion_with_console/);
   assert.match(rustSource, /不判定加载完成/);
+});
+
+test("extracts the suspect class only from missing-class diagnoses", () => {
+  // 注入项相关：后端点名缺失的类 → 拿去反查模组。
+  assert.equal(
+    extractSuspectClass(
+      "游戏进程已退出。 诊断：游戏缺少类 zombie.util.list.PZArrayList——几乎总是「游戏版本与模组不匹配」。",
+    ),
+    "zombie.util.list.PZArrayList",
+  );
+  // 模组自己的二进制名（含 $ 内部类）也完整取出。
+  assert.equal(
+    extractSuspectClass("游戏进程已退出。 诊断：游戏缺少类 dgveyes.DGVEReach$Inner 等。"),
+    "dgveyes.DGVEReach$Inner",
+  );
+  // 与注入项无关的诊断：内存不足 / 笼统异常 / 原生崩溃 / 外部结束都不反查。
+  assert.equal(
+    extractSuspectClass("游戏进程已退出。 诊断：游戏内存不足（OutOfMemoryError）。"),
+    null,
+  );
+  assert.equal(
+    extractSuspectClass("游戏进程已退出。 诊断：游戏在加载中抛出未处理异常后退出。"),
+    null,
+  );
+  assert.equal(
+    extractSuspectClass("游戏进程已退出。 诊断：游戏原生崩溃（EXCEPTION_ACCESS_VIOLATION）。"),
+    null,
+  );
+  assert.equal(extractSuspectClass("游戏进程已退出。"), null);
+});
+
+test("crash report lists suspect jar mods in a scrollable bottom section", () => {
+  // 停止事件交给崩溃报告弹窗，而不是通用确认框。
+  assert.match(appSource, /function openCrashReport\(/);
+  assert.match(appSource, /<CrashReportDialog /);
+  const listener = appSource.slice(
+    appSource.indexOf('listen<OverlaySessionUpdate>("overlay-session"'),
+    appSource.indexOf('listen<OverlayZbProgress>("overlay-zb-progress"'),
+  );
+  assert.ok(listener.includes("openCrashReport(update)"), "停止事件应打开崩溃报告");
+  // 诊断出注入项时才会反查，命令与返回类型都已接线。
+  assert.match(appSource, /find_jar_mods_with_injection_item/);
+  assert.match(rustSource, /pub async fn find_jar_mods_with_injection_item/);
+  // 弹窗底部清单：独立滚动区 + 选中态标签。
+  assert.match(cssSource, /\.pz-crash-report-suspect-list \{[^}]*max-height[^}]*overflow-y: auto/s);
+  assert.match(appSource, /pz-crash-report-suspect-list/);
+  assert.match(appSource, /没有找到引用该注入项的 JAR 模组/);
+});
+
+test("crash report dialog plays the shared exit animation on close", () => {
+  // 关闭走「先播 is-closing，动画结束再卸载」，与确认框同一套时长。
+  assert.match(appSource, /function closeCrashReport\(\)/);
+  assert.match(appSource, /setCrashReportClosing\(true\)/);
+  assert.match(appSource, /RESOURCE_DIALOG_EXIT_MS\);/);
+  assert.match(appSource, /closing=\{crashReportClosing\}/);
+  assert.match(appSource, /className=\{`pz-resource-file-overlay\$\{closing \? " is-closing" : ""\}`\}/);
+  // 重复关闭（Esc 连按 / 遮罩）在退场中不再重排定时器。
+  assert.match(appSource, /if \(!crashReport \|\| crashReportClosing\) \{\s*return;/);
 });

@@ -79,3 +79,17 @@ test("toolbox cards stack in one full-width column", () => {
   assert.match(flattened, /background:\s*transparent !important/);
   assert.match(flattened, /border:\s*0 !important/);
 });
+
+test("设置 › 通用 的分区卡片与百宝箱同一种亚克力材质", () => {
+  const toolboxCard = rule(".pz-toolbox-card");
+  const settingsCard = rule(".pz-settings-card");
+  // 半透明底牌、细描边、轻阴影三者与百宝箱卡片一致；纯白实心块是旧样式。
+  assert.match(settingsCard, /background:\s*var\(--pz-surface-card\)/);
+  assert.match(settingsCard, /border:\s*1px solid var\(--pz-line\)/);
+  assert.match(settingsCard, /box-shadow:\s*var\(--pz-shadow-sm\)/);
+  assert.doesNotMatch(settingsCard, /background:\s*#fff/);
+  assert.match(toolboxCard, /background:\s*var\(--pz-surface-card\)/);
+  // 圆角与留白保持设置卡片自己的节奏，只换材质。
+  assert.match(settingsCard, /border-radius:\s*0\.5rem/);
+  assert.match(settingsCard, /margin-top:\s*0\.75rem/);
+});

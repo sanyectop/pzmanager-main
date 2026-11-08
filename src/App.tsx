@@ -1,4 +1,4 @@
-import { Avatar, Badge, Box, Button, Checkbox, HStack, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea, VStack } from "@chakra-ui/react";
+import { Avatar, Badge, Box, Button, Checkbox, HStack, Image, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea, VStack } from "@chakra-ui/react";
 import { faAnglesDown, faAnglesUp, faCircleInfo, faClockRotateLeft, faCubes, faGear, faHouse, faImages, faPlus, faScrewdriverWrench, faSun, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { invoke } from "@tauri-apps/api/core";
@@ -70,6 +70,7 @@ import {
   FeedbackHistoryEntry,
   InstallResult,
   JarModBatchDecisionResult,
+  JarModInjectionMatch,
   JarModScanUpdate,
   LauncherLogTail,
   LauncherUserDataClearResult,
@@ -196,6 +197,7 @@ import {
   translateInBatches,
 } from "./app/utils";
 import {
+  extractSuspectClass,
   formatGameStopDialogBody,
   GAME_LAUNCH_FAIL_TITLE,
   GAME_STOP_DIALOG_TITLE,
@@ -203,11 +205,12 @@ import {
 } from "./sessionEnd";
 import { BackgroundMenu } from "./components/backgrounds";
 import { ConfirmDialog, type ConfirmRequest } from "./components/confirm";
+import { CrashReportDialog, type CrashReport } from "./components/crashReport";
 import { ExternalArrowIcon } from "./components/icons";
 import { SettingsRow, SettingsSection } from "./components/settingsCards";
 import { FastLaunchCacheStatusLine, FastLaunchWarningDialog } from "./components/fastLaunch";
 import { ShaderpackConfigDialog } from "./components/shaderpackConfig";
-import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWarningDialog, VersionStoreDriveDialog } from "./components/version";
+import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWarningDialog, VersionRenameDialog, VersionStoreDriveDialog } from "./components/version";
 import { NotificationConsole, TaskArrivalFlight, TaskCenterPanel, ToastViewport } from "./components/tasks";
 import { ResourceDownloadBrowser, WorkshopDropdown, WorkshopTagPicker, WorkshopTagSelectionSummary } from "./components/workshop";
 import { WindowTitlebar, useDialogAutoHeight } from "./components/shell";
@@ -241,6 +244,11 @@ function App() {
   const confirmResolveRef = useRef<((value: string) => void) | null>(null);
   // settle 后延迟卸载弹窗的定时器；新弹窗打开时要撤掉它（见 showConfirm）。
   const confirmExitTimerRef = useRef<number | null>(null);
+  // 游戏异常停止报告：正文 + 底部可疑 JAR 模组列表（异步反查结果回来后就地更新）。
+  const [crashReport, setCrashReport] = useState<CrashReport | null>(null);
+  // 与确认框同一套退场：先播 is-closing 动画，RESOURCE_DIALOG_EXIT_MS 后再卸载。
+  const [crashReportClosing, setCrashReportClosing] = useState(false);
+  const crashReportExitTimerRef = useRef<number | null>(null);
   const [notificationHistory, setNotificationHistory] = useState<NotificationEntry[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   /** 任务历史是否已从 tasks.json 装载完：装载前禁止落盘，防止空列表覆盖历史。 */
@@ -281,6 +289,8 @@ function App() {
   const [watchingGame, setWatchingGame] = useState(false);
   /** 游戏窗口是否已就绪（决定按钮左滑 + 停止按钮划入） */
   const [gameWindowReady, setGameWindowReady] = useState(false);
+  /** 上次切换/保存的版本名称（启动按钮下方一行）；null = 没有，不显示。 */
+  const [activeVersionLabel, setActiveVersionLabel] = useState<string | null>(null);
   // 实时镜像：事件监听器（挂载时注册、闭包不更新）用它判断窗口是否已就绪，
   // 避免闭包捕获到旧值导致重复起表 / 漏起表。
   const gameWindowReadyRef = useRef(false);
@@ -488,6 +498,10 @@ function App() {
     pack: ModPackRecord | null;
   } | null>(null);
   const [modPackNameDialogClosing, setModPackNameDialogClosing] = useState(false);
+  /** 「历史版本 › 重命名」弹窗：目标版本 + 退场动画 / 提交中状态。 */
+  const [versionRenameTarget, setVersionRenameTarget] = useState<VersionRecord | null>(null);
+  const [versionRenameClosing, setVersionRenameClosing] = useState(false);
+  const [versionRenaming, setVersionRenaming] = useState(false);
   const [modPackRenaming, setModPackRenaming] = useState(false);
   const [modVersionSearch, setModVersionSearch] = useState("");
   const [modVersionFilter, setModVersionFilter] = useState<ModVersionFilter>("all");
@@ -623,6 +637,8 @@ function App() {
   const [privacyConsentedVersion, setPrivacyConsentedVersion] = useState<string | null>(null);
   const [privacyBusy, setPrivacyBusy] = useState(false);
   const [showPrivacyConsent, setShowPrivacyConsent] = useState(false);
+  // 同意后先播退场动画，RESOURCE_DIALOG_EXIT_MS 后再卸载（与确认框 / 崩溃报告一致）。
+  const [privacyClosing, setPrivacyClosing] = useState(false);
   const [privacyAgreeCollect, setPrivacyAgreeCollect] = useState(false);
   const [privacyAgreeSend, setPrivacyAgreeSend] = useState(false);
   const [privacyTrapChecked, setPrivacyTrapChecked] = useState(false);
@@ -790,6 +806,44 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     });
   }
 
+  /** 游戏异常停止：先弹报告，诊断点名了注入项时再异步反查引用它的 JAR 模组。
+   *
+   *  反查要重新扫描一遍 jar（读所有 class 文件），可能耗时一两秒，所以弹窗先出、
+   *  结果回来后就地填进底部列表；用户关掉了弹窗（或已有新报告）就丢弃结果。 */
+  function openCrashReport(update: OverlaySessionUpdate) {
+    const suspectItem = extractSuspectClass(update.message);
+    // 上一份报告可能还在播退场动画：撤掉卸载定时器，直接复用同一个弹窗。
+    if (crashReportExitTimerRef.current !== null) {
+      window.clearTimeout(crashReportExitTimerRef.current);
+      crashReportExitTimerRef.current = null;
+    }
+    setCrashReportClosing(false);
+    setCrashReport({
+      title: GAME_STOP_DIALOG_TITLE,
+      body: formatGameStopDialogBody(update),
+      suspectItem,
+      suspects: null,
+      suspectsError: null,
+    });
+    if (!suspectItem || !isTauriRuntime()) {
+      return;
+    }
+    void invoke<JarModInjectionMatch[]>("find_jar_mods_with_injection_item", { item: suspectItem })
+      .then((matches) => {
+        setCrashReport((current) =>
+          current?.suspectItem === suspectItem ? { ...current, suspects: matches } : current,
+        );
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setCrashReport((current) =>
+          current?.suspectItem === suspectItem
+            ? { ...current, suspects: [], suspectsError: `查找 JAR 模组失败：${message}` }
+            : current,
+        );
+      });
+  }
+
   /** 常规二选一：确定（可标红）/取消。 */
   async function askConfirm(
     title: string,
@@ -822,6 +876,22 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       confirmExitTimerRef.current = null;
       setConfirmRequest(null);
       setConfirmClosing(false);
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
+  /** 关闭崩溃报告：先播退场动画（遮罩 + 面板同时淡出），动画结束再卸载。 */
+  function closeCrashReport() {
+    if (!crashReport || crashReportClosing) {
+      return;
+    }
+    setCrashReportClosing(true);
+    if (crashReportExitTimerRef.current !== null) {
+      window.clearTimeout(crashReportExitTimerRef.current);
+    }
+    crashReportExitTimerRef.current = window.setTimeout(() => {
+      crashReportExitTimerRef.current = null;
+      setCrashReport(null);
+      setCrashReportClosing(false);
     }, RESOURCE_DIALOG_EXIT_MS);
   }
 
@@ -1391,8 +1461,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         launcherUpdate?.updateAvailable &&
           launcherUpdate.latestVersion !== privacyConsentedVersion,
       );
-    setShowPrivacyConsent(needConsent);
-  }, [privacyConsentedVersion, launcherUpdate]);
+    // 同意后 needConsent 立刻变成 false，但退场动画还要播 170ms：真正卸载交给
+    // agreePrivacyPolicy 的定时器（privacyClosing），这里不能抢先关掉弹窗。
+    if (needConsent) {
+      setShowPrivacyConsent(true);
+      return;
+    }
+    if (!privacyClosing) {
+      setShowPrivacyConsent(false);
+    }
+  }, [privacyConsentedVersion, launcherUpdate, privacyClosing]);
 
   useEffect(() => {
     return () => {
@@ -3296,14 +3374,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         });
       }
       // 游戏停止事件（会话内 finished / 会话后 game-exited，除用户主动正常退出）：
-      // 模态框展示结果、停止原因与诊断，不自动消失。诊断文案由后端拼在消息里，
-      // 这里拆成两段展示。
+      // 弹崩溃报告；诊断点名了注入项时，底部再列出引用了它的 JAR 模组。
       if (shouldReportSessionEnd(update)) {
-        void showConfirm({
-          title: GAME_STOP_DIALOG_TITLE,
-          body: formatGameStopDialogBody(update),
-          actions: [{ label: "知道了", value: "ok" }],
-        });
+        openCrashReport(update);
       }
     }).then((cleanup) => { unlistenSession = cleanup; }).catch(() => undefined);
     void listen<OverlayZbProgress>("overlay-zb-progress", (event) => {
@@ -3333,6 +3406,23 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       .then((path) => setVersionStorePath(path))
       .catch(() => undefined);
   }, []);
+  // 启动页：显示「上次切换/保存的版本名称」。切回启动页时重读——
+  // 版本页的保存/还原改的是同一份 meta.json，启动页本身不触发版本操作。
+  useEffect(() => {
+    if (!isTauriRuntime() || activePage !== "launch") return;
+    let active = true;
+    void invoke<string | null>("get_active_version_label")
+      .then((label) => {
+        if (!active) return;
+        const trimmed = label?.trim() ?? "";
+        setActiveVersionLabel(trimmed ? trimmed : null);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [activePage]);
+
   // 「版本」顶层页：进入页面/切分页时读取对应数据（游戏版本与历史版本共用版本状态）。
   useEffect(() => {
     if (activePage !== "versions") return;
@@ -4192,7 +4282,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     try {
       await invoke("save_privacy_consent", { version });
       setPrivacyConsentedVersion(version);
-      setShowPrivacyConsent(false);
+      // 先播退场动画再卸载：直接 setShowPrivacyConsent(false) 会让整块遮罩瞬间消失。
+      setPrivacyClosing(true);
+      window.setTimeout(() => {
+        setShowPrivacyConsent(false);
+        setPrivacyClosing(false);
+      }, RESOURCE_DIALOG_EXIT_MS);
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
@@ -4222,6 +4317,8 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
     try {
       await invoke("clear_privacy_consent");
+      // 撤销后要重新弹出：清掉可能残留的退场状态，避免弹窗以淡出态出现。
+      setPrivacyClosing(false);
       setPrivacyConsentedVersion(null);
       showToast("已撤销隐私协议同意。", "info");
     } catch (error: unknown) {
@@ -4732,6 +4829,49 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       { versionId: record.id, force: true, restoreMods: true },
       "还原到这个版本",
     );
+  }
+
+  /** 打开重命名弹窗。只改名称，不涉及文件，所以不必等版本操作结束。 */
+  function renameVersion(record: VersionRecord) {
+    setVersionRenameClosing(false);
+    setVersionRenameTarget(record);
+  }
+
+  function closeVersionRenameDialog() {
+    if (!versionRenameTarget || versionRenameClosing) return;
+    setVersionRenameClosing(true);
+    window.setTimeout(() => {
+      setVersionRenameTarget(null);
+      setVersionRenameClosing(false);
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
+  /** 提交重命名：成功后刷新版本状态（历史列表与启动页的「上次版本」都读同一份）。 */
+  async function confirmRenameVersion(record: VersionRecord, label: string) {
+    if (versionRenaming) return;
+    const trimmed = label.trim();
+    if (!trimmed) {
+      showToast("版本名称不能为空。", "error");
+      return;
+    }
+    setVersionRenaming(true);
+    try {
+      const message = await invoke<string>("rename_version", {
+        versionId: record.id,
+        label: trimmed,
+      });
+      showToast(message, "success");
+      setVersionRenameClosing(true);
+      window.setTimeout(() => {
+        setVersionRenameTarget(null);
+        setVersionRenameClosing(false);
+      }, RESOURCE_DIALOG_EXIT_MS);
+      await refreshVersionStatus();
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setVersionRenaming(false);
+    }
   }
 
   async function convertVersion(record: VersionRecord) {
@@ -5810,9 +5950,15 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             variant="plain"
             width="100%"
           >
-            <Stack align="center" gap="0">
+            <Stack align="center" gap="0" width="100%">
               <Text className="pz-launch-card-title">启动游戏</Text>
               <Text className="pz-launch-card-subtitle">Project Zomboid</Text>
+              {/* 上次切换/保存的版本名称：没有版本记录时整行不渲染。 */}
+              {activeVersionLabel ? (
+                <Text className="pz-launch-card-version" title={activeVersionLabel}>
+                  {activeVersionLabel}
+                </Text>
+              ) : null}
             </Stack>
           </Button>
           <Button
@@ -8276,6 +8422,62 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           <Text color="gray.400" fontSize="xs" mt="2">还没有检查结果。</Text>
         )}
       </Box>
+      <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
+        <Text color="gray.800" fontSize="sm" fontWeight="700">开源项目参考</Text>
+        <Text color="gray.500" fontSize="xs" mt="0.5">
+          本启动器部分功能的实现思路参考了以下开源项目，感谢作者与社区的贡献。
+        </Text>
+        <Stack className="pz-about-projects" gap="1" mt="2">
+          {[
+            {
+              name: "ZombieBuddy",
+              icon: "/projects/zombiebuddy.png",
+              hint: "JAR 模组加载器与 Java 注入运行时",
+              url: "https://github.com/zed-0xff/ZombieBuddy",
+            },
+            {
+              name: "PCL2-Language",
+              icon: "/projects/pcl2-language.png",
+              hint: "Minecraft 启动器，下载源与内存清理功能参考",
+              url: "https://github.com/PCL-Community/PCL2-Language",
+            },
+            {
+              name: "SJMCL",
+              icon: "/projects/sjmcl.png",
+              hint: "Minecraft 启动器，界面与交互参考",
+              url: "https://github.com/UNIkeEN/SJMCL",
+            },
+          ].map((project) => (
+            <HStack
+              align="center"
+              className="pz-about-project-row"
+              gap="3"
+              key={project.url}
+              wrap="wrap"
+            >
+              <Image
+                alt={`${project.name} 图标`}
+                boxSize="1.75rem"
+                className="pz-about-project-icon"
+                flex="0 0 auto"
+                src={project.icon}
+              />
+              <Box flex="1" minW="200px">
+                <HStack align="center" gap="2" wrap="wrap">
+                  <Text color="gray.800" fontSize="sm" fontWeight="700">{project.name}</Text>
+                  <Text color="gray.500" fontSize="xs">{project.hint}</Text>
+                </HStack>
+                <Text color="gray.500" fontFamily="mono" fontSize="xs" mt="0.5" overflowWrap="anywhere">
+                  {project.url}
+                </Text>
+              </Box>
+              <Button onClick={() => void openUrl(project.url)} size="xs" variant="ghost">
+                打开 <ExternalArrowIcon />
+              </Button>
+            </HStack>
+          ))}
+        </Stack>
+      </Box>
     </Box>
   );
 
@@ -8730,6 +8932,15 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                                 转换为独立版本
                               </Button>
                             ) : null}
+                            <Button
+                              disabled={versionBusy}
+                              onClick={() => renameVersion(record)}
+                              size="xs"
+                              title="只改显示名，版本内容和还原范围不变"
+                              variant="outline"
+                            >
+                              重命名
+                            </Button>
                             {versionCanDelete(record, versionStatus.versions) ? (
                               <Button
                                 colorPalette="red"
@@ -9836,32 +10047,31 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               </Box>
             )}
             {developerMode && !jarModsLoading && (jarMods?.length ?? 0) > 0 && (
-              <HStack className="pz-jar-injection-search" gap="2" wrap="wrap">
-                <Input
-                  aria-label="搜索注入项"
-                  maxWidth="480px"
-                  onChange={(event) => setInjectionSearch(event.currentTarget.value)}
-                  placeholder="搜索注入项：如 zombie.util.list.PZArrayList"
-                  size="sm"
-                  value={injectionSearch}
-                />
-                {injectionSearchActive && (
-                  <Badge colorPalette="gray" size="sm">
-                    {injectionMatchedIds?.size ?? 0} 个模组拥有该注入项
-                  </Badge>
-                )}
-              </HStack>
-            )}
-            {developerMode && !jarModsLoading && (filteredJarMods?.length ?? 0) > 0 && (
               <Box className={`pz-jar-conflict-panel${jarConflictExpanded ? " is-expanded" : ""}`} role="status">
                 <Button className="pz-jar-conflict-summary" onClick={() => setJarConflictExpanded((expanded) => !expanded)} size="sm" variant="ghost" aria-expanded={jarConflictExpanded}>
                   <HStack gap="2" minW="0"><Box className="pz-jar-conflict-indicator" /><Text color="gray.800" fontSize="sm" fontWeight="700">已批准模组冲突分析</Text><Badge colorPalette="gray" size="sm">{approvedJarModCount} 个已批准模组</Badge></HStack>
                   <Text aria-hidden="true" className="pz-jar-conflict-chevron">{jarConflictExpanded ? "▴" : "▾"}</Text>
                 </Button>
+                {/* 注入项搜索放在面板内、折叠区之外：面板收起时也能用；按未过滤的
+                    模组列表决定是否显示，避免"搜不到 → 面板和搜索框一起消失"把人困住。 */}
+                <HStack className="pz-jar-conflict-search" gap="2" wrap="wrap">
+                  <Input
+                    aria-label="搜索注入项"
+                    onChange={(event) => setInjectionSearch(event.currentTarget.value)}
+                    placeholder="搜索注入项：如 zombie.util.list.PZArrayList"
+                    size="sm"
+                    value={injectionSearch}
+                  />
+                  {injectionSearchActive && (
+                    <Badge colorPalette="gray" size="sm">
+                      {injectionMatchedIds?.size ?? 0} 个模组拥有该注入项
+                    </Badge>
+                  )}
+                </HStack>
                 <Box className="pz-jar-conflict-details-shell" aria-hidden={!jarConflictExpanded}>
                   <Box className="pz-jar-conflict-details">
                     <Text color="gray.500" fontSize="xs">仅基于已批准模组中解析到的注入器和方法名推断，实际冲突还取决于目标类、注入点和加载顺序。</Text>
-                    {approvedJarModCount < 2 ? <Text color="gray.600" fontSize="xs" mt="2">已批准模组不足两个，暂时无法进行模组间冲突判断。</Text> : injectionSearchActive && visibleJarModConflicts.length === 0 ? <Text color="gray.600" fontSize="xs" mt="2">没有模组拥有该注入项，或拥有它的模组之间没有检测到冲突。</Text> : jarModConflicts.length === 0 ? <Text color="green.700" fontSize="xs" mt="2">当前没有检测到共享注入器和方法名的潜在冲突。</Text> : <Stack className="pz-jar-conflict-list" gap="1" mt="2">{visibleJarModConflicts.map((conflict) => <HStack align="start" className="pz-jar-conflict-row" gap="2" key={`${conflict.risk}-${conflict.annotation}-${conflict.methodName}-${conflict.modIds.join("-")}`}><Badge colorPalette={jarConflictRiskPalette(conflict.risk)} size="sm">{jarConflictRiskLabel(conflict.risk)}</Badge><Text color="gray.600" fontFamily="mono" fontSize="xs" overflowWrap="anywhere">{conflict.modIds[0]} ↔ {conflict.modIds[1]}：@{conflict.annotation} {conflict.methodName}</Text></HStack>)}</Stack>}
+                    {approvedJarModCount < 2 ? <Text color="gray.600" fontSize="xs" mt="2">已批准模组不足两个，暂时无法进行模组间冲突判断。</Text> : injectionSearchActive && visibleJarModConflicts.length === 0 ? <Text color="gray.600" fontSize="xs" mt="2">没有模组拥有该注入项，或拥有它的模组之间没有检测到冲突。</Text> : jarModConflicts.length === 0 ? <Text color="green.700" fontSize="xs" mt="2">当前没有检测到共享注入器和方法名的潜在冲突。</Text> : <Stack className="pz-jar-conflict-list" gap="1" mt="2">{visibleJarModConflicts.map((conflict) => <HStack align="start" className="pz-jar-conflict-row" gap="2" key={`${conflict.risk}-${conflict.annotation}-${conflict.methodName}-${conflict.modIds.join("-")}`}><Badge colorPalette={jarConflictRiskPalette(conflict.risk)} size="sm">{jarConflictRiskLabel(conflict.risk)}</Badge><Text color="gray.600" fontFamily="mono" fontSize="xs" minW="0" overflowWrap="anywhere">{conflict.modIds[0]} ↔ {conflict.modIds[1]}：@{conflict.annotation} {conflict.methodName}</Text></HStack>)}</Stack>}
                   </Box>
                 </Box>
               </Box>
@@ -10401,6 +10611,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         />
       ) : null}
 
+      {versionRenameTarget ? (
+        <VersionRenameDialog
+          busy={versionRenaming}
+          closing={versionRenameClosing}
+          initialLabel={versionRenameTarget.label}
+          onCancel={closeVersionRenameDialog}
+          onConfirm={(label) => void confirmRenameVersion(versionRenameTarget, label)}
+        />
+      ) : null}
+
       {versionDriveNoticeOpen ? (
         <VersionStoreDriveDialog
           closing={versionDriveNoticeClosing}
@@ -10491,7 +10711,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         <Portal>
           <Box
             aria-modal="true"
-            className="pz-privacy-overlay"
+            className={`pz-privacy-overlay${privacyClosing ? " is-closing" : ""}`}
             onMouseDown={(event) => {
               // 强制遮罩盖住了标题栏的拖动区：让遮罩空白处接管拖动。
               // 只在点到遮罩本身时启动（弹窗内容/iframe 里的选区不能被拖走窗口）。
@@ -10684,6 +10904,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       )}
       {confirmRequest ? (
         <ConfirmDialog closing={confirmClosing} onAction={settleConfirm} request={confirmRequest} />
+      ) : null}
+      {crashReport ? (
+        <CrashReportDialog closing={crashReportClosing} onClose={closeCrashReport} report={crashReport} />
       ) : null}
       <ToastViewport onClose={dismissToast} toasts={toasts} />
     </Box>

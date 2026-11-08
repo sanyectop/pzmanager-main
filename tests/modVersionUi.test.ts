@@ -376,7 +376,7 @@ test("privacy consent modal embeds the online policy at 75% with a browser link"
   // 必须只在点到遮罩本身时启动，否则在弹窗里选文本会把窗口拖走。
   assert.match(
     appSource,
-    /className="pz-privacy-overlay"[\s\S]{0,500}?event\.target !== event\.currentTarget[\s\S]{0,300}?startDragging\(\)/,
+    /className=\{`pz-privacy-overlay\$\{privacyClosing \? " is-closing" : ""\}`\}[\s\S]{0,500}?event\.target !== event\.currentTarget[\s\S]{0,300}?startDragging\(\)/,
   );
 });
 

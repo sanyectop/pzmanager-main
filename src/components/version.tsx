@@ -393,6 +393,92 @@ export function ModVersionDialog({
   );
 }
 
+/** 历史版本重命名弹窗：只改显示名（版本内容、依赖链、还原范围都不变）。
+    与整合包命名弹窗同一套外观；名称必填，回车确认、Esc/遮罩取消。 */
+export function VersionRenameDialog({
+  closing,
+  busy,
+  initialLabel,
+  onCancel,
+  onConfirm,
+}: {
+  closing: boolean;
+  busy: boolean;
+  initialLabel: string;
+  onCancel: () => void;
+  onConfirm: (label: string) => void;
+}) {
+  const [draft, setDraft] = useState(initialLabel);
+  const trimmed = draft.trim();
+  const confirmDisabled = busy || !trimmed;
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onCancel]);
+
+  return (
+    <Portal>
+      <Box
+        className={`pz-resource-file-overlay ${closing ? "is-closing" : ""}`}
+        onClick={onCancel}
+      >
+        <Box
+          aria-label="重命名版本"
+          aria-modal="true"
+          className="pz-resource-file-dialog pz-version-drive-dialog"
+          onClick={(event) => event.stopPropagation()}
+          role="dialog"
+        >
+          <HStack align="flex-start" gap="3" justify="space-between">
+            <Text color="gray.900" fontSize="lg" fontWeight="700">
+              重命名版本
+            </Text>
+            <Button aria-label="关闭重命名版本" onClick={onCancel} size="sm" variant="ghost">
+              ×
+            </Button>
+          </HStack>
+          <Text color="gray.600" fontSize="sm" mt="3">
+            只改这条版本的显示名，版本内容和还原范围不变。名称也会显示在启动页的启动按钮下方。
+          </Text>
+          <Input
+            aria-label="版本名称"
+            autoFocus
+            disabled={busy}
+            maxLength={60}
+            mt="3"
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !confirmDisabled) {
+                onConfirm(trimmed);
+              }
+            }}
+            placeholder="版本名称"
+            size="sm"
+            value={draft}
+          />
+          <HStack justify="flex-end" gap="2" mt="4" wrap="wrap">
+            <Button onClick={onCancel} size="sm" variant="ghost">取消</Button>
+            <Button
+              colorPalette="blue"
+              disabled={confirmDisabled}
+              onClick={() => onConfirm(trimmed)}
+              size="sm"
+            >
+              重命名
+            </Button>
+          </HStack>
+        </Box>
+      </Box>
+    </Portal>
+  );
+}
+
 /** 整合包命名 / 重命名弹窗：保存全部模组时可以起名，之后也能在列表里改名。
     `mode = "save"` 时名称可留空（后端回落「整合包 N」）；`mode = "rename"` 必填。 */
 export function ModPackNameDialog({

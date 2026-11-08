@@ -1419,6 +1419,20 @@ fn get_version_status() -> Result<versioning::VersionStatus, String> {
     )
 }
 
+/// 重命名一个历史版本（只改 meta.json 里的备注，不动快照文件）。
+#[tauri::command(async)]
+fn rename_version(version_id: String, label: String) -> Result<String, String> {
+    let store_path = configured_version_store_path()?;
+    versioning::rename_version(&store_path, &version_id, &label)
+}
+
+/// 启动页用：上次切换/保存的版本名称。只读 meta.json，不扫描游戏目录。
+#[tauri::command(async)]
+fn get_active_version_label() -> Result<Option<String>, String> {
+    let store_path = configured_version_store_path()?;
+    versioning::active_version_label(&store_path)
+}
+
 #[tauri::command(async)]
 fn get_version_store_path() -> Result<String, String> {
     Ok(configured_version_store_path()?
@@ -2944,6 +2958,7 @@ pub fn run() {
             save_steam_proxy,
             detect_steam_proxy,
             get_version_status,
+            get_active_version_label,
             get_version_store_path,
             save_version_system_drive_notice_dismissed,
             save_version_store_path,
@@ -2956,6 +2971,7 @@ pub fn run() {
             cancel_version_operation,
             delete_version,
             delete_version_through,
+            rename_version,
             save_version_include_mods,
             list_mod_version_targets,
             get_mod_version_status,
@@ -2992,6 +3008,7 @@ pub fn run() {
             read_jar_mod_poster,
             read_lua_mod_poster,
             start_zombie_buddy_jar_scan,
+            find_jar_mods_with_injection_item,
             list_lua_mods,
             set_lua_mod_enabled,
             set_lua_mods_enabled,

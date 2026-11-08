@@ -705,10 +705,116 @@ pub(crate) fn jar_scan_inputs() -> Vec<PathBuf> {
         .collect()
 }
 
+/// 「注入项反查」结果：一个引用了指定注入项（游戏类/补丁类/暴露类/注入方法）的 JAR 模组。
+///
+/// 崩溃诊断点名了某个类（如 42.22 移除的 `zombie.util.list.PZArrayList`）时，
+/// 崩溃弹窗用它列出最可能造成崩溃的模组，用户不用自己翻详情行排查。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JarModInjectionMatch {
+    pub(crate) id: String,
+    pub(crate) info_id: String,
+    pub(crate) workshop_id: Option<u64>,
+    pub(crate) jar_path: String,
+    pub(crate) disabled: bool,
+    pub(crate) decision: Option<bool>,
+    /// 命中的条目（引用到的游戏类 / 补丁类 / 暴露类 / 注入方法名），最多 [`INJECTION_MATCH_LIMIT`] 条。
+    pub(crate) matched: Vec<String>,
+}
+
+/// 每个模组最多带回多少条命中项——弹窗一行放不下更多，也没必要。
+const INJECTION_MATCH_LIMIT: usize = 6;
+
+/// 归一化注入项查询：去空白、小写、斜杠归一成点分（与前端 `jarModUi` 同一套语义，
+/// 支持 `zombie/util/list/PZArrayList` 和点分两种写法）。
+fn normalize_injection_query(query: &str) -> String {
+    query.trim().to_lowercase().replace('/', ".")
+}
+
+/// 单个模组是否拥有该注入项，返回命中的原始条目（去重、限量）。
+///
+/// 与前端 `jarModMatchesInjectionItem` 保持同一范围：游戏类引用、@Patch 类、
+/// @Exposer.LuaClass、注入方法名。前端用同一份扫描数据做搜索时结果一致。
+pub(crate) fn jar_mod_injection_matches(mod_info: &ScannedJarMod, query: &str) -> Vec<String> {
+    let normalized = normalize_injection_query(query);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let mut matched: Vec<String> = Vec::new();
+    let candidates = mod_info
+        .class_references
+        .iter()
+        .chain(mod_info.patch_classes.iter())
+        .chain(mod_info.lua_classes.iter())
+        .chain(mod_info.patch_methods.iter().map(|method| &method.method_name));
+    for value in candidates {
+        if matched.len() >= INJECTION_MATCH_LIMIT {
+            break;
+        }
+        if value.replace('/', ".").to_lowercase().contains(&normalized)
+            && !matched.iter().any(|existing| existing == value)
+        {
+            matched.push(value.clone());
+        }
+    }
+    matched
+}
+
+/// 崩溃弹窗用：按注入项反查 JAR 模组。
+///
+/// 重新扫描一遍 jar（与「刷新 JAR 列表」同一套解析：读每个 class 文件的注解与
+/// 常量池引用），所以放到阻塞线程池执行，避免卡住前端。崩溃弹窗只是次要通道，
+/// 这里不做缓存——与列表页的数据可能相差一次手动刷新，不影响定位。
+#[tauri::command]
+pub async fn find_jar_mods_with_injection_item(
+    item: String,
+) -> Result<Vec<JarModInjectionMatch>, String> {
+    let query = normalize_injection_query(&item);
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    #[cfg(windows)]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            let roots = jar_scan_inputs();
+            let mut matches: Vec<JarModInjectionMatch> = scan_jar_mods_at(&roots)
+                .into_iter()
+                .filter_map(|mod_info| {
+                    let matched = jar_mod_injection_matches(&mod_info, &query);
+                    (!matched.is_empty()).then(|| JarModInjectionMatch {
+                        id: mod_info.id,
+                        info_id: mod_info.info_id,
+                        workshop_id: mod_info.workshop_id,
+                        jar_path: mod_info.jar_path,
+                        disabled: mod_info.disabled,
+                        decision: mod_info.decision,
+                        matched,
+                    })
+                })
+                .collect();
+            // 启用的排前面：已禁用的模组根本不会加载，多半是排除项，不该占首屏。
+            matches.sort_by(|left, right| {
+                left.disabled
+                    .cmp(&right.disabled)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            matches
+        })
+        .await
+        .map_err(|error| format!("查找注入项失败: {error}"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = query;
+        Err("JAR 模组扫描只支持 Windows".to_string())
+    }
+}
+
 /// 扫描 JAR 模组（后台线程 + `jar-mod-scan-update` 事件推送）。
 ///
-/// `refresh_cache` 决定这次扫描要不要**重建极速启动的预扫描缓存**：
-/// * `true` —— 用户显式点了「刷新 JAR 列表」，缓存重建（这也是唯一会替换缓存的入口）；
+/// `refresh_cache` 决定这次扫描要不要**重建极速启动的预扫描缓存**：/// * `true` —— 用户显式点了「刷新 JAR 列表」，缓存重建（这也是唯一会替换缓存的入口）；
 /// * `false` —— 自动扫描（进「模组管理 › JAR」页面时触发）：**只有在缓存还不存在时**才写一份，
 ///   已有缓存一律保持不动 —— 玩家要的是"缓存稳定存在，什么时候换由我说了算"。
 #[tauri::command]

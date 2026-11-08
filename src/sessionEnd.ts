@@ -58,6 +58,18 @@ export const GAME_STOP_DIALOG_TITLE = "游戏已停止";
 /** 会话错误（error 阶段）模态框的标题。 */
 export const GAME_LAUNCH_FAIL_TITLE = "游戏未能正常启动";
 
+/** 从崩溃诊断里取出「缺失的类」——判断是否与注入项相关的依据。
+ *
+ *  后端文案（`diagnose_game_exit_from_console` / `exit_reason_diagnosis`）：
+ *  `诊断：游戏缺少类 zombie.util.list.PZArrayList——几乎总是「游戏版本与模组不匹配」…`
+ *  找不到（内存不足、笼统异常、原生崩溃）返回 null：那类问题与具体注入项无关，
+ *  不该按类名去反查模组。
+ */
+export function extractSuspectClass(message: string): string | null {
+  const match = /游戏缺少类\s+([A-Za-z0-9_.$]+)/.exec(message);
+  return match ? match[1] : null;
+}
+
 /** 把会话结果消息拆成「结果」与「诊断：…」两段（后端把诊断拼在 reason 后面）。 */
 function splitDiagnosis(message: string): { result: string; diagnosis: string } {
   const separator = " 诊断：";

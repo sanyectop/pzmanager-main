@@ -43,6 +43,9 @@ const TRASH_DIR: &str = "trash";
 const TMP_DIR: &str = "tmp";
 const META_FILE: &str = "meta.json";
 const META_FORMAT: u32 = 1;
+/// 版本名称上限（字符数）：与前端输入框的 `maxLength` 保持一致。
+/// 名称会出现在历史列表、启动按钮下方和还原提示里，太长会把布局撑坏。
+const RENAME_LABEL_MAX_CHARS: usize = 60;
 
 const DELTA_MAGIC: &[u8; 4] = b"PZD1";
 const CHUNK_MIN: usize = 16 * 1024;
@@ -753,6 +756,50 @@ fn save_meta(store: &Path, meta: &VersionStoreMeta) -> Result<(), String> {
 /// 只读版本链元数据。模组列表用它统计版本数，不会触发目录扫描。
 pub fn read_versions(store: &Path) -> Result<Vec<VersionRecord>, String> {
     Ok(load_meta(store)?.versions)
+}
+
+/// 重命名（改备注）一个版本：只改 meta.json 里的 `label`，不动任何快照文件。
+///
+/// 名称会出现在历史列表、还原提示和启动页的「上次版本」行，所以在这里统一
+/// 去空白并限长（按字符截断，不会切断汉字）；空名称直接拒绝。
+pub fn rename_version(store: &Path, version_id: &str, label: &str) -> Result<String, String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("版本名称不能为空。".to_string());
+    }
+    let label: String = label.chars().take(RENAME_LABEL_MAX_CHARS).collect();
+    let mut meta = load_meta(store)?;
+    let Some(record) = meta
+        .versions
+        .iter_mut()
+        .find(|record| record.id == version_id)
+    else {
+        return Err(format!("版本不存在：{version_id}"));
+    };
+    if record.label == label {
+        return Ok(format!("版本名称没有变化：「{label}」。"));
+    }
+    record.label = label.clone();
+    save_meta(store, &meta)?;
+    Ok(format!("已将版本重命名为「{label}」。"))
+}
+
+/// 当前「上次切换 / 保存」的版本名称（启动页在启动按钮下方展示）。
+///
+/// 保存（完整/增量）与还原都会把 `active_version_id` 指向对应记录，所以这里只读
+/// meta.json，不扫描游戏目录。没有记录、指向已删除的版本、或备注为空时返回 None
+/// （前端据此不显示那一行）。
+pub fn active_version_label(store: &Path) -> Result<Option<String>, String> {
+    let meta = load_meta(store)?;
+    let Some(active_id) = meta.active_version_id.as_deref() else {
+        return Ok(None);
+    };
+    Ok(meta
+        .versions
+        .iter()
+        .find(|record| record.id == active_id)
+        .map(|record| record.label.trim().to_string())
+        .filter(|label| !label.is_empty()))
 }
 
 /// 把模组版本引用写进某个游戏大版本的记录里。游戏快照/捕获完成后再回填，
@@ -3067,6 +3114,103 @@ mod tests {
 
     fn ignore_progress(_: ProgressEvent) -> Result<(), String> {
         Ok(())
+    }
+
+    fn version_record(id: &str, label: &str) -> VersionRecord {
+        VersionRecord {
+            id: id.to_string(),
+            parent_id: None,
+            steam_build_id: Some("42.22.2".to_string()),
+            branch: "stable".to_string(),
+            base_type: "full".to_string(),
+            created_at: 1,
+            root_hash: format!("hash-{id}"),
+            metadata_hash: String::new(),
+            file_count: 1,
+            total_bytes: 1,
+            label: label.to_string(),
+            change_log: None,
+            mod_versions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn active_version_label_follows_last_saved_or_restored_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path();
+
+        // 还没有任何版本元数据：不显示。
+        assert_eq!(active_version_label(store).unwrap(), None);
+
+        let mut meta = VersionStoreMeta::default();
+        meta.versions = vec![version_record("first", "第一份"), version_record("second", "第二份")];
+
+        // 保存第二份后 active 指它。
+        meta.active_version_id = Some("second".to_string());
+        save_meta(store, &meta).unwrap();
+        assert_eq!(active_version_label(store).unwrap().as_deref(), Some("第二份"));
+
+        // 还原到第一份（restore 同样改写 active_version_id）。
+        meta.active_version_id = Some("first".to_string());
+        save_meta(store, &meta).unwrap();
+        assert_eq!(active_version_label(store).unwrap().as_deref(), Some("第一份"));
+
+        // active 指向已被删除的版本：当作没有。
+        meta.active_version_id = Some("missing".to_string());
+        save_meta(store, &meta).unwrap();
+        assert_eq!(active_version_label(store).unwrap(), None);
+
+        // 备注是空白：不显示空行。
+        meta.active_version_id = Some("first".to_string());
+        meta.versions[0].label = "   ".to_string();
+        save_meta(store, &meta).unwrap();
+        assert_eq!(active_version_label(store).unwrap(), None);
+    }
+
+    #[test]
+    fn rename_version_updates_only_the_label() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path();
+        let mut meta = VersionStoreMeta::default();
+        meta.versions = vec![version_record("first", "第一份"), version_record("second", "第二份")];
+        meta.active_version_id = Some("second".to_string());
+        save_meta(store, &meta).unwrap();
+
+        let message = rename_version(store, "first", "  开局全模组  ").unwrap();
+        assert!(message.contains("开局全模组"), "{message}");
+
+        let meta = load_meta(store).unwrap();
+        assert_eq!(meta.versions[0].label, "开局全模组", "名称去空白后落盘");
+        // 其它字段与另一个版本不受影响。
+        assert_eq!(meta.versions[0].root_hash, "hash-first");
+        assert_eq!(meta.versions[1].label, "第二份");
+        assert_eq!(meta.active_version_id.as_deref(), Some("second"));
+
+        // 名称不变时给一句「没有变化」，不报错。
+        let message = rename_version(store, "first", "开局全模组").unwrap();
+        assert!(message.contains("没有变化"), "{message}");
+
+        // 空名称 / 只空白：拒绝。
+        assert!(rename_version(store, "first", "   ").is_err());
+        // 版本不存在：报错，且不写盘。
+        assert!(rename_version(store, "missing", "x").is_err());
+        assert_eq!(load_meta(store).unwrap().versions[0].label, "开局全模组");
+    }
+
+    #[test]
+    fn rename_version_caps_label_length_by_chars() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path();
+        let mut meta = VersionStoreMeta::default();
+        meta.versions = vec![version_record("first", "first")];
+        save_meta(store, &meta).unwrap();
+
+        // 超长名称按字符截断（60 个汉字不能切坏成乱码）。
+        let long = "汉".repeat(RENAME_LABEL_MAX_CHARS + 20);
+        rename_version(store, "first", &long).unwrap();
+        let label = load_meta(store).unwrap().versions[0].label.clone();
+        assert_eq!(label.chars().count(), RENAME_LABEL_MAX_CHARS);
+        assert!(label.chars().all(|character| character == '汉'));
     }
 
     fn pseudo_random(length: usize, seed: u64) -> Vec<u8> {

@@ -3213,7 +3213,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "pzmanager"
-version = "1.5.261107-devbuild.1793985621"
+version = "1.6.261108"
 dependencies = [
  "dll-syringe",
  "futures-util",

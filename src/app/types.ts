@@ -166,6 +166,18 @@ export type JarModScanUpdate = {
   error: string | null;
 };
 
+/** 崩溃诊断注入项反查结果（命令 `find_jar_mods_with_injection_item`）。 */
+export type JarModInjectionMatch = {
+  id: string;
+  infoId: string;
+  workshopId: number | null;
+  jarPath: string;
+  disabled: boolean;
+  decision: boolean | null;
+  /** 命中的条目（游戏类引用 / 补丁类 / 暴露类 / 注入方法名）。 */
+  matched: string[];
+};
+
 export type WorkshopBackgroundScanUpdate = {
   scanId: number;
   status: "started" | "item" | "completed" | "error";

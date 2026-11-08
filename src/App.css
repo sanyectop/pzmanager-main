@@ -1253,6 +1253,21 @@ body {
   margin-top: 0.25rem;
 }
 
+/* 启动按钮第三行：上次切换/保存的版本名称。
+   比副标题更小更淡，长名字截断成一行（完整名称在 title 里），
+   不会把按钮撑高或顶出卡片。 */
+.pz-launch-card-version {
+  max-width: 100%;
+  margin-top: 0.15rem;
+  overflow: hidden;
+  color: var(--pz-text-on-dark);
+  font-size: var(--pz-font-xs);
+  line-height: 1.3;
+  opacity: 0.78;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 启动时长：卡片底部预留的一行，居中排在「强制结束 Project Zomboid」下面，
    和副标题各占一行——原来贴在右下角会和副标题挤在同一高度上、压住字脚。 */
 .pz-launch-startup-timing {
@@ -2180,12 +2195,16 @@ body {
 }
 
 /* 设置 › 通用：分区标题在卡片外，行放白卡片里、行间细分隔线（参考 PCL2 的分组布局）。 */
+/* 设置 › 通用：分区卡片与「百宝箱」同一种材质——半透明白底透出壁纸、
+   细描边 + 轻阴影，不再是一块纯白实心块。底牌令牌两处一致（--pz-surface-card），
+   改一处效果另一处也要跟着看，别单独改回 #fff。 */
 .pz-settings-card {
-  background: #fff;
-  border: 1px solid var(--chakra-colors-gray-200, #e2e8f0);
+  background: var(--pz-surface-card);
+  border: 1px solid var(--pz-line);
   border-radius: 0.5rem;
   margin-top: 0.75rem;
   overflow: hidden;
+  box-shadow: var(--pz-shadow-sm);
 }
 
 .pz-settings-row + .pz-settings-row {
@@ -2629,6 +2648,22 @@ body {
   border: 1px solid var(--pz-line);
   border-radius: var(--pz-radius-sm);
   background: var(--pz-surface-card);
+}
+
+/* 设置 › 关于 › 开源项目参考：每行一个项目（图标 + 名称/说明/地址 + 打开）。
+   行之间用细线分隔，和反馈记录行同一套卡片材质。 */
+.pz-about-project-row {
+  padding: 0.45rem 0.1rem;
+}
+
+.pz-about-project-row + .pz-about-project-row {
+  border-top: 1px solid var(--pz-line);
+}
+
+/* 图标保持等比、圆角裁切（三个项目图标都是方形透明底）。 */
+.pz-about-project-icon {
+  border-radius: var(--pz-radius-sm);
+  object-fit: contain;
 }
 
 .pz-translator-textarea {
@@ -3947,6 +3982,31 @@ body {
   font-size: var(--pz-font-base);
 }
 
+/* 注入项搜索：面板内部的第二行，与上方折叠标题拉开一点距离。
+   输入框不铺纯白底（白框压在告警黄底上太跳），用卡片表面色 + 告警描边，
+   聚焦时用告警环——和整块面板的语义（"分析工具"）一致。 */
+.pz-jar-conflict-search {
+  margin-top: 0.5rem;
+}
+
+.pz-jar-conflict-search input {
+  flex: 1 1 16rem;
+  width: min(100%, 26rem);
+  min-width: 12rem;
+  background: var(--pz-surface-card) !important;
+  border-color: var(--pz-tint-warning-line) !important;
+}
+
+.pz-jar-conflict-search input:focus {
+  border-color: var(--pz-tint-warning-text) !important;
+  box-shadow: var(--pz-ring-warning);
+}
+
+/* 折叠区展开后与搜索行之间留白；收起时 grid 行高为 0，padding 不可见。 */
+.pz-jar-conflict-details-shell[aria-hidden="false"] .pz-jar-conflict-details {
+  padding-top: 0.55rem;
+}
+
 .pz-jar-conflict-details-shell {
   display: grid;
   grid-template-rows: 0fr;
@@ -3965,8 +4025,8 @@ body {
 
 /* 冲突清单：一屏最多显示 12 行，更长的清单在这块区域内滚动，
    不再把面板撑到上万像素（25 个已批准模组实测会产生 402 条冲突）。
-   行高与行距在这里下发、清单高度由它们算出，改行高或行数都不会算错；
-   想调整一屏行数只改 --pz-jar-conflict-visible-rows。 */
+   行高与行距在这里下发、清单高度由它们算出——但模组名经常长到换行，
+   所以这个高度只是"单行行数"的近似：多行行数会少一些，滚动照旧。 */
 .pz-jar-conflict-list {
   --pz-jar-conflict-visible-rows: 12;
   --pz-jar-conflict-row-height: 1.375rem;
@@ -3980,8 +4040,23 @@ body {
   scrollbar-gutter: stable;
 }
 
+/* 行必须不参与收缩：列表是带 max-height 的 flex 列，行上有显式 min-height 会
+   抵消 flex 的自动最小高度保护——内容超高时行被压到单行高，换行后的第二行
+   溢出压到下一行（实测字体重合）。让行保持内容高度，超出部分交给列表滚动。 */
 .pz-jar-conflict-row {
+  flex: 0 0 auto;
   min-height: var(--pz-jar-conflict-row-height);
+}
+
+/* 行内文字列要能缩到 0 宽度才会换行（flex 项默认 min-width: auto 以内容为下限，
+   长模组名会把行撑宽而不是折行）；风险徽标不参与收缩，避免被压扁截字。 */
+.pz-jar-conflict-row > p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pz-jar-conflict-row > span {
+  flex: 0 0 auto;
 }
 
 /* 支持库页的安装项分组：三行（.pz-support-option）统一放在一个面板里，
@@ -5220,6 +5295,17 @@ body {
   overflow-y: auto;
 }
 
+/* 同意后关闭：与确认框 / 崩溃报告同一套退场动画（遮罩淡出 + 面板缩小淡出）。
+   退出阶段遮罩不再吃点击，避免 170ms 里误触到下面的界面。 */
+.pz-privacy-overlay.is-closing {
+  animation: pz-resource-overlay-out var(--pz-dur-exit) ease both;
+  pointer-events: none;
+}
+
+.pz-privacy-overlay.is-closing .pz-privacy-dialog {
+  animation: pz-resource-dialog-out var(--pz-dur-exit) ease both;
+}
+
 /* 强制遮罩（隐私协议）打开时标题栏被压暗，不再需要实时背景模糊。 */
 .pz-window-titlebar.pz-titlebar-static {
   backdrop-filter: none;
@@ -5262,6 +5348,45 @@ body {
   width: min(480px, 100%);
   max-height: min(70vh, 560px);
   overflow-y: auto;
+}
+
+/* 崩溃报告弹窗：比确认框宽一点，正文与底部模组列表分区。
+   弹窗本身不滚动（flex 列 + overflow hidden 继承自 .pz-resource-file-dialog），
+   正文和清单各自滚动——否则清单会被长诊断推到底部之外。 */
+.pz-crash-report-dialog {
+  width: min(560px, 100%);
+  max-height: min(78vh, 620px);
+}
+
+.pz-crash-report-body {
+  min-height: 0;
+  margin-top: 0.5rem;
+  overflow-y: auto;
+}
+
+.pz-crash-report-suspects {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--pz-line);
+}
+
+/* 一屏最多约 6 行，更长的清单在框内滚动。 */
+.pz-crash-report-suspect-list {
+  max-height: 9.5rem;
+  overflow-y: auto;
+  padding-right: 0.3rem;
+  scrollbar-gutter: stable;
+}
+
+.pz-crash-report-suspect-row {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--pz-line);
+  border-radius: var(--pz-radius-sm);
+  background: var(--pz-surface-card);
 }
 
 /* 「窗口 › 原生窗口标题栏」：开启后系统标题栏接管拖动与窗口按钮，

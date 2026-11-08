@@ -6,6 +6,7 @@ use super::{
     discover_mod_info_files, fast_launch_cache_matches, fast_launch_cache_mods_at,
     force_zombie_buddy_policy_at_paths, game_path_from_library, import_shaderpack_to,
     install_locations_from_libraries, install_zombie_buddy_at_paths,
+    jar_mod_injection_matches,
     is_builtin_background_path, jar_scan_candidates, jar_scan_inputs,
     library_paths_from_config, list_viewpoint_shaderpacks_at, list_viewpoint_shots_at,
     steam_screenshots_directory_at,
@@ -423,9 +424,55 @@ fn scanned_jar(id: &str, decision: Option<bool>, disabled: bool) -> ScannedJarMo
     }
 }
 
+/// 注入项反查：崩溃诊断点名的类 → 拥有它的模组（弹窗底部列表的数据源）。
 #[test]
-fn builds_fast_launch_cache_from_approved_and_enabled_mods_only() {
-    let scanned = vec![
+fn injection_item_lookup_matches_all_patch_sources() {
+    let mut mod_info = scanned_jar("DGV", Some(true), false);
+    mod_info.class_references = vec![
+        "zombie.util.list.PZArrayList".to_string(),
+        "zombie.network.fields.hit.HitInfo".to_string(),
+    ];
+    mod_info.patch_classes = vec!["dgveyes/Patch_Foo".to_string()];
+    mod_info.lua_classes = vec!["dgveyes/DGVEReach".to_string()];
+    mod_info.patch_methods = vec![JavaPatchMethod {
+        annotation: "Inject".to_string(),
+        method_name: "onProneToggled".to_string(),
+    }];
+
+    // 游戏类引用命中，点分/斜杠/大小写三种写法等价。
+    assert_eq!(
+        jar_mod_injection_matches(&mod_info, "zombie.util.list.PZArrayList"),
+        vec!["zombie.util.list.PZArrayList"]
+    );
+    assert_eq!(
+        jar_mod_injection_matches(&mod_info, "zombie/util/list/PZArrayList"),
+        vec!["zombie.util.list.PZArrayList"]
+    );
+    assert_eq!(
+        jar_mod_injection_matches(&mod_info, "  PZARRAYLIST "),
+        vec!["zombie.util.list.PZArrayList"]
+    );
+    // 补丁类 / 暴露类（内部名，斜杠形式）同样能反查到。
+    assert_eq!(
+        jar_mod_injection_matches(&mod_info, "dgveyes.Patch_Foo"),
+        vec!["dgveyes/Patch_Foo"]
+    );
+    assert_eq!(
+        jar_mod_injection_matches(&mod_info, "DGVEReach"),
+        vec!["dgveyes/DGVEReach"]
+    );
+    // 注入方法名也在范围内。
+    assert_eq!(
+        jar_mod_injection_matches(&mod_info, "onProneToggled"),
+        vec!["onProneToggled"]
+    );
+    // 不相关 / 空查询不命中。
+    assert!(jar_mod_injection_matches(&mod_info, "zombie.ai.StateMachine").is_empty());
+    assert!(jar_mod_injection_matches(&mod_info, "   ").is_empty());
+}
+
+#[test]
+fn builds_fast_launch_cache_from_approved_and_enabled_mods_only() {    let scanned = vec![
         scanned_jar("Viewpoint", Some(true), false),
         scanned_jar("Pending", None, false),
         scanned_jar("Rejected", Some(false), false),

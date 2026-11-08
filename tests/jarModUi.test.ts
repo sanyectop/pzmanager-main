@@ -7,7 +7,7 @@ import {
   jarScanStatusLabel,
   toggleJarModExpansion,
 } from "../src/jarModUi.ts";
-import { appSource } from "./sourceText.ts";
+import { appSource, cssSource } from "./sourceText.ts";
 
 test("formats the four-frame jar scan status animation", () => {
   assert.equal(jarScanStatusLabel(0, 1, 4), "后台扫描中：1 / 4");
@@ -158,15 +158,35 @@ test("empty injection query keeps every mod", () => {
   );
 });
 
-test("injection search box sits above the conflict panel and filters both views", () => {
-  // 搜索框挂在冲突面板正上方，共用扫描完成后的可见性门控。
+test("injection search box lives inside the conflict panel and filters both views", () => {
   const searchIndex = appSource.indexOf('aria-label="搜索注入项"');
-  const panelIndex = appSource.indexOf('pz-jar-conflict-panel${jarConflictExpanded');
+  const panelIndex = appSource.indexOf("pz-jar-conflict-panel${jarConflictExpanded");
+  const detailsIndex = appSource.indexOf('className="pz-jar-conflict-details-shell"');
   assert.ok(searchIndex >= 0, "应存在注入项搜索框");
-  assert.ok(panelIndex > searchIndex, "搜索框应在冲突分析面板上方");
+  assert.ok(panelIndex >= 0 && detailsIndex > panelIndex, "应存在冲突分析面板及其折叠区");
+  assert.ok(searchIndex > panelIndex, "搜索框应在冲突分析面板内部");
+  assert.ok(searchIndex < detailsIndex, "搜索框应在折叠区之前：面板收起时也能用");
+  assert.match(appSource, /className="pz-jar-conflict-search"/);
+  // 面板按未过滤的模组列表显示：搜索无命中时搜索框不会跟面板一起消失，用户清得掉关键词。
+  const panelGate = appSource.slice(Math.max(0, panelIndex - 260), panelIndex);
+  assert.ok(panelGate.includes("(jarMods?.length ?? 0) > 0"), panelGate);
+  assert.ok(!panelGate.includes("filteredJarMods"), panelGate);
   // 列表与冲突对都要按注入项过滤。
   assert.match(appSource, /filterJarModsByInjectionItem\(/);
   assert.match(appSource, /visibleJarModConflicts/);
   // 详情行展示游戏类引用，命中结果可核对。
   assert.match(appSource, /游戏类引用：/);
+});
+
+test("conflict rows keep their wrapped height inside the scroll list", () => {
+  // 列表是带 max-height 的 flex 列：行若参与收缩会被压成单行高、换行文字压到下一行。
+  const rowRule = cssSource.slice(
+    cssSource.indexOf(".pz-jar-conflict-row {"),
+    cssSource.indexOf("}", cssSource.indexOf(".pz-jar-conflict-row {")),
+  );
+  assert.match(rowRule, /flex: 0 0 auto/, rowRule);
+  // 文字列可缩到 0 宽度才换行，长模组名不会把行撑宽。
+  assert.match(cssSource, /\.pz-jar-conflict-row > p \{[^}]*min-width: 0/s);
+  // 风险徽标不被压缩截字。
+  assert.match(cssSource, /\.pz-jar-conflict-row > span \{[^}]*flex: 0 0 auto/s);
 });
