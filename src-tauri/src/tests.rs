@@ -226,8 +226,11 @@ fn persists_background_and_memory_settings() {
         silent_memory_cleanup: true,
         silent_memory_cleanup_threshold: 85,
         clean_memory_on_launch: true,
+        pause_music_on_launch: true,
+        shaderpack_override_enabled: false,
         aggressive_memory_clean: true,
         wallpaper_effect: None,
+        launch_music: None,
         steam_relay_mode: Some("relay".to_string()),
         steam_relay_base: Some("https://mirror.example/steam".to_string()),
         steam_proxy: Some("socks5://127.0.0.1:1080".to_string()),
@@ -4005,3 +4008,37 @@ fn read_pack_shader_meta_merges_source_scan_and_properties() {
 }
 
 
+
+/// 本机体检（默认忽略）：启动路径上的检测必须都是"有界"的。
+/// 2026-11-08 启动卡死的根因是 `project_zomboid_running()`（枚举窗口 + 同步取标题）
+/// 被无响应窗口拖住 —— 它已从启动路径移除，这里只校验替代方案（进程快照）够快。
+#[test]
+#[ignore]
+fn real_world_launch_guard_timings() {
+    // 三处检测都必须是"有界"的：tasklist 在本机实测 60–110 秒，已全部换成进程快照。
+    let quick = std::time::Instant::now();
+    let running = super::game_running_quick();
+    let quick_elapsed = quick.elapsed();
+    println!("game_running_quick() = {running}, 耗时 {quick_elapsed:?}");
+
+    let t1 = std::time::Instant::now();
+    let steam = super::steam_process_running();
+    let steam_elapsed = t1.elapsed();
+    println!("steam_process_running() = {steam}, 耗时 {steam_elapsed:?}");
+
+    let t2 = std::time::Instant::now();
+    let slow = super::project_zomboid_running();
+    let slow_elapsed = t2.elapsed();
+    println!("project_zomboid_running() = {slow}, 耗时 {slow_elapsed:?}");
+
+    for (label, elapsed) in [
+        ("game_running_quick", quick_elapsed),
+        ("steam_process_running", steam_elapsed),
+        ("project_zomboid_running", slow_elapsed),
+    ] {
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "{label} 必须先有界（实测 {elapsed:?}）：它会被启动/版本操作路径同步调用"
+        );
+    }
+}

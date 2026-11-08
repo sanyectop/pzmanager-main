@@ -1426,11 +1426,23 @@ body {
   transition: none;
 }
 
+/* 启动页里仍然允许选中的控件：输入框、文本域、可编辑区域。 */
+.pz-app-content-launch input,
+.pz-app-content-launch textarea,
+.pz-app-content-launch [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .pz-app-content-launch {
   position: relative;
   width: 100%;
   height: 100%;
   min-height: 0;
+  /* 启动页禁止选中文字 / 拖选元素：整页是"壁纸 + 控件"的展示面，误拖选会出现一片蓝色选区。
+     输入类控件单独放开（下面的白名单），否则启动参数输入框没法选词。 */
+  user-select: none;
+  -webkit-user-select: none;
   background: transparent;
   overflow: hidden;
 }
@@ -3428,6 +3440,11 @@ body {
   background: var(--pz-success);
 }
 
+/* 常驻提示（无需开发者模式）：背景音乐自动播放等。 */
+.pz-toast-notice .pz-toast-indicator {
+  background: var(--pz-accent);
+}
+
 .pz-toast-error .pz-toast-indicator {
   background: var(--pz-danger);
 }
@@ -3809,6 +3826,182 @@ body {
 .pz-launch-workshop-info-id {
   color: var(--pz-text-on-dark-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 内置壁纸主界面的背景音乐播放器：复用工坊胶囊的展开按钮与展开菜单（类名共用），
+   这里只覆盖面板宽度与内部控件样式。 */
+.pz-launch-music {
+  /* 比工坊信息胶囊多一行音量条 */
+  --pz-workshop-info-height: 4.6rem;
+  /* 播放键与静音键统一尺寸：同一枚圆形按钮，图标字号也一致 */
+  --pz-music-btn-size: 1.35rem;
+  --pz-music-btn-glyph: 0.6rem;
+}
+
+.pz-launch-music.is-open .pz-launch-music-details {
+  max-width: min(20rem, calc(100vw - 3rem));
+}
+
+.pz-launch-music-volume-row {
+  min-width: 0;
+  margin-top: 0.16rem;
+}
+
+.pz-launch-music-mute {
+  display: grid !important;
+  width: var(--pz-music-btn-size);
+  min-width: var(--pz-music-btn-size);
+  height: var(--pz-music-btn-size);
+  min-height: var(--pz-music-btn-size) !important;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0 !important;
+  /* 与播放键同一枚圆环按钮：尺寸、描边、图标字号全部一致，只是底色透明更低调 */
+  border: 1px solid var(--pz-line-glass) !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  color: var(--pz-text-on-dark) !important;
+  /* emoji 字形比 "▶" 视觉上小一圈，单独放大一点补偿 */
+  font-size: 0.72rem !important;
+  line-height: 1;
+}
+
+.pz-launch-music-mute:hover {
+  background: var(--pz-glass-dark-hover) !important;
+  color: var(--pz-text-inverse) !important;
+}
+
+/* 音量滑条：细轨 + 主题强调色，跨浏览器统一外观。 */
+.pz-launch-music-volume {
+  width: 100%;
+  min-width: 3.5rem;
+  height: 0.28rem;
+  flex: 1 1 auto;
+  appearance: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  cursor: pointer;
+  outline: none;
+}
+
+.pz-launch-music-volume::-webkit-slider-thumb {
+  width: 0.62rem;
+  height: 0.62rem;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--pz-accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.pz-launch-music-volume::-moz-range-thumb {
+  width: 0.62rem;
+  height: 0.62rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--pz-accent);
+}
+
+.pz-launch-music-volume:focus-visible {
+  outline: 2px solid var(--pz-line-glass);
+  outline-offset: 3px;
+}
+
+.pz-launch-music-volume-value {
+  flex: 0 0 auto;
+  min-width: 1.5rem;
+  color: var(--pz-text-on-dark-muted) !important;
+  font-size: var(--pz-font-2xs) !important;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pz-launch-music-title {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 0.4rem;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.pz-launch-music-label {
+  flex: 0 0 auto;
+  color: var(--pz-text-on-dark-muted) !important;
+  font-size: var(--pz-font-2xs) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.12em;
+}
+
+.pz-launch-music-track {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pz-text-inverse) !important;
+  font-size: var(--pz-font-xs) !important;
+  text-overflow: ellipsis;
+}
+
+.pz-launch-music-controls {
+  min-width: 0;
+  margin-top: 0.28rem;
+}
+
+.pz-launch-music-play {
+  display: grid !important;
+  width: var(--pz-music-btn-size);
+  min-width: var(--pz-music-btn-size);
+  height: var(--pz-music-btn-size);
+  min-height: var(--pz-music-btn-size) !important;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0 !important;
+  border: 1px solid var(--pz-line-glass) !important;
+  border-radius: 999px !important;
+  background: var(--pz-glass-dark) !important;
+  color: var(--pz-text-on-dark) !important;
+  font-size: var(--pz-music-btn-glyph) !important;
+  line-height: 1;
+}
+
+.pz-launch-music-play:hover {
+  background: var(--pz-glass-dark-hover) !important;
+  color: var(--pz-text-inverse) !important;
+}
+
+.pz-launch-music-progress {
+  position: relative;
+  height: 0.28rem;
+  min-width: 3.5rem;
+  flex: 1 1 auto;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  cursor: pointer;
+}
+
+.pz-launch-music-progress:focus-visible {
+  outline: 2px solid var(--pz-line-glass);
+  outline-offset: 2px;
+}
+
+.pz-launch-music-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--pz-accent);
+  transition: width 120ms linear;
+}
+
+.pz-launch-music-time {
+  flex: 0 0 auto;
+  color: var(--pz-text-on-dark-muted) !important;
+  font-size: var(--pz-font-2xs) !important;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 音源元素本身不参与布局。 */
+.pz-launch-music audio {
+  display: none;
 }
 
 .pz-steam-id-toggle {
@@ -4983,6 +5176,15 @@ body {
   inset: 0;
   mix-blend-mode: soft-light;
   transition: opacity 1s linear, background 1s linear;
+}
+
+/* 四季粒子层（春絮 / 夏雨 / 秋叶 / 冬雪）：画在壁纸与光照之上、UI 之下，不接收鼠标事件。 */
+.pz-seasonal-wallpaper-particles {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 /* 中心死黑提亮：screen 叠在最上层，和 a(1).html 的 .center-boost 一致 */

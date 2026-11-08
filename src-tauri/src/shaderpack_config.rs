@@ -1732,12 +1732,46 @@ pub(crate) fn apply_shaderpack_overrides_at_dir(
     })
 }
 
+/// 廉价的游戏运行检测：只走进程快照（toolhelp），**不枚举窗口**。
+///
+/// 启动路径上不能用 `project_zomboid_running()`：它为了识别 wsappx 这类改名进程会
+/// EnumWindows 并逐个 `GetWindowTextW`，目标窗口无响应时会同步阻塞很久（实测把启动
+/// 命令卡住数分钟）。覆写只是"锦上添花"，这里宁可少判一次，也不能拖住启动。
+pub(crate) fn game_running_quick() -> bool {
+    #[cfg(windows)]
+    {
+        crate::overlay::imp::find_game_process().is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// 启动命令里调用：读真实目录与覆写文件执行覆写；记日志，失败不阻断启动。
 /// 返回是否真的写入了（决定要不要启动还原监听线程）。
 pub(crate) fn apply_shaderpack_overrides_for_launch() -> Result<bool, String> {
     let zomboid_dir = user_zomboid_directory()?;
+    // 默认不接管：只有用户在光影包页确认过「启动器接管光影管理」后才覆写。
+    let enabled = load_app_settings_at(&app_settings_path()?)
+        .map(|settings| settings.shaderpack_override_enabled)
+        .unwrap_or(false);
+    if !enabled {
+        // 关掉接管后如果还留着上次的备份（上次启动崩了没还原），顺手恢复游戏原逻辑。
+        if let Ok(Some(message)) = restore_viewpoint_live_backup_at(&zomboid_dir) {
+            launcher_log::info(&format!("光影包接管已关闭，{message}"));
+        }
+        return Ok(false);
+    }
     let state = load_shaderpack_overrides()?;
-    let outcome = apply_shaderpack_overrides_at_dir(&zomboid_dir, &state.packs, project_zomboid_running());
+    // 没有覆写配置就直接返回：**绝不能**再做"游戏是否在运行"的检测。
+    // 那条检测（`project_zomboid_running`）会枚举窗口并同步取窗口标题，遇到无响应窗口
+    // 会长时间卡住；2026-11-08 实测它把整条启动命令卡在「启动配置已写入」之后，
+    // 游戏根本没被拉起（前端 invoke 也永远等不到返回）。
+    if state.packs.is_empty() {
+        return Ok(false);
+    }
+    let outcome = apply_shaderpack_overrides_at_dir(&zomboid_dir, &state.packs, game_running_quick());
     match &outcome {
         Ok(outcome) if outcome.applied => {
             launcher_log::info(&format!(

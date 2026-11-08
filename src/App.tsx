@@ -205,6 +205,8 @@ import {
 } from "./sessionEnd";
 import { BackgroundMenu } from "./components/backgrounds";
 import { ConfirmDialog, type ConfirmRequest } from "./components/confirm";
+import { LaunchMusicPlayer } from "./components/launchMusic";
+import { launchTimeoutMessage, shouldBreakLaunchWait } from "./gameProcess";
 import { CrashReportDialog, type CrashReport } from "./components/crashReport";
 import { ExternalArrowIcon } from "./components/icons";
 import { SettingsRow, SettingsSection } from "./components/settingsCards";
@@ -287,6 +289,10 @@ function App() {
   const [launchCooldown, setLaunchCooldown] = useState(false);
   /** 是否正在轮询游戏进程/窗口 */
   const [watchingGame, setWatchingGame] = useState(false);
+  /** 点下「启动游戏」的时刻：15 秒熔断从这一刻算，命令卡住也能报超时。 */
+  const launchClickedAtRef = useRef<number | null>(null);
+  /** 本次启动是否已经熔断过：用于忽略晚到的成功回包，避免重复提示。 */
+  const launchBreakerFiredRef = useRef(false);
   /** 游戏窗口是否已就绪（决定按钮左滑 + 停止按钮划入） */
   const [gameWindowReady, setGameWindowReady] = useState(false);
   /** 上次切换/保存的版本名称（启动按钮下方一行）；null = 没有，不显示。 */
@@ -374,6 +380,15 @@ function App() {
   );
   const [silentMemoryCleanupSaving, setSilentMemoryCleanupSaving] = useState(false);
   const [cleanMemoryOnLaunch, setCleanMemoryOnLaunch] = useState(false);
+  /** 「启动器接管光影管理」：关闭时启动游戏不覆写光影配置文件（默认关）。 */
+  const [shaderpackOverrideEnabled, setShaderpackOverrideEnabled] = useState(false);
+  const [shaderpackOverrideSaving, setShaderpackOverrideSaving] = useState(false);
+  /** 「启动游戏自动暂停音乐」：启动完成（输出启动用时）时暂停内置壁纸背景音乐。 */
+  const [pauseMusicOnLaunch, setPauseMusicOnLaunch] = useState(true);
+  const [pauseMusicOnLaunchSaving, setPauseMusicOnLaunchSaving] = useState(false);
+  /** 每次"启动完成"自增一次，播放器据此暂停（0 = 从未触发）。 */
+  const [musicPauseSignal, setMusicPauseSignal] = useState(0);
+  const pauseMusicOnLaunchRef = useRef(true);
   const [cleanMemoryOnLaunchSaving, setCleanMemoryOnLaunchSaving] = useState(false);
   /** 激进内存清理：常规清理之外再清系统工作集 / 文件缓存 / 已修改页 / 待机缓存（系统级步骤需要管理员）。 */
   const [aggressiveMemoryClean, setAggressiveMemoryClean] = useState(false);
@@ -2513,6 +2528,67 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
+  /** 「启动游戏自动暂停音乐」：只落盘；暂停动作由启动完成事件触发。 */
+  async function updatePauseMusicOnLaunch(enabled: boolean) {
+    const previous = pauseMusicOnLaunch;
+    setPauseMusicOnLaunch(enabled);
+    pauseMusicOnLaunchRef.current = enabled;
+    setPauseMusicOnLaunchSaving(true);
+    try {
+      await invoke("save_pause_music_on_launch", { enabled });
+    } catch (error: unknown) {
+      setPauseMusicOnLaunch(previous);
+      pauseMusicOnLaunchRef.current = previous;
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setPauseMusicOnLaunchSaving(false);
+    }
+  }
+
+  /** 「启动器接管光影管理」：只落盘；启动时由后端判断要不要覆写。 */
+  async function updateShaderpackOverrideEnabled(enabled: boolean): Promise<boolean> {
+    const previous = shaderpackOverrideEnabled;
+    setShaderpackOverrideEnabled(enabled);
+    setShaderpackOverrideSaving(true);
+    try {
+      await invoke("save_shaderpack_override_enabled", { enabled });
+      return true;
+    } catch (error: unknown) {
+      setShaderpackOverrideEnabled(previous);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+      return false;
+    } finally {
+      setShaderpackOverrideSaving(false);
+    }
+  }
+
+  /** 光影包页点「配置」：默认不接管，先弹框说明并征得同意才打开配置面板。 */
+  async function openShaderpackConfig(packName: string) {
+    if (shaderpackOverrideEnabled) {
+      setShaderpackConfigPack(packName);
+      return;
+    }
+    const choice = await showConfirm({
+      title: "使用启动器接管光影管理？",
+      body: `启用后：
+· 启动游戏前，把这里配置的光影参数写入 Viewpoint 的配置文件（只改该光影包的参数）；
+· 游戏退出后自动还原文件。
+
+注意：接管期间在游戏内修改光影包配置不会保存——退出时会被还原成启动前的状态。
+
+随时可在「设置 › 通用 › 启动器接管光影管理」关闭，关闭后不再覆写配置文件，完全交回游戏管理。`,
+      actions: [
+        { label: "启用并继续", value: "enable" },
+        { label: "取消", value: "cancel" },
+      ],
+      cancelValue: "cancel",
+    });
+    if (choice !== "enable") return;
+    if (await updateShaderpackOverrideEnabled(true)) {
+      setShaderpackConfigPack(packName);
+    }
+  }
+
   /**
    * 激进内存清理：只落盘 + 通知后端。之后的手动清理、静默清理、启动前清理都会带上系统级步骤
    * （全系统工作集 + 文件缓存 + 已修改页 + 待机列表），静默清理在游戏运行时仍只用常规模式。
@@ -2997,6 +3073,11 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               : DEFAULT_SILENT_MEMORY_PERCENT,
           );
           setCleanMemoryOnLaunch(Boolean(settingsResult.value.cleanMemoryOnLaunch));
+          // 缺失 = 开（老设置文件没有这个字段）
+          const pauseMusic = settingsResult.value.pauseMusicOnLaunch !== false;
+          setPauseMusicOnLaunch(pauseMusic);
+          pauseMusicOnLaunchRef.current = pauseMusic;
+          setShaderpackOverrideEnabled(Boolean(settingsResult.value.shaderpackOverrideEnabled));
           setAggressiveMemoryClean(Boolean(settingsResult.value.aggressiveMemoryClean));
           setBackgroundPath(settingsResult.value.backgroundPath);
           setWallpaperEffectSettings(normalizeWallpaperEffectSettings(settingsResult.value.wallpaperEffect));
@@ -3395,6 +3476,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     void listen<StartupTiming>("startup-timing", (event) => {
       setStartupResult(event.payload);
       setStartupStartedAt(null);
+      // 「启动用时 XXXs」出现的这一刻：按设置暂停内置壁纸背景音乐。
+      if (pauseMusicOnLaunchRef.current) {
+        setMusicPauseSignal((value) => value + 1);
+      }
     }).then((cleanup) => { unlisten = cleanup; }).catch(() => undefined);
     return () => unlisten?.();
   }, []);
@@ -4050,8 +4135,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     // 是正常状态，必须继续轮询）和「游戏出现过又退了」（可以停轮询）。缺了它，
     // 点下启动的第一拍就会把轮询停掉——窗口永远检测不到，启动计时不会弹出。
     let sawRunning = false;
-    const watchStart = Date.now();
+    // 熔断只触发一次：setWatchingGame(false) 生效前 interval 还可能再跑一拍。
+    let breached = false;
+    // 起点优先用"点下启动"的时刻：命令卡住时 effect 可能晚于点击启动很多秒。
+    const watchStart = launchClickedAtRef.current ?? Date.now();
     const poll = async () => {
+      if (breached) return;
       try {
         const status = await invoke<{
           running: boolean;
@@ -4095,10 +4184,26 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           setStartupStartedAt(null);
           return;
         }
-        // 游戏一直没出现（Steam 启动失败 / 被拦截）：90 秒兜底，别让轮询空转；
-        // 正常路径下覆盖层会话 60 秒就会先报「等待游戏进程超时」。
-        if (!sawRunning && Date.now() - watchStart > 90_000) {
+        // 启动熔断：点下启动后 15 秒还没见过游戏进程，就中断本次等待。
+        // 比覆盖层会话自己的 60 秒超时更早，用户不用干等着，失败后可以立刻重试。
+        if (
+          shouldBreakLaunchWait({
+            sawRunning,
+            elapsedMs: Date.now() - watchStart,
+          })
+        ) {
+          breached = true;
+          launchBreakerFiredRef.current = true;
           setWatchingGame(false);
+          setGamePid(null);
+          setStartupStartedAt(null);
+          // 命令可能还挂在后端：把"启动中"的界面状态一起解开，按钮立刻可重试。
+          setLaunchingGame(false);
+          // 覆盖层会话线程还在等，这里只收界面：查一下 Steam 是否在跑，让提示指向正确的排查方向。
+          void invoke<boolean>("steam_process_running")
+            .then((steamRunning) => showToast(launchTimeoutMessage(steamRunning), "error"))
+            .catch(() => showToast(launchTimeoutMessage(false), "error"));
+          return;
         }
       } catch {
         // 轮询失败忽略，下一拍继续
@@ -4142,6 +4247,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       }
       const normalizedLaunchArguments = launchArguments.map((argument) => argument.trim()).filter(Boolean);
       const joinedLaunchArguments = joinLaunchArguments(normalizedLaunchArguments);
+      // 计时从"点下按钮"开始，而不是等命令返回：后端如果卡在写启动配置之后的某一步，
+      // invoke 永远不返回，之前的状态机连等待都不会进入，15 秒熔断也不会触发
+      //（2026-11-08 实测：启动命令卡死时界面毫无反馈，也报不出超时）。
+      launchClickedAtRef.current = Date.now();
+      launchBreakerFiredRef.current = false;
+      setOverlaySession(null);
+      setOverlayZbProgress(null);
+      setStartupResult(null);
+      setStartupStartedAt(null);
+      gameWindowReadyRef.current = false;
+      setGameWindowReady(false);
+      setGamePid(null);
+      setWatchingGame(true);
       await invoke("launch_project_zomboid", {
         launchArgs: normalizedLaunchArguments,
         memoryMb: memoryLimitMb,
@@ -4149,17 +4267,14 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         // 由它在 ProjectZomboid64.json / .bat 里写 `-agentpath:`（开关关闭时后端会把它摘掉）。
         fastLaunchDllPath: overlayDllPath.trim() || null,
       });
-      setOverlaySession(null);
-      setOverlayZbProgress(null);
-      setStartupResult(null);
-      setStartupStartedAt(null);
-      // 点击后禁用 3 秒，并开始每 0.3s 轮询游戏进程/窗口（复用注入 DLL 的检测逻辑）。
-      setLaunchCooldown(true);
-      window.setTimeout(() => setLaunchCooldown(false), 3000);
-      gameWindowReadyRef.current = false;
-      setGameWindowReady(false);
-      setGamePid(null);
-      setWatchingGame(true);
+      // 熔断已经报过超时：这条命令晚到的成功不再提示（游戏确实起来了也不重复打扰），
+      // 但覆盖层仍然挂上，免得晚到的游戏丢掉注入。
+      const breached = launchBreakerFiredRef.current;
+      if (!breached) {
+        // 点击后禁用 3 秒；轮询已在上面开始，这里只补冷却与状态复位。
+        setLaunchCooldown(true);
+        window.setTimeout(() => setLaunchCooldown(false), 3000);
+      }
       let overlayNote = "未开启游戏加载进度监控。";
       if (overlayDllPath.trim()) {
         try {
@@ -4170,10 +4285,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           overlayNote = `无法监控游戏加载进度：${error instanceof Error ? error.message : String(error)}`;
         }
       }
-      showToast(
-        `游戏已启动。内存限制 ${formatMemoryMb(memoryLimitMb)}${joinedLaunchArguments ? `，启动参数 ${joinedLaunchArguments}` : ""}。${overlayNote}`,
-        "success",
-      );
+      if (!breached) {
+        showToast(
+          `游戏已启动。内存限制 ${formatMemoryMb(memoryLimitMb)}${joinedLaunchArguments ? `，启动参数 ${joinedLaunchArguments}` : ""}。${overlayNote}`,
+          "success",
+        );
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       showToast(message, "error");
@@ -5712,6 +5829,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   const launchContent = (
     <>
       <AcrylicGlass backgroundUrl={backgroundUrl} seasonal={wallpaperSeasonal} effect={wallpaperEffect} />
+      {wallpaperSeasonal && (
+        <LaunchMusicPlayer
+          onMusicStarted={(message) => showToast(message, "notice")}
+          pauseSignal={musicPauseSignal}
+        />
+      )}
       {selectedWorkshopBackground && (
         <Box
           className={`pz-launch-workshop-info${workshopBackgroundInfoOpen ? " is-open" : ""}`}
@@ -5865,6 +5988,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 onSetWallpaperTime={setWallpaperTime}
                 onToggleWallpaperPin={toggleWallpaperPin}
                 onToggleWallpaperAutoContrast={toggleWallpaperAutoContrast}
+                pauseMusicOnLaunch={pauseMusicOnLaunch}
+                onTogglePauseMusicOnLaunch={() => {
+                  if (!pauseMusicOnLaunchSaving) {
+                    void updatePauseMusicOnLaunch(!pauseMusicOnLaunch);
+                  }
+                }}
                 workshopBackgrounds={workshopBackgrounds}
                 workshopLoading={workshopBackgroundLoading}
                 workshopScanProgress={workshopBackgroundScanProgress}
@@ -6641,7 +6770,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               ) : null}
               <Button
                 colorPalette="blue"
-                onClick={() => setShaderpackConfigPack(pack.name)}
+                onClick={() => void openShaderpackConfig(pack.name)}
                 size="sm"
                 variant="outline"
               >
@@ -7231,6 +7360,25 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             checked={developerMode}
             disabled={developerModeSaving}
             onCheckedChange={(details) => void updateDeveloperMode(details.checked)}
+          >
+            <Switch.HiddenInput />
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Root>
+        </SettingsRow>
+        <SettingsRow
+          label="启动器接管光影管理"
+          hint={
+            "开启后，启动游戏前会把光影包页配置的参数写入 Viewpoint 配置文件，游戏退出后自动还原；" +
+            "接管期间游戏内对光影包设置的修改不会保存。关闭后不再覆写任何配置文件，光影完全由游戏管理。"
+          }
+        >
+          <Switch.Root
+            aria-label="启动器接管光影管理"
+            checked={shaderpackOverrideEnabled}
+            disabled={shaderpackOverrideSaving}
+            onCheckedChange={(details) => void updateShaderpackOverrideEnabled(details.checked)}
           >
             <Switch.HiddenInput />
             <Switch.Control>

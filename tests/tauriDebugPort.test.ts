@@ -31,10 +31,10 @@ test("configures the Tauri development WebView remote debugging port as 10001", 
     "npm run build:overlay && tauri dev --config src-tauri/tauri.dev.conf.json",
   );
   assert.equal(packageJson.scripts["build:overlay"], "cargo build --release --target x86_64-pc-windows-msvc --manifest-path overlay-dll/Cargo.toml");
-  assert.equal(
-    debugConfig.app.windows[0]?.additionalBrowserArgs,
-    "--remote-debugging-port=10001",
-  );
+  // 调试端口 + 允许无手势自动播放（背景音乐默认播放需要它，WebView2 默认按手势策略拦截）
+  const debugArgs = debugConfig.app.windows[0]?.additionalBrowserArgs ?? "";
+  assert.match(debugArgs, /--remote-debugging-port=10001/);
+  assert.match(debugArgs, /--autoplay-policy=no-user-gesture-required/);
 });
 
 test("runs Vite and points Tauri at port 10002", () => {

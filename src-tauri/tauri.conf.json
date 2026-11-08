@@ -18,7 +18,8 @@
         "height": 560,
         "minWidth": 840,
         "minHeight": 560,
-        "decorations": false
+        "decorations": false,
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required"
       }
     ],
     "security": {

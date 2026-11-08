@@ -7,6 +7,9 @@
 <meta name="description" content="PZManager 用户文档:快速上手、启动设置、支持库与模组管理、资源中心、设置详解与常见问题。" />
 <link rel="icon" type="image/png" href="pzm-logo.png" />
 <link rel="apple-touch-icon" href="pzm-logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <script>
   // 嵌入模式(?wall=true):隐藏顶栏 / 目录 / 页脚,只渲染正文,供启动器内嵌展示。
   if (new URLSearchParams(location.search).get("wall") === "true") {
@@ -53,7 +56,7 @@
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    font-family: "Inter", "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
     line-height: 1.75;
     -webkit-font-smoothing: antialiased;
     transition: background 0.3s ease, color 0.3s ease;
@@ -227,7 +230,41 @@
     padding-top: 28px;
   }
   html[data-wall="true"] { scroll-padding-top: 24px; }
-  </style>
+  
+  /* ---------- 页眉：Steam 资源加速站（状态点 + 跳转） ---------- */
+  .nav-status {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 10px 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--text-dim);
+    font-size: 13px;
+    white-space: nowrap;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .nav-status:hover { color: var(--text); border-color: var(--accent); }
+  .nav-status-dot {
+    width: 7px; height: 7px; flex: 0 0 auto;
+    border-radius: 50%; background: #9ca3af;
+  }
+  /* 在线：绿色 + 缓慢扩散的光环（常驻动效，不抢注意力） */
+  .nav-status-dot[data-state="online"] { background: #22c55e; animation: statusPulse 2.6s ease-out infinite; }
+  .nav-status-dot[data-state="degraded"] { background: #f59e0b; }
+  .nav-status-dot[data-state="offline"] { background: #ef4444; }
+  .nav-status-dot[data-state="checking"] { animation: statusBlink 1.4s ease-in-out infinite; }
+  @keyframes statusPulse {
+    0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45); }
+    70% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  }
+  @keyframes statusBlink { 50% { opacity: 0.35; } }
+  /* 窄屏只保留状态圆点，避免把导航挤爆 */
+  @media (max-width: 960px) {
+    .nav-status { padding: 6px; border-radius: 999px; }
+    .nav-status-text { display: none; }
+  }
+</style>
 </head>
 <body>
 
@@ -238,6 +275,10 @@
       <a href="index.html#features">功能</a>
       <a href="index.html#screenshots">界面</a>
       <a href="https://github.com/sanyectop/pzmanager-main" target="_blank" rel="noopener" title="GitHub"><i class="fa-brands fa-github"></i> GitHub</a>
+      <a class="nav-status" href="https://pzmlan.sanyec.top/" id="relayStatus" target="_blank" rel="noopener" title="Steam 资源加速站 · 检测中" aria-label="Steam 资源加速站，正在检测状态，点击打开">
+        <span class="nav-status-dot" data-state="checking" aria-hidden="true"></span>
+        <span class="nav-status-text">Steam 加速站</span>
+      </a>
       <a href="https://ifdian.net/a/sanyee" target="_blank" rel="noopener" title="爱发电 · 叁葉" class="afdian-link"><i class="fa-solid fa-mug-hot"></i> 爱发电</a>
       <button class="theme-btn" id="themeBtn" title="切换主题"><i class="fa-solid fa-moon"></i></button>
       <a href="index.html#downloads">下载</a>
@@ -308,7 +349,7 @@
       <p>在启动详情弹层里逐条编辑 Java 启动参数,可增删。默认参数为 <code>-agentlib:zbNative --</code>(配合 ZombieBuddy 模组加载器使用,请勿随意删除)。</p>
 
       <h3>启动与停止</h3>
-      <p>点击「启动游戏」后,按钮会进入 3 秒冷却并开始检测游戏进程;窗口就绪后按钮变为「停止游戏进程」。游戏自行退出时状态自动复位。</p>
+      <p>点击「启动游戏」后,按钮会进入 3 秒冷却并开始检测游戏进程;窗口就绪后按钮变为「停止游戏进程」。游戏自行退出时状态自动复位。按钮下方会显示上次切换或保存的版本名称(没有版本记录时不显示)。</p>
 
       <h3>启动背景</h3>
       <p>启动设置弹层里可以选择内置背景、导入的自定义图片,或创意工坊模组自带的 <code>title*.png</code> 背景(四宫格拼接)。选中工坊背景时会显示来源模组信息。</p>
@@ -346,10 +387,13 @@
       <p>「模组管理 › Lua」里可以调整加载顺序(依赖前置)、批量启用/禁用。顺序即生效优先级。</p>
 
       <h3>JAR 模组</h3>
-      <p>「模组管理 › JAR」依赖 ZombieBuddy。启动器会扫描模组注解、分级提示冲突,由你逐个审批启用。</p>
+      <p>「模组管理 › JAR」依赖 ZombieBuddy。启动器会扫描模组注解、分级提示冲突,由你逐个审批启用。展开任一模组可以看到它注解到的方法与引用到的游戏类;开发者模式下的「冲突分析」面板还带一个<b>注入项搜索框</b>——可以直接粘贴崩溃诊断里点名的类名(如 <code>zombie.util.list.PZArrayList</code>),反查哪些 JAR 模组引用了它。</p>
 
       <h3>模组预设</h3>
       <p>把当前「Lua 加载顺序 + JAR 启停状态」保存为一个预设,之后一键切换整套模组组合,适合在不同整合包之间来回切换。</p>
+
+      <h3>游戏版本与历史版本</h3>
+      <p>「版本」页可以把整个游戏目录保存成一个版本(首次完整保存,之后只记录改动的文件),随时还原到任意历史版本;历史版本支持重命名,还原或保存后启动页按钮下方会显示它的名称。</p>
     </section>
 
     <!-- ============ 资源中心 ============ -->
@@ -489,6 +533,7 @@
       <p>启动游戏时,PZManager 会自动向游戏进程注入覆盖层组件(Hook OpenGL),在游戏加载阶段叠加显示进度界面,替代漫长的黑屏等待。</p>
       <ul>
         <li>覆盖层会话与启动流程绑定:游戏窗口就绪后开始工作,游戏退出或点击「停止游戏进程」后自动移除。</li>
+        <li>覆盖层结束后启动器仍会继续监视游戏:游戏崩溃时弹出诊断报告(停止原因 / 退出码 / 诊断),并列出引用了缺失注入项的 JAR 模组,方便定位冲突源。</li>
         <li>注入原理、停止条件与排错表见仓库内的《覆盖层注入文档》(<a href="#dev">开发者文档</a>)。</li>
       </ul>
       <div class="callout warn">
@@ -527,7 +572,7 @@
         </tr>
         <tr>
           <td>关于</td>
-          <td>版本信息、检查更新、<b>反馈信息</b>(详见<a href="#feedback">问题反馈</a>)。</td>
+          <td>版本信息、检查更新、<b>反馈信息</b>(详见<a href="#feedback">问题反馈</a>)、开源项目参考。</td>
         </tr>
       </table>
       <div class="callout warn">
@@ -684,5 +729,43 @@
   });
 </script>
 
+
+<script>
+  // 页眉「Steam 资源加速站」状态：请求中转服务的 /healthz（已开 CORS），
+  // 在线绿点呼吸、异常橙点、连不上红点；每 60 秒复查一次，页面隐藏时跳过。
+  (function () {
+    var link = document.getElementById("relayStatus");
+    if (!link) return;
+    var dot = link.querySelector(".nav-status-dot");
+    var HEALTH = "https://pzmlan.sanyec.top/healthz";
+
+    function setState(state, text) {
+      dot.dataset.state = state;
+      link.title = "Steam 资源加速站 · " + text;
+      link.setAttribute("aria-label", "Steam 资源加速站，" + text + "，点击打开");
+    }
+
+    function check() {
+      if (document.hidden) return;
+      var controller = new AbortController();
+      var timer = setTimeout(function () { controller.abort(); }, 6000);
+      fetch(HEALTH, { cache: "no-store", signal: controller.signal })
+        .then(function (response) {
+          return response.json().then(function (data) {
+            if (response.ok && data && data.ok === true) setState("online", "在线");
+            else setState("degraded", "响应异常");
+          });
+        })
+        .catch(function () { setState("offline", "无法连接"); })
+        .then(function () { clearTimeout(timer); });
+    }
+
+    check();
+    setInterval(check, 60000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) check();
+    });
+  })();
+</script>
 </body>
 </html>

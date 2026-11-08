@@ -482,6 +482,16 @@ pub(crate) fn set_wallpaper_effect(effect: serde_json::Value) -> Result<(), Stri
     save_app_settings_at(&settings_path, &settings)
 }
 
+/// 保存内置壁纸背景音乐的播放状态（音量 / 是否在播 / 播放位置 / 面板展开）；
+/// 内容由前端校验规整后再落盘，和 `set_wallpaper_effect` 同一套约定。
+#[tauri::command]
+pub(crate) fn set_launch_music_state(state: serde_json::Value) -> Result<(), String> {
+    let settings_path = app_settings_path()?;
+    let mut settings = load_app_settings_at(&settings_path)?;
+    settings.launch_music = Some(state);
+    save_app_settings_at(&settings_path, &settings)
+}
+
 #[tauri::command]
 pub(crate) fn list_custom_backgrounds() -> Result<Vec<BackgroundEntry>, String> {
     Ok(list_custom_backgrounds_at(&background_storage_directory(

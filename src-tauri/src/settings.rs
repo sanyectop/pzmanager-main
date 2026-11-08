@@ -293,6 +293,18 @@ pub(crate) fn save_developer_mode(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub(crate) fn save_shaderpack_override_enabled(enabled: bool) -> Result<(), String> {
+    update_app_settings(|settings| settings.shaderpack_override_enabled = enabled)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn save_pause_music_on_launch(enabled: bool) -> Result<(), String> {
+    update_app_settings(|settings| settings.pause_music_on_launch = enabled)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub(crate) fn save_steam_account_hidden(hidden: bool) -> Result<(), String> {
     update_app_settings(|settings| settings.steam_account_hidden = hidden)?;
     Ok(())

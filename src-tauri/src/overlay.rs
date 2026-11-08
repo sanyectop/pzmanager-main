@@ -289,6 +289,35 @@ pub(crate) mod imp {
         }
     }
 
+    /// 某个映像名（如 `steam.exe`）是否有进程在跑。走 toolhelp 进程快照，毫秒级。
+    ///
+    /// **不要用 `tasklist`**：本机实测同一个过滤查询要 60–110 秒（2026-11-08），
+    /// 放在启动路径或前台命令里会把界面卡死。
+    pub(crate) fn image_name_running(image: &str) -> bool {
+        // SAFETY: 0 表示当前进程；快照句柄失败时按"没在跑"处理。
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return false;
+        };
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        // SAFETY: entry 已按 API 要求设置 dwSize。
+        if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+            loop {
+                if wide_fixed_string(&entry.szExeFile).eq_ignore_ascii_case(image) {
+                    found = true;
+                    break;
+                }
+                // SAFETY: 链表遍历结束会返回错误。
+                if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = unsafe { CloseHandle(snapshot) };
+        found
+    }
+
     /// 按优先级查找游戏进程。返回候选顺序中的第一个命中项。
     pub(crate) fn find_game_process() -> Option<(u32, &'static str)> {
         // SAFETY: 0 表示当前进程；快照句柄失败时直接返回 None。

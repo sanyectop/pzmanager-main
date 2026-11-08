@@ -66,6 +66,8 @@ export function BackgroundMenu({
   onSetWallpaperTime,
   onToggleWallpaperPin,
   onToggleWallpaperAutoContrast,
+  pauseMusicOnLaunch,
+  onTogglePauseMusicOnLaunch,
 }: {
   customBackgrounds: BackgroundEntry[];
   workshopBackgrounds: BackgroundEntry[];
@@ -82,6 +84,9 @@ export function BackgroundMenu({
   onSetWallpaperTime: (timeMinutes: number | null) => void;
   onToggleWallpaperPin: () => void;
   onToggleWallpaperAutoContrast: () => void;
+  /** 「启动游戏自动暂停音乐」当前是否开启。 */
+  pauseMusicOnLaunch: boolean;
+  onTogglePauseMusicOnLaunch: () => void;
 }) {
   const workshopGroups = Array.from(
     workshopBackgrounds.reduce((groups, background) => {
@@ -163,6 +168,13 @@ export function BackgroundMenu({
                 </Menu.Item>
                 <Menu.Item value="wallpaper-auto-contrast" onSelect={onToggleWallpaperAutoContrast}>
                   {wallpaperEffect.autoContrast ? "✓ " : ""}自动对比度（{wallpaperEffect.contrast.toFixed(2)}x）
+                </Menu.Item>
+                <Menu.Item
+                  value="pause-music-on-launch"
+                  onSelect={onTogglePauseMusicOnLaunch}
+                  title="启动完成、显示「启动用时 XXXs」时暂停内置壁纸背景音乐"
+                >
+                  {pauseMusicOnLaunch ? "✓ " : ""}启动游戏自动暂停音乐
                 </Menu.Item>
                 <Menu.Root
                   positioning={{

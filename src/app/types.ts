@@ -446,6 +446,10 @@ export type AppSettings = {
   silentMemoryCleanup: boolean;
   silentMemoryCleanupThreshold: number;
   cleanMemoryOnLaunch: boolean;
+  /** 「启动游戏自动暂停音乐」：启动完成、显示「启动用时 XXXs」时暂停内置壁纸背景音乐。缺失 = 开。 */
+  pauseMusicOnLaunch?: boolean;
+  /** 「启动器接管光影管理」：开启后启动游戏才覆写 viewpoint-live.properties。缺失 = 关。 */
+  shaderpackOverrideEnabled?: boolean;
   /** 「激进内存清理」：常规清理之外再清系统工作集、文件缓存、已修改页与待机缓存。 */
   aggressiveMemoryClean: boolean;
   /** 「Steam 网络加速」模式：auto / relay / direct；null = 没写过，按 auto。 */

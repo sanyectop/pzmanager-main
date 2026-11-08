@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+import { createSeasonalParticles } from "./seasonalParticles";
 import {
   DEFAULT_SEASON_FEATURES,
   SEASONAL_BACKGROUNDS,
@@ -61,6 +63,29 @@ export function SeasonalWallpaper({ effect, idSuffix = "" }: { effect: Wallpaper
   const { centerBoost } = effect;
   // 同一个页面上可能同时挂两份（真壁纸 + 启动页亚克力的副本），SVG filter id 必须可区分。
   const filterId = `pz-seasonal-curve${idSuffix}`;
+  const particlesRef = useRef<ReturnType<typeof createSeasonalParticles> | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 亚克力副本（idSuffix 非空）是壁纸的模糊克隆，粒子在它上面只会错位，不重复跑。
+  const showParticles = idSuffix === "";
+
+  // 四季粒子（春絮 / 夏雨 / 秋叶 / 冬雪）：随季节权重此消彼长。
+  useEffect(() => {
+    if (!showParticles) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const controller = createSeasonalParticles(canvas);
+    particlesRef.current = controller;
+    return () => {
+      controller.destroy();
+      particlesRef.current = null;
+    };
+  }, [showParticles]);
+
+  // 权重每秒都会变（换季交叉淡化），这里同步给粒子系统。
+  useEffect(() => {
+    particlesRef.current?.setWeights(effect.weights);
+  }, [effect.weights]);
+
   return (
     <div aria-hidden="true" className="pz-seasonal-wallpaper">
       <svg className="pz-seasonal-wallpaper-defs" focusable="false">
@@ -110,6 +135,14 @@ export function SeasonalWallpaper({ effect, idSuffix = "" }: { effect: Wallpaper
           background: `radial-gradient(circle at 50% 50%, rgba(${Math.round(centerBoost.r)}, ${Math.round(centerBoost.g)}, ${Math.round(centerBoost.b)}, ${centerBoost.alpha.toFixed(3)}) 0%, transparent ${centerBoost.stop.toFixed(1)}%)`,
         }}
       />
+      {/* 四季粒子在最上层：参考实现里就是画在所有图层之上的 */}
+      {showParticles ? (
+        <canvas
+          aria-hidden="true"
+          className="pz-seasonal-wallpaper-particles"
+          ref={canvasRef}
+        />
+      ) : null}
     </div>
   );
 }

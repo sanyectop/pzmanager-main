@@ -56,8 +56,13 @@ test("startup polling survives the launch gap and only stops after the game was 
   );
   // 「还没见过进程」的正常启动间隙里不得停轮询（旧的误停分支不应存在）。
   assert.doesNotMatch(appSource, /if \(!status\.running && !gameWindowReady\) \{/);
-  // Steam 启动失败/被拦时的兜底：90 秒没见过进程就停止轮询。
-  assert.match(appSource, /!sawRunning && Date\.now\(\) - watchStart > 90_000/);
+  // Steam 启动失败/被拦时的兜底：15 秒没见过进程就熔断（中断等待并提示，可立刻重试）。
+  assert.match(appSource, /shouldBreakLaunchWait\(\{/);
+  assert.match(appSource, /sawRunning,/);
+  assert.match(appSource, /elapsedMs: Date\.now\(\) - watchStart,/);
+  // 熔断后要能重试：停掉轮询并弹错误提示（带 Steam 是否在跑的差异化文案）。
+  assert.match(appSource, /launchTimeoutMessage\(steamRunning\)/);
+  assert.match(appSource, /steam_process_running/);
 });
 
 test("the overlay session event is an authoritative window-detected trigger", () => {

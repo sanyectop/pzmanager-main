@@ -92,28 +92,21 @@ fn normalize_mod_loader_scheme(scheme: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn steam_is_running() -> Result<bool, String> {
-    use std::os::windows::process::CommandExt;
-    /// `CREATE_NO_WINDOW`：避免 GUI 程序里弹出一闪而过的控制台窗口。
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|error| format!("检查 Steam 进程失败: {error}"))
-        .and_then(|output| {
-            if !output.status.success() {
-                return Err("检查 Steam 进程失败".to_string());
-            }
-            Ok(String::from_utf8_lossy(&output.stdout)
-                .to_ascii_lowercase()
-                .contains("steam.exe"))
-        })
+    // 走进程快照：`tasklist` 在某些机器上要 60–110 秒（2026-11-08 实测），
+    // 而这里每次安装/检查都会被调用，必须是有界的。
+    Ok(overlay::imp::image_name_running("steam.exe"))
 }
 
 #[cfg(not(windows))]
 fn steam_is_running() -> Result<bool, String> {
     Err("ZombieBuddy 安装只支持 Windows".to_string())
+}
+
+/// 启动超时的熔断判定要用：Steam 进程此刻是否在跑（只做一次 tasklist，开销很小）。
+/// 返回 bool 而不是 Result：查不到就按"没在跑"处理，前端只需要提示文案的差异。
+#[tauri::command]
+fn steam_process_running() -> bool {
+    steam_is_running().unwrap_or(false)
 }
 
 
@@ -258,12 +251,24 @@ struct AppSettings {
     /// 「启动时清理内存」：点「启动游戏」时先清理一次，再把游戏拉起来。
     #[serde(default)]
     clean_memory_on_launch: bool,
+    /// 「启动游戏自动暂停音乐」：启动完成、界面输出「启动用时 XXXs」时暂停内置壁纸背景音乐。
+    /// 缺失 = 开（用户点的是「添加这个功能」）。
+    #[serde(default = "default_pause_music_on_launch")]
+    pause_music_on_launch: bool,
+    /// 「启动器接管光影管理」：开启后启动游戏时才覆写 viewpoint-live.properties，
+    /// 游戏退出后还原。缺失 / false = 不接管（光影包页首次点「配置」时弹框询问后再开启）。
+    #[serde(default)]
+    shaderpack_override_enabled: bool,
     /// 「激进内存清理」：常规清理之外，再把系统的已修改页 / 待机缓存还给空闲列表。
     #[serde(default)]
     aggressive_memory_clean: bool,
     /// 内置四季壁纸的手动 / 固定设置，前端 builtinWallpaper.ts 的 WallpaperEffectSettings 原样存取。
     #[serde(default)]
     wallpaper_effect: Option<serde_json::Value>,
+    /// 内置壁纸背景音乐的播放状态（音量 / 是否在播 / 播放位置 / 面板是否展开），
+    /// 前端 launchMusicUi.ts 的 LaunchMusicState 原样存取。
+    #[serde(default)]
+    launch_music: Option<serde_json::Value>,
     /// 「Steam 网络加速」模式：auto（直连失败自动切中转）/ relay（中转优先）/ direct（仅直连）。
     steam_relay_mode: Option<String>,
     /// 「Steam 网络加速」的中转地址；空 = 内置默认（steam_relay::DEFAULT_RELAY_BASE）。
@@ -293,6 +298,11 @@ fn default_version_parallel_enabled() -> bool {
 
 /// 新装 / 老设置文件缺少该字段时，默认「启动时保留 JAR 模组启用状态」。
 pub(crate) fn default_jar_mod_use_disk_state_on_startup() -> bool {
+    true
+}
+
+/// 新装 / 老设置文件缺少该字段时，默认「启动游戏自动暂停音乐」为开。
+pub(crate) fn default_pause_music_on_launch() -> bool {
     true
 }
 
@@ -649,9 +659,6 @@ fn version_context() -> Result<VersionContext, String> {
 
 #[cfg(windows)]
 fn project_zomboid_running() -> bool {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
     // 部分机器（如无 Xbox 服务的机器）上游戏进程名不是 ProjectZomboid64.exe /
     // javaw.exe（任务管理器里显示为 wsappx），tasklist 按映像名过滤会漏 ——
     // 先按窗口标题兜底识别一次。
@@ -659,16 +666,9 @@ fn project_zomboid_running() -> bool {
         return true;
     }
 
-    std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq ProjectZomboid64.exe", "/NH"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .to_ascii_lowercase()
-                .contains("projectzomboid64.exe")
-        })
-        .unwrap_or(false)
+    // 同样走进程快照而不是 `tasklist`：后者在本机实测要 60–110 秒，
+    // 会把"是否在运行"的检查（版本操作前置校验、启动熔断）拖到不可接受。
+    overlay::imp::image_name_running("ProjectZomboid64.exe")
 }
 
 #[cfg(not(windows))]
@@ -2937,6 +2937,8 @@ pub fn run() {
             save_memory_limit,
             save_developer_mode,
             save_steam_account_hidden,
+            save_pause_music_on_launch,
+            save_shaderpack_override_enabled,
             save_translation_language,
             save_translation_engine,
             save_font_contrast,
@@ -3000,6 +3002,8 @@ pub fn run() {
             startup_timing,
             set_background_path,
             set_wallpaper_effect,
+            set_launch_music_state,
+            steam_process_running,
             list_custom_backgrounds,
             scan_workshop_backgrounds,
             start_workshop_background_scan,

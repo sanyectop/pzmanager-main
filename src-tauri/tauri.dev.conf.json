@@ -10,7 +10,7 @@
         "minWidth": 840,
         "minHeight": 560,
         "decorations": false,
-        "additionalBrowserArgs": "--remote-debugging-port=10001"
+        "additionalBrowserArgs": "--remote-debugging-port=10001 --autoplay-policy=no-user-gesture-required"
       }
     ]
   }

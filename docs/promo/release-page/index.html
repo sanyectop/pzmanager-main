@@ -7,6 +7,9 @@
 <meta name="description" content="PZManager:Project Zomboid Windows 桌面启动器 + 模组管理器。一键启动、模组管理、创意工坊下载、游戏内覆盖层。" />
 <link rel="icon" type="image/png" href="pzm-logo.png" />
 <link rel="apple-touch-icon" href="pzm-logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <script>
   // 嵌入模式(?wall=true):隐藏顶栏 / 目录 / 页脚,只渲染正文,供启动器内嵌展示。
   if (new URLSearchParams(location.search).get("wall") === "true") {
@@ -59,7 +62,7 @@
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    font-family: "Inter", "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
     transition: background 0.3s ease, color 0.3s ease;
@@ -436,6 +439,97 @@
     50% { transform: translateX(4px); }
   }
 
+  /* ---------- 常驻动效（缓慢、低对比，避免抢占内容） ---------- */
+  /* 顶栏下沿的流光横向缓慢扫过 */
+  .topnav::after {
+    background-size: 200% 100%;
+    animation: navSweep 9s linear infinite;
+  }
+  @keyframes navSweep {
+    0% { background-position: 0% 0; }
+    100% { background-position: 200% 0; }
+  }
+  /* 英雄区点阵缓慢漂移（背景尺寸 26px，位移一格即无缝循环） */
+  .hero::before { animation: gridDrift 26s linear infinite; }
+  @keyframes gridDrift {
+    to { background-position: 26px 26px; }
+  }
+  /* 功能图标缓慢呼吸：错开相位，整排不会同步闪 */
+  .feature .icon { animation: iconBreathe 6.5s ease-in-out infinite; }
+  .feature:nth-child(2n) .icon { animation-delay: -1.6s; }
+  .feature:nth-child(3n) .icon { animation-delay: -3.2s; }
+  .feature:nth-child(5n) .icon { animation-delay: -4.4s; }
+  @keyframes iconBreathe {
+    0%, 100% { box-shadow: 0 6px 16px rgba(43, 125, 224, 0.28); }
+    50% { box-shadow: 0 10px 26px rgba(124, 92, 255, 0.5); }
+  }
+  /* Logo 光晕呼吸（与 floaty 叠加） */
+  .logo {
+    animation: floaty 4s ease-in-out infinite, logoGlow 5.5s ease-in-out infinite;
+  }
+  @keyframes logoGlow {
+    0%, 100% { box-shadow: var(--shadow), 0 0 0 1px rgba(43, 125, 224, 0.18); }
+    50% { box-shadow: var(--shadow), 0 0 0 7px rgba(43, 125, 224, 0.08); }
+  }
+
+  /* ---------- 社区口碑：双排行进跑马灯 ---------- */
+  #community { overflow: hidden; }
+  .marquee-wrap {
+    margin-top: 42px;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+    mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+  }
+  .marquee {
+    display: flex;
+    width: max-content;
+    animation: marqueeScroll 52s linear infinite;
+  }
+  .marquee + .marquee {
+    margin-top: 16px;
+    animation: marqueeScroll 64s linear infinite reverse;
+  }
+  .marquee:hover { animation-play-state: paused; }
+  /* 两组内容完全一致，位移 -50% 即无缝衔接；padding 让接缝处保持同样的间距 */
+  .marquee-group { display: flex; gap: 16px; padding-right: 16px; }
+  @keyframes marqueeScroll {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+  .quote-card {
+    flex: 0 0 auto;
+    width: 340px;
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--panel);
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+    transition: border-color 0.25s ease, transform 0.25s ease, box-shadow 0.25s ease;
+  }
+  .quote-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-3px);
+    box-shadow: var(--glow);
+  }
+  .quote-card blockquote { font-size: 14px; line-height: 1.75; color: var(--text); }
+  .quote-card figcaption {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 12px; font-size: 12.5px; color: var(--text-dim);
+  }
+  .quote-card figcaption::before {
+    content: ""; width: 18px; height: 1px; background: var(--grad);
+  }
+  .quote-name { color: var(--text); font-weight: 600; }
+  .quote-region { opacity: 0.75; }
+  .quote-source {
+    margin-top: 24px; text-align: center;
+    font-size: 12.5px; color: var(--text-dim); opacity: 0.8;
+  }
+  @media (max-width: 640px) {
+    .quote-card { width: 280px; }
+  }
+
   /* ---------- Footer ---------- */
   footer {
     position: relative;
@@ -454,6 +548,10 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
     .fade-in, .reveal { opacity: 1; transform: none; }
+    /* 跑马灯停掉动画后改为换行平铺，避免只露出第一屏 */
+    .marquee { width: 100%; flex-wrap: wrap; }
+    .marquee-group { flex-wrap: wrap; padding-right: 0; }
+    .marquee-group[aria-hidden="true"] { display: none; }
   }
   @media (max-width: 640px) {
     .hero { padding: 64px 0 48px; }
@@ -473,7 +571,41 @@
     padding-top: 28px;
   }
   html[data-wall="true"] { scroll-padding-top: 24px; }
-  </style>
+  
+  /* ---------- 页眉：Steam 资源加速站（状态点 + 跳转） ---------- */
+  .nav-status {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 10px 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--text-dim);
+    font-size: 13px;
+    white-space: nowrap;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .nav-status:hover { color: var(--text); border-color: var(--accent); }
+  .nav-status-dot {
+    width: 7px; height: 7px; flex: 0 0 auto;
+    border-radius: 50%; background: #9ca3af;
+  }
+  /* 在线：绿色 + 缓慢扩散的光环（常驻动效，不抢注意力） */
+  .nav-status-dot[data-state="online"] { background: #22c55e; animation: statusPulse 2.6s ease-out infinite; }
+  .nav-status-dot[data-state="degraded"] { background: #f59e0b; }
+  .nav-status-dot[data-state="offline"] { background: #ef4444; }
+  .nav-status-dot[data-state="checking"] { animation: statusBlink 1.4s ease-in-out infinite; }
+  @keyframes statusPulse {
+    0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45); }
+    70% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  }
+  @keyframes statusBlink { 50% { opacity: 0.35; } }
+  /* 窄屏只保留状态圆点，避免把导航挤爆 */
+  @media (max-width: 960px) {
+    .nav-status { padding: 6px; border-radius: 999px; }
+    .nav-status-text { display: none; }
+  }
+</style>
 </head>
 <body>
 
@@ -484,8 +616,13 @@
     <div class="nav-links">
       <a class="nav-secondary" href="#screenshots">界面</a>
       <a class="nav-secondary" href="#features">功能</a>
-      <a class="nav-secondary" href="#docs">文档</a>
+      <a class="nav-secondary" href="#community">口碑</a>
+      <a class="nav-secondary" href="docs.html">文档</a>
       <a href="https://github.com/sanyectop/pzmanager-main" target="_blank" rel="noopener" title="GitHub"><i class="fa-brands fa-github"></i> GitHub</a>
+      <a class="nav-status" href="https://pzmlan.sanyec.top/" id="relayStatus" target="_blank" rel="noopener" title="Steam 资源加速站 · 检测中" aria-label="Steam 资源加速站，正在检测状态，点击打开">
+        <span class="nav-status-dot" data-state="checking" aria-hidden="true"></span>
+        <span class="nav-status-text">Steam 加速站</span>
+      </a>
       <a href="https://ifdian.net/a/sanyee" target="_blank" rel="noopener" title="爱发电 · 叁葉" class="afdian-link"><i class="fa-solid fa-mug-hot"></i> 爱发电</a>
       <button class="theme-btn" id="themeBtn" title="切换主题"><i class="fa-solid fa-moon"></i></button>
       <a class="nav-cta" href="#downloads">下载</a>
@@ -543,6 +680,149 @@
   </div>
 </header>
 
+<!-- ================= Community ================= -->
+<section id="community">
+  <div class="wrap">
+    <h2 class="section-title reveal">社区口碑</h2>
+    <p class="section-sub reveal">来自 B 站评论区的真实反馈,逐字摘录(括号表情已省略)。</p>
+  </div>
+  <div class="marquee-wrap reveal" role="list" aria-label="B 站精选评论">
+    <div class="marquee">
+      <div class="marquee-group">
+        <figure class="quote-card" role="listitem">
+          <blockquote>有一说一，作者做出这个驱动器是真的让我眼前一亮，非常欣赏，感觉和PCL作者一样拥有奉献精神，这个东西做起来是非常耗费时间精力的，不知道该怎么说，就像这个动漫一样，向作者表达崇高的敬意。</blockquote>
+          <figcaption><span class="quote-name">bili_61315391118</span><span class="quote-region">· 湖北</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>我们蒋辉也有自己的pcl了</blockquote>
+          <figcaption><span class="quote-name">南禄贞</span><span class="quote-region">· 湖南</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>致敬伟大的工具和mod作者</blockquote>
+          <figcaption><span class="quote-name">不正经的狄胖胖</span><span class="quote-region">· 浙江</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>我们pz玩家终于吃上细糠了</blockquote>
+          <figcaption><span class="quote-name">ElvishBird</span><span class="quote-region">· 吉林</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>这个确实好用，之前太麻烦了</blockquote>
+          <figcaption><span class="quote-name">Elc_elc</span><span class="quote-region">· 重庆</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>伟大，无需多言</blockquote>
+          <figcaption><span class="quote-name">梦醒时分微醺</span><span class="quote-region">· 安徽</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>无私奉献改善别人生活的人，你值得我的硬币</blockquote>
+          <figcaption><span class="quote-name">派大星就叫派大星</span><span class="quote-region">· 上海</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>有点伟大了</blockquote>
+          <figcaption><span class="quote-name">C克力</span><span class="quote-region">· 广东</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>这有点用的，我最近一直有这个问题，一直卡在那个界面，等个七八分钟，说要反复进两三次才能打开游戏，现在弄这个还是可以等个一两分钟就可以进入了</blockquote>
+          <figcaption><span class="quote-name">鹿角港_躲卟濄の记意</span><span class="quote-region">· 广东</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>这是好事啊，官方的启动程序有bug，会导致zgc开不了。</blockquote>
+          <figcaption><span class="quote-name">明月今锋</span><span class="quote-region">· 福建</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>启动器背景图好好看</blockquote>
+          <figcaption><span class="quote-name">小德每天睡大觉</span><span class="quote-region">· 浙江</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>你们都是骑士啊</blockquote>
+          <figcaption><span class="quote-name">松坂牌砂糖</span><span class="quote-region">· 甘肃</span></figcaption>
+        </figure>
+      </div>
+      <div class="marquee-group" aria-hidden="true">
+        <figure class="quote-card" role="listitem">
+          <blockquote>有一说一，作者做出这个驱动器是真的让我眼前一亮，非常欣赏，感觉和PCL作者一样拥有奉献精神，这个东西做起来是非常耗费时间精力的，不知道该怎么说，就像这个动漫一样，向作者表达崇高的敬意。</blockquote>
+          <figcaption><span class="quote-name">bili_61315391118</span><span class="quote-region">· 湖北</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>我们蒋辉也有自己的pcl了</blockquote>
+          <figcaption><span class="quote-name">南禄贞</span><span class="quote-region">· 湖南</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>致敬伟大的工具和mod作者</blockquote>
+          <figcaption><span class="quote-name">不正经的狄胖胖</span><span class="quote-region">· 浙江</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>我们pz玩家终于吃上细糠了</blockquote>
+          <figcaption><span class="quote-name">ElvishBird</span><span class="quote-region">· 吉林</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>这个确实好用，之前太麻烦了</blockquote>
+          <figcaption><span class="quote-name">Elc_elc</span><span class="quote-region">· 重庆</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>伟大，无需多言</blockquote>
+          <figcaption><span class="quote-name">梦醒时分微醺</span><span class="quote-region">· 安徽</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>无私奉献改善别人生活的人，你值得我的硬币</blockquote>
+          <figcaption><span class="quote-name">派大星就叫派大星</span><span class="quote-region">· 上海</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>有点伟大了</blockquote>
+          <figcaption><span class="quote-name">C克力</span><span class="quote-region">· 广东</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>这有点用的，我最近一直有这个问题，一直卡在那个界面，等个七八分钟，说要反复进两三次才能打开游戏，现在弄这个还是可以等个一两分钟就可以进入了</blockquote>
+          <figcaption><span class="quote-name">鹿角港_躲卟濄の记意</span><span class="quote-region">· 广东</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>这是好事啊，官方的启动程序有bug，会导致zgc开不了。</blockquote>
+          <figcaption><span class="quote-name">明月今锋</span><span class="quote-region">· 福建</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>启动器背景图好好看</blockquote>
+          <figcaption><span class="quote-name">小德每天睡大觉</span><span class="quote-region">· 浙江</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>你们都是骑士啊</blockquote>
+          <figcaption><span class="quote-name">松坂牌砂糖</span><span class="quote-region">· 甘肃</span></figcaption>
+        </figure>
+      </div>
+    </div>
+    <div class="marquee">
+      <div class="marquee-group">
+        <figure class="quote-card" role="listitem">
+          <blockquote>有Linux版吗？</blockquote>
+          <figcaption><span class="quote-name">墨文小鸽</span><span class="quote-region">· 北京</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>启动器能不能自定义字体大小或功能界面放大些，配置模组时一个个细看看的好难受</blockquote>
+          <figcaption><span class="quote-name">和食主义者</span><span class="quote-region">· 广东</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>能优化启动速度吗，看着好像只是加了加载界面。竟然是一个一个读，单线程运行无语了</blockquote>
+          <figcaption><span class="quote-name">决定吃小菜</span><span class="quote-region">· 上海</span></figcaption>
+        </figure>
+      </div>
+      <div class="marquee-group" aria-hidden="true">
+        <figure class="quote-card" role="listitem">
+          <blockquote>有Linux版吗？</blockquote>
+          <figcaption><span class="quote-name">墨文小鸽</span><span class="quote-region">· 北京</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>启动器能不能自定义字体大小或功能界面放大些，配置模组时一个个细看看的好难受</blockquote>
+          <figcaption><span class="quote-name">和食主义者</span><span class="quote-region">· 广东</span></figcaption>
+        </figure>
+        <figure class="quote-card" role="listitem">
+          <blockquote>能优化启动速度吗，看着好像只是加了加载界面。竟然是一个一个读，单线程运行无语了</blockquote>
+          <figcaption><span class="quote-name">决定吃小菜</span><span class="quote-region">· 上海</span></figcaption>
+        </figure>
+      </div>
+    </div>
+  </div>
+  <p class="quote-source wrap">评论整理自 B 站相关视频评论区,仅作社区口碑展示。</p>
+</section>
+
 <!-- ================= Features ================= -->
 <section id="features">
   <div class="wrap">
@@ -558,7 +838,7 @@
       <div class="feature reveal">
         <div class="icon"><i class="fa-solid fa-puzzle-piece"></i></div>
         <h3>模组管理</h3>
-        <p>Lua 与 JAR 模组统一启停、依赖前置、冲突分析,还能把模组组合保存为预设,一键切换整合包。</p>
+        <p>Lua 与 JAR 模组统一启停、依赖前置、冲突分析,还能把模组组合保存为预设,一键切换整合包;支持按注入项反查模组。</p>
       </div>
       <div class="feature reveal">
         <div class="icon"><i class="fa-solid fa-cloud-arrow-down"></i></div>
@@ -578,7 +858,7 @@
       <div class="feature reveal">
         <div class="icon"><i class="fa-solid fa-gamepad"></i></div>
         <h3>游戏内覆盖层</h3>
-        <p>注入 DLL + Hook OpenGL,在游戏加载时叠加进度界面,等待不再是黑屏干瞪眼。</p>
+        <p>注入 DLL + Hook OpenGL,在游戏加载时叠加进度界面,等待不再是黑屏干瞪眼;游戏崩溃时给出停止原因与可疑模组。</p>
       </div>
       <div class="feature reveal">
         <div class="icon"><i class="fa-solid fa-tower-broadcast"></i></div>
@@ -698,5 +978,43 @@
   document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
 </script>
 
+
+<script>
+  // 页眉「Steam 资源加速站」状态：请求中转服务的 /healthz（已开 CORS），
+  // 在线绿点呼吸、异常橙点、连不上红点；每 60 秒复查一次，页面隐藏时跳过。
+  (function () {
+    var link = document.getElementById("relayStatus");
+    if (!link) return;
+    var dot = link.querySelector(".nav-status-dot");
+    var HEALTH = "https://pzmlan.sanyec.top/healthz";
+
+    function setState(state, text) {
+      dot.dataset.state = state;
+      link.title = "Steam 资源加速站 · " + text;
+      link.setAttribute("aria-label", "Steam 资源加速站，" + text + "，点击打开");
+    }
+
+    function check() {
+      if (document.hidden) return;
+      var controller = new AbortController();
+      var timer = setTimeout(function () { controller.abort(); }, 6000);
+      fetch(HEALTH, { cache: "no-store", signal: controller.signal })
+        .then(function (response) {
+          return response.json().then(function (data) {
+            if (response.ok && data && data.ok === true) setState("online", "在线");
+            else setState("degraded", "响应异常");
+          });
+        })
+        .catch(function () { setState("offline", "无法连接"); })
+        .then(function () { clearTimeout(timer); });
+    }
+
+    check();
+    setInterval(check, 60000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) check();
+    });
+  })();
+</script>
 </body>
 </html>
