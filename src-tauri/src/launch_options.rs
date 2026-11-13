@@ -361,6 +361,70 @@ pub(crate) fn patch_json_launcher_content(content: &str) -> Result<(String, bool
     patch_json_launcher_content_with_memory(content, None)
 }
 
+/// classpath 条目是否表示"游戏目录本身"（`.` / `./` / `.\`）。
+fn is_current_dir_classpath_entry(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed == "." || trimmed == "./" || trimmed == ".\\"
+}
+
+/// 从 `ProjectZomboid64.json` 的 `classpath` 里去掉表示游戏目录本身的条目。
+///
+/// 42.22 起官方 `projectzomboid.jar` 带签名（`META-INF/PROJECTZ.EC`）。classpath
+/// 里还留着 `.` 时，游戏目录下残留的散装 `.class`（旧版 pzopt / 手工替换）会和
+/// 签名 jar 里的同名类混载，JVM 在加载主类时直接抛
+/// `SecurityException: signer information does not match`——用户看到的就是启动弹
+/// "JNI ERROR"。去掉 `.` 后类只从签名 jar 加载，散装残留被自然忽略。
+///
+/// 只在「jar 已签名 + 确有散装 class」时调用（见 lib.rs 的判定）；无签名 jar 的
+/// 旧版本保持原 classpath 不动。
+pub(crate) fn strip_dot_classpath_entries(content: &str) -> Result<(String, bool), String> {
+    let mut launcher: serde_json::Value = serde_json::from_str(content)
+        .map_err(|error| format!("解析 ProjectZomboid64.json 失败: {error}"))?;
+    let Some(object) = launcher.as_object_mut() else {
+        return Ok((content.to_string(), false));
+    };
+    let Some(classpath_key) = object
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("classpath"))
+        .cloned()
+    else {
+        return Ok((content.to_string(), false));
+    };
+    let Some(classpath) = object
+        .get_mut(&classpath_key)
+        .and_then(|value| value.as_array_mut())
+    else {
+        return Ok((content.to_string(), false));
+    };
+    let original_length = classpath.len();
+    classpath.retain(|entry| {
+        entry
+            .as_str()
+            .is_none_or(|value| !is_current_dir_classpath_entry(value))
+    });
+    if classpath.len() == original_length {
+        return Ok((content.to_string(), false));
+    }
+    let patched = serde_json::to_string_pretty(&launcher)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| format!("写入 ProjectZomboid64.json 失败: {error}"))?;
+    Ok((patched, true))
+}
+
+/// 从 bat 风格的 classpath 字符串（`;` 分隔）里去掉 `.` / `./` 条目。
+///
+/// 「从游戏文件启动」直接构造 java 命令行，不经过 JSON；同样需要在
+/// 签名 jar + 散装 class 的机器上去掉游戏目录本身。
+pub(crate) fn strip_dot_classpath_string(classpath: &str) -> (String, bool) {
+    let entries: Vec<&str> = classpath
+        .split(';')
+        .filter(|entry| !is_current_dir_classpath_entry(entry))
+        .collect();
+    let filtered = entries.join(";");
+    let changed = filtered != classpath;
+    (filtered, changed)
+}
+
 pub(crate) fn patch_batch_content_with_memory(content: &str, memory_mb: Option<u64>) -> (String, bool) {
     // 历史调用点与测试沿用这个签名：默认按 ZombieBuddy 方案处理。
     patch_batch_with_agent(content, memory_mb, Some(ZOMBIE_BUDDY_POLICY_AGENT), None)

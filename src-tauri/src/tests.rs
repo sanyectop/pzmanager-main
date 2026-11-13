@@ -1,7 +1,13 @@
 use super::{
     adopt_jar_mod_state_from_roots, apply_file_transaction, apply_jar_mod_state_to_roots,
     apply_launch_loader_at_paths,
-    build_fast_launch_cache, class_annotations, class_references, compose_title_background_at,
+    AUTO_JOIN_CONFIG_FILE, AUTO_JOIN_HOOK_FILE, AUTO_JOIN_HOOK_SOURCE,
+    auto_join_config_path, clear_auto_join_config_at, describe_auto_join_password,
+    install_auto_join_hook_at,
+    normalize_auto_join_target, remove_auto_join_hook_at, write_auto_join_config_at,
+    build_fast_launch_cache, build_file_java_args, class_annotations, class_references,
+    compose_title_background_at, default_bat_launch_command, is_memory_arg,
+    parse_bat_launch_command,
     configure_viewpoint_three_d_at_paths, create_fast_launch_backup_at, delete_shaderpack_at,
     discover_mod_info_files, fast_launch_cache_matches, fast_launch_cache_mods_at,
     force_zombie_buddy_policy_at_paths, game_path_from_library, import_shaderpack_to,
@@ -23,6 +29,7 @@ use super::{
     patch_json_launcher_with_agent, patch_steam_launch_options_content,
     steam_config_has_both, steam_launch_value_has_both,
     patch_steam_launch_options_content_with_memory, pick_lua_mod_id, plan_lua_mod_enable,
+    strip_dot_classpath_entries, strip_dot_classpath_string,
     quoted_key, replace_vdf_value,
     pz_optimization_status, read_default_mod_ids, read_fast_launch_cache_at,
     read_jar_mod_state, read_viewpoint_shot_at, restore_fast_launch_backup_at,
@@ -228,6 +235,7 @@ fn persists_background_and_memory_settings() {
         clean_memory_on_launch: true,
         pause_music_on_launch: true,
         shaderpack_override_enabled: false,
+        launch_from_game_files: false,
         aggressive_memory_clean: true,
         wallpaper_effect: None,
         launch_music: None,
@@ -239,6 +247,9 @@ fn persists_background_and_memory_settings() {
         version_include_mods: true,
         version_system_drive_notice_dismissed: false,
         privacy_consented_version: None,
+        auto_join_enabled: true,
+        auto_join_target: Some("192.168.1.10:16261".to_string()),
+        auto_join_password: Some("test-password".to_string()),
     };
 
     save_app_settings_at(&path, &settings).unwrap();
@@ -264,6 +275,33 @@ fn jar_mod_disk_state_defaults_to_enabled_for_new_or_old_settings() {
     settings.jar_mod_use_disk_state_on_startup = false;
     save_app_settings_at(&path, &settings).unwrap();
     assert!(!load_app_settings_at(&path).unwrap().jar_mod_use_disk_state_on_startup);
+}
+
+#[test]
+fn version_save_defaults_to_parallel_for_new_or_old_settings() {
+    let temp = tempfile::tempdir().unwrap();
+
+    // 新安装：还没有 settings.json，derive 的 Default 会把布尔字段置 false，
+    // 所以 load 必须显式补成「多线程开启 / 保存时备份模组」，和 serde 默认值一致。
+    let missing = load_app_settings_at(&temp.path().join("settings.json")).unwrap();
+    assert!(missing.version_parallel);
+    assert!(missing.version_include_mods);
+
+    // 老设置文件（缺字段）走 serde default，同样是开启。
+    let path = temp.path().join("legacy-settings.json");
+    fs::write(&path, "{}\n").unwrap();
+    let legacy = load_app_settings_at(&path).unwrap();
+    assert!(legacy.version_parallel);
+    assert!(legacy.version_include_mods);
+
+    // 用户显式关闭后要能读回 false，不被默认值覆盖。
+    let mut settings = legacy;
+    settings.version_parallel = false;
+    settings.version_include_mods = false;
+    save_app_settings_at(&path, &settings).unwrap();
+    let reloaded = load_app_settings_at(&path).unwrap();
+    assert!(!reloaded.version_parallel);
+    assert!(!reloaded.version_include_mods);
 }
 
 #[test]
@@ -675,7 +713,9 @@ fn normalizes_translation_engine_setting() {
         normalize_translation_engine("MyMemory").as_deref(),
         Some("mymemory")
     );
-    assert_eq!(normalize_translation_engine("RELAY").as_deref(), Some("relay"));
+    // 中转翻译（relay）已下线：旧配置里的 relay 视为坏值，load 时回落默认引擎。
+    assert_eq!(normalize_translation_engine("RELAY"), None);
+    assert_eq!(normalize_translation_engine("relay"), None);
     // 设置页没提供的引擎和空值交给默认值（11-06 起默认 Google，见 news_translation 的引擎链）。
     assert_eq!(normalize_translation_engine("yandex"), None);
     assert_eq!(normalize_translation_engine(""), None);
@@ -1815,6 +1855,36 @@ fn rejects_memory_limit_above_physical_memory() {
 }
 
 #[test]
+fn strips_current_dir_classpath_entries() {
+    // 42.22 起 projectzomboid.jar 带签名：classpath 里的 `.` 会让游戏目录下残留的
+    // 散装 .class 与签名 jar 混载，JVM 抛 signer mismatch（启动弹 "JNI ERROR"）。
+    let json = r#"{
+  "classpath": ["pzopt/aot/pzopt.jar", ".", "projectzomboid.jar"],
+  "mainClass": "zombie/gameStates/MainScreenState",
+  "vmArgs": []
+}"#;
+    let (patched, changed) = strip_dot_classpath_entries(json).unwrap();
+    assert!(changed);
+    assert!(!patched.contains("\".\""), "{patched}");
+    assert!(patched.contains("pzopt/aot/pzopt.jar"));
+    assert!(patched.contains("projectzomboid.jar"));
+    // 幂等：再跑一次不再改动。
+    let (again, changed_again) = strip_dot_classpath_entries(&patched).unwrap();
+    assert!(!changed_again);
+    assert_eq!(again, patched);
+
+    // bat 风格的 classpath 字符串（直启路径）。
+    assert_eq!(
+        strip_dot_classpath_string("./;projectzomboid.jar"),
+        ("projectzomboid.jar".to_string(), true)
+    );
+    assert_eq!(
+        strip_dot_classpath_string("projectzomboid.jar"),
+        ("projectzomboid.jar".to_string(), false)
+    );
+}
+
+#[test]
 fn patches_steam_launch_options_for_project_zomboid() {
     let content = r#""UserLocalConfigStore"
 {
@@ -1846,6 +1916,89 @@ fn patches_steam_launch_options_for_project_zomboid() {
     let (patched_again, changed_again) = patch_steam_launch_options_content(&patched).unwrap();
     assert!(!changed_again);
     assert_eq!(patched_again, patched);
+}
+
+#[test]
+fn parses_bat_launch_command_and_builds_java_args() {
+    // 真实 bat 的第一条 java 行（重试分支的 IF %ERRORLEVEL% 块必须被忽略）。
+    let bat = r#"@setlocal enableextensions
+@cd /d "%~dp0"
+SET _JAVA_OPTIONS=-agentlib:zbNative=policy=allow-all -Xmx12288m
+
+SET PZ_CLASSPATH=./;projectzomboid.jar
+".\jre64\bin\java.exe" -Djava.awt.headless=true --enable-native-access=ALL-UNNAMED --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED -Dzomboid.steam=1 -Dzomboid.znetlog=1 -XX:-CreateCoredumpOnCrash -XX:-OmitStackTraceInFastThrow -XX:+UseZGC -Xmx3072m -Djava.library.path=./win64/;./ -cp %PZ_CLASSPATH% zombie.gameStates.MainScreenState %1 %2
+
+IF %ERRORLEVEL% NEQ 0 (
+".\jre64\bin\java.exe" -Djava.awt.headless=true -Xmx1m -cp %PZ_CLASSPATH% zombie.gameStates.MainScreenState %1 %2
+
+)
+
+PAUSE
+"#;
+
+    let command = parse_bat_launch_command(bat).expect("应能解析官方 bat");
+    assert_eq!(command.classpath, "./;projectzomboid.jar");
+    assert_eq!(command.main_class, "zombie.gameStates.MainScreenState");
+    // bat 自带的 -Xmx3072m 被剔除（启动器的内存上限随后放在最后，保证覆盖生效）。
+    assert!(!command.fixed_vm_args.iter().any(|token| is_memory_arg(token)));
+    assert!(command
+        .fixed_vm_args
+        .contains(&"-Djava.library.path=./win64/;./".to_string()));
+
+    // 用户参数拆分：-D 是 JVM 参数、-debug 是游戏参数、agent/Xmx/裸 -- 不重复传。
+    let args = build_file_java_args(
+        &command,
+        12288,
+        &[
+            "-agentlib:zbNative".to_string(),
+            "--".to_string(),
+            "-Dzomboid.steam=0".to_string(),
+            "-debug".to_string(),
+        ],
+        Some(crate::ZOMBIE_BUDDY_POLICY_AGENT),
+        None,
+    );
+    assert_eq!(
+        args,
+        vec![
+            // bat 的固定参数（-Xmx3072m 已剔除）。
+            "-Djava.awt.headless=true",
+            "--enable-native-access=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+            "-Dzomboid.steam=1",
+            "-Dzomboid.znetlog=1",
+            "-XX:-CreateCoredumpOnCrash",
+            "-XX:-OmitStackTraceInFastThrow",
+            "-XX:+UseZGC",
+            "-Djava.library.path=./win64/;./",
+            // 启动器显式写入：内存覆盖 bat 的值，agent 只出现一次。
+            "-Xmx12288m",
+            "-agentlib:zbNative=policy=allow-all",
+            // 用户 JVM 参数在 -cp 之前，游戏参数跟在主类后。
+            "-Dzomboid.steam=0",
+            "-cp",
+            "./;projectzomboid.jar",
+            "zombie.gameStates.MainScreenState",
+            "-debug",
+        ]
+    );
+}
+
+#[test]
+fn parses_bat_launch_command_ignores_retry_line() {
+    let bat = r#"SET PZ_CLASSPATH=./;projectzomboid.jar
+".\jre64\bin\java.exe" -Dzomboid.steam=1 -cp %PZ_CLASSPATH% zombie.gameStates.MainScreenState
+"#;
+    let command = parse_bat_launch_command(bat).unwrap();
+    assert_eq!(command.main_class, "zombie.gameStates.MainScreenState");
+    assert!(command.fixed_vm_args.contains(&"-Dzomboid.steam=1".to_string()));
+
+    // 解析不出（结构变了）时调用方回落到 default_bat_launch_command，这里锁它的主类。
+    assert!(parse_bat_launch_command("no java line here").is_none());
+    assert_eq!(
+        default_bat_launch_command().main_class,
+        "zombie.gameStates.MainScreenState"
+    );
 }
 
 #[test]
@@ -4041,4 +4194,114 @@ fn real_world_launch_guard_timings() {
             "{label} 必须先有界（实测 {elapsed:?}）：它会被启动/版本操作路径同步调用"
         );
     }
+}
+
+// ==== 自动加入服务器（设置 › 实验性功能）====
+
+#[test]
+fn auto_join_target_normalization() {
+    // 合法：两端空白去掉（只允许在外层），端口去前导零。
+    assert_eq!(
+        normalize_auto_join_target("  1.2.3.4:16261  ").as_deref(),
+        Some("1.2.3.4:16261")
+    );
+    assert_eq!(
+        normalize_auto_join_target("play.example.com:016261").as_deref(),
+        Some("play.example.com:16261")
+    );
+    assert!(normalize_auto_join_target("1.2.3.4:65535").is_some());
+    // 端口 65536 / 0 / 非数字 / 带空白都不合法——必须和钩子 Lua 的解析严格一致，
+    // 启动器多接受一个格式，游戏里就多一次静默拒绝。
+    assert!(normalize_auto_join_target("1.2.3.4:65536").is_none());
+    assert!(normalize_auto_join_target("1.2.3.4:0").is_none());
+    assert!(normalize_auto_join_target("1.2.3.4:abc").is_none());
+    assert!(normalize_auto_join_target("1.2.3.4: 16261").is_none());
+    // 外层空白在 trim 时去掉，端口段里的空白不行。
+    assert_eq!(
+        normalize_auto_join_target("1.2.3.4:16261 ").as_deref(),
+        Some("1.2.3.4:16261")
+    );
+    // 主机为空 / 带空白 / 缺端口。
+    assert!(normalize_auto_join_target(":16261").is_none());
+    assert!(normalize_auto_join_target("1.2.3.4 :16261").is_none());
+    assert!(normalize_auto_join_target("1.2 .3.4:16261").is_none());
+    assert!(normalize_auto_join_target("1.2.3.4").is_none());
+    assert!(normalize_auto_join_target("").is_none());
+}
+
+#[test]
+fn auto_join_config_lives_in_lua_subdirectory() {
+    // B42 的 cacheFileExists/getFileReader 把相对路径解析到 Zomboid\Lua\（不是
+    // Zomboid 根目录）——配置写错位置钩子永远读不到，只会静默不连。锁住这个路径。
+    let path = auto_join_config_path().unwrap();
+    assert_eq!(
+        path.file_name().and_then(|value| value.to_str()),
+        Some(AUTO_JOIN_CONFIG_FILE)
+    );
+    assert_eq!(
+        path.parent().and_then(|value| value.file_name()).and_then(|value| value.to_str()),
+        Some("Lua")
+    );
+}
+
+#[test]
+fn auto_join_config_roundtrip() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(AUTO_JOIN_CONFIG_FILE);
+
+    // 带密码：target / password / requested 都在。
+    write_auto_join_config_at(&path, "1.2.3.4:16261", Some(" s3cret ")).unwrap();
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("target=1.2.3.4:16261"));
+    assert!(content.contains("password=s3cret"));
+    assert!(content.contains("requested="));
+
+    // 空密码不写 password 行（收藏夹里存过密码时优先用收藏的）。
+    write_auto_join_config_at(&path, "1.2.3.4:16261", Some("   ")).unwrap();
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("target=1.2.3.4:16261"));
+    assert!(!content.contains("password="));
+
+    // 清理：删一次返回 true，再删返回 false。
+    assert!(clear_auto_join_config_at(&path));
+    assert!(!path.exists());
+    assert!(!clear_auto_join_config_at(&path));
+}
+
+#[test]
+fn auto_join_hook_install_and_remove() {
+    let temp = tempfile::tempdir().unwrap();
+    let game = temp.path();
+
+    // 安装：文件内容与源一致；重复安装是 no-op（返回 false，不白写磁盘）。
+    assert!(install_auto_join_hook_at(game).unwrap());
+    let hook = game
+        .join("media")
+        .join("lua")
+        .join("client")
+        .join(AUTO_JOIN_HOOK_FILE);
+    assert_eq!(fs::read_to_string(&hook).unwrap(), AUTO_JOIN_HOOK_SOURCE);
+    assert!(!install_auto_join_hook_at(game).unwrap());
+
+    // 内容变化（模拟游戏更新留下的半截文件）会被覆盖自愈。
+    fs::write(&hook, "half-written").unwrap();
+    assert!(install_auto_join_hook_at(game).unwrap());
+    assert_eq!(fs::read_to_string(&hook).unwrap(), AUTO_JOIN_HOOK_SOURCE);
+
+    // 卸载：删一次 true，再删 false。
+    assert!(remove_auto_join_hook_at(game).unwrap());
+    assert!(!hook.exists());
+    assert!(!remove_auto_join_hook_at(game).unwrap());
+}
+
+#[test]
+fn auto_join_password_log_never_plaintext() {
+    let described = describe_auto_join_password(Some("s3cret-password"));
+    assert!(described.contains("已配置"));
+    assert!(!described.contains("s3cret"));
+    // None 和空白等价：都是「未配置」。
+    assert_eq!(
+        describe_auto_join_password(None),
+        describe_auto_join_password(Some("   "))
+    );
 }

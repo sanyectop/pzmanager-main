@@ -12,7 +12,8 @@ export const TRANSLATION_LANGUAGE_OPTIONS = [
 
 export const DEFAULT_TRANSLATION_LANGUAGE = "zh-CN";
 
-/** 「通用 › 翻译引擎」：auto = 默认链（Google → 必应 → MyMemory）；手动指定时该引擎优先，失败按默认链回退。 */
+/** 「通用 › 翻译引擎」：auto = 默认链（Google → 必应 → MyMemory）；手动指定时该引擎优先，失败按默认链回退。
+ * 中转翻译（relay）已下线：旧配置里的 relay 在后端归一化时回落默认引擎。 */
 export const DEFAULT_TRANSLATION_ENGINE = "google";
 
 export const TRANSLATION_ENGINE_OPTIONS: WorkshopMenuOption[] = [
@@ -20,7 +21,6 @@ export const TRANSLATION_ENGINE_OPTIONS: WorkshopMenuOption[] = [
   { value: "google", label: "Google 翻译" },
   { value: "bing", label: "必应翻译" },
   { value: "mymemory", label: "MyMemory" },
-  { value: "relay", label: "中转翻译（离线）" },
 ];
 
 export const MOD_LOADER_SCHEME_OPTIONS: WorkshopMenuOption[] = [

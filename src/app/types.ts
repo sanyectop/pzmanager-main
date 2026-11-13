@@ -187,6 +187,23 @@ export type WorkshopBackgroundScanUpdate = {
   error: string | null;
 };
 
+/** 启动前兼容性预检：已启用 Java 模组引用了当前游戏已不存在的类。 */
+export type ModCompatIssue = {
+  modId: string;
+  name: string;
+  workshopId: number | null;
+  modInfoPath: string;
+  jarPath: string;
+  missingClasses: string[];
+};
+
+export type ModCompatReport = {
+  issues: ModCompatIssue[];
+  scanned: number;
+  durationMs: number;
+  cacheHit: boolean;
+};
+
 export type OverlaySessionUpdate = {
   phase: string;
   message: string;
@@ -247,10 +264,12 @@ export type ResourceCenterPage = "workshop" | "shaderDownload" | "developerNews"
 export type SettingsPage =
   | "about"
   | "general"
+  | "gameOptions"
   | "toolbox"
   | "logs"
   | "modLoader"
   | "startup"
+  | "experimental"
   | "developer";
 
 /** 「版本」页左侧分区：概览（游戏版本）/ 模组版本 / 历史版本，以及并入的支持库、光影包、截图。 */
@@ -450,6 +469,8 @@ export type AppSettings = {
   pauseMusicOnLaunch?: boolean;
   /** 「启动器接管光影管理」：开启后启动游戏才覆写 viewpoint-live.properties。缺失 = 关。 */
   shaderpackOverrideEnabled?: boolean;
+  /** 「从游戏文件启动（离线）」：勾选后「启动游戏」不经 Steam。缺失 = 关。 */
+  launchFromGameFiles?: boolean;
   /** 「激进内存清理」：常规清理之外再清系统工作集、文件缓存、已修改页与待机缓存。 */
   aggressiveMemoryClean: boolean;
   /** 「Steam 网络加速」模式：auto / relay / direct；null = 没写过，按 auto。 */
@@ -468,6 +489,12 @@ export type AppSettings = {
   privacyConsentedVersion: string | null;
   /** 「设置 › 版本」：备份在 C 盘时，操作前的换盘提示是否已勾选「不再弹出」。 */
   versionSystemDriveNoticeDismissed: boolean;
+  /** 「实验性 › 自动加入服务器」：启动游戏后自动连入配置的服务器。 */
+  autoJoinEnabled: boolean;
+  /** 自动加入的目标服务器 主机:端口；null = 未配置。 */
+  autoJoinTarget: string | null;
+  /** 自动加入的服务器密码；null = 未配置（收藏夹里保存过密码时优先用收藏的）。 */
+  autoJoinPassword: string | null;
 };
 
 export type LauncherLogTail = {
@@ -691,4 +718,21 @@ export type ShaderpackConfigInfo = {
   /** live 文件里当前的 minecraftProfile.<packId>。 */
   liveProfile: string | null;
   saved: ShaderpackOverrideEntry | null;
+};
+
+/** 游戏设置文件 options.ini 里的一项。 */
+export type GameOptionEntry = {
+  key: string;
+  value: string;
+};
+
+/** read_game_options 返回的快照。 */
+export type GameOptionsSnapshot = {
+  /** options.ini 的绝对路径。 */
+  path: string;
+  /** 文件是否存在（不存在 = 游戏还没运行过）。 */
+  exists: boolean;
+  /** 游戏是否正在运行：运行中只读。 */
+  gameRunning: boolean;
+  entries: GameOptionEntry[];
 };

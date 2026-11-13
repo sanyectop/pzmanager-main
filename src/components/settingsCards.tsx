@@ -14,9 +14,9 @@ export function SettingsSection({
   children: ReactNode;
 }) {
   return (
-    <Box className="pz-settings-section" mt="6">
+    <Box className="pz-settings-section" mt="4">
       <HStack align="center" gap="2">
-        <Text color="gray.900" fontSize="sm" fontWeight="700">
+        <Text className="pz-settings-section-title" color="gray.900" fontSize="sm" fontWeight="700">
           {title}
         </Text>
         {titleExtra}
@@ -40,11 +40,11 @@ export function SettingsRow({
   return (
     <HStack className="pz-settings-row" align="center" gap="4" justify="space-between" p="4" wrap="wrap">
       <Box flex="1" minW="240px">
-        <Text color="gray.800" fontSize="sm" fontWeight="700">
+        <Text className="pz-settings-row-label" color="gray.800" fontSize="sm" fontWeight="700">
           {label}
         </Text>
         {hint && (
-          <Text color="gray.500" fontSize="xs" mt="1">
+          <Text className="pz-settings-row-hint" color="gray.500" fontSize="xs" mt="1">
             {hint}
           </Text>
         )}

@@ -119,8 +119,10 @@ pzm/
 | 截图管理 `shots` | — | Viewpoint 截图列表、预览、复制到剪贴板 |
 | 光影管理 `shaderpacks` | — | 光影包导入（zip）/删除、图标与搜索词推导；每包「配置」弹窗解析 shaders.properties 并保存参数覆写（启动时写入 viewpoint-live.properties，游戏退出后整文件还原） |
 | 资源中心 `workshop` | `workshop \| shaderDownload \| developerNews` | 工坊筛选浏览 / Modrinth·CurseForge 光影下载 / Steam 新闻 + 翻译 |
-| 模组管理 `mods` | `lua \| jar` | Lua 加载顺序与启停、JAR 审批决策与冲突分析 |
-| 设置 `settings` | `general \| console \| downloader \| modLoader` | 通用、加载控制台、下载器、模组加载器（加载器方案 + 该方案加载器的状态与安装） |
+| 模组管理 `mods` | `lua \| jar` | Lua 加载顺序与启停（启用行标题旁显示当前位次 `#N`，即 `default.txt` 的 mods 块顺序）、JAR 审批决策与冲突分析 |
+| 设置 `settings` | `about \| general \| gameOptions \| toolbox \| logs \| modLoader \| startup \| experimental \| developer` | 关于、通用、游戏设置（`options.ini` 行级编辑）、百宝箱、日志、模组加载器（加载器方案 + 该方案加载器的状态与安装）、启动、实验性、开发者选项 |
+
+* 翻页条统一用 `src/components/pagination.tsx` 的 `Pagination`：上一页 / 数字页码（首末页 + 当前页及前后各一页，规则在 `src/paginationUi.ts`）/ 下一页，右对齐放在列表右下角（创意工坊列表与光影包下载列表共用同一套外观）。
 
 ### 5.2 `App.tsx` 的组织方式
 
@@ -189,12 +191,93 @@ ZombieBuddy 的 agent 策略是 **write-once**（`Loader.setPolicy`），JVM 只
 2. 游戏目录 `ProjectZomboid64.json` 的 `vmArgs`；
 3. 游戏目录 `ProjectZomboid64.bat` 的 `SET _JAVA_OPTIONS`。
 
+**游戏退出诊断的脚本冲突规则**（2026-11-12 实测）：console 出现 `Tile duplicate: <贴图格>` 时，从同一行提取脚本名（`Tile duplicate:` 前最近的 `[..]`）与贴图格，再统计游戏本体 `media/scripts` 里声明该 `entity` 的文件数：**≥2 = 游戏本体自己重复打包**（提示验证游戏文件完整性 / 回滚版本），**1 = 模组覆盖了本体脚本**，**0 / 目录未知 = 模组间冲突**；没有 Tile duplicate 但有 `Script load errors` 时给通用脚本加载错误提示。诊断函数拆成纯文本版 `diagnose_console_text(text, install)`，测试可注入安装目录，不受本机游戏文件影响。
 **启动熔断（15 秒）**：点下「启动游戏」**那一刻**开始计时（`launchClickedAtRef`，不等命令返回——后端若卡住，
 invoke 永远不回来，等待状态和超时都不会被触发；2026-11-08 实测过这种"点了没反应也不报超时"）。前端每 0.3s
 轮询 `check_game_process`，本轮始终没见过游戏进程时 15 秒（`LAUNCH_START_TIMEOUT_MS`）即熔断——停轮询、清
-PID/计时、弹错误提示（`steam_process_running` 区分「Steam 没起来」和「Steam 在但游戏没拉起」两种文案）、
+PID/计时、弹错误提示（Steam 启动用 `steam_process_running` 区分「Steam 没起来」和「Steam 在但游戏没拉起」两种文案；从游戏文件启动则指向游戏本体与 `ProjectZomboid64.exe`）、
 解除按钮的"启动中"状态，可立刻重试；晚到的成功回包只补挂覆盖层、不再重复提示。覆盖层会话线程仍会继续等
 （自身上限 60 秒），游戏若晚到，`overlay-session` 的 injecting/loading 事件仍会把窗口就绪与计时补上。
+
+**从游戏文件启动（不经 Steam）**：`launch_project_zomboid` 的 `launchSource = "files"`（开关在
+启动页 › 启动卡 › 启动设置弹窗里的「从游戏文件启动（离线）」，存 `settings.json` 的 `launchFromGameFiles`，
+命令 `save_launch_from_game_files`；原来的工具栏硬盘图标按钮已并入该开关）。与 Steam 启动共用同一套前置配置（内存校验 / 加载器 agent / 极速启动 /
+`apply_launch_loader` 写 JSON+BAT / 光影覆写 / 启动时清理内存），差异有三：**不读写 Steam localconfig.vdf**
+（Steam 没装没登录也能玩，`steam_configs` 为空跳过补丁）；**不走 `ProjectZomboid64.exe`**——它是原生启动器，
+Steam 相关初始化在无 Steam 环境时直接弹 fatal error（2026-11-10 实测：Steam 客户端未运行，进程秒退退出码 1；
+bat 的 java 命令行不经过那一步，Steam 未运行也能进游戏，游戏侧自行降级无 Steam 模式）；最后用
+`Command::new(javaw).current_dir(game_path)` 按 **bat 的方式**启动：`parse_bat_launch_command` 运行时解析
+`ProjectZomboid64.bat` 的第一条 java 行（重试分支忽略），拿固定 JVM 参数 / `PZ_CLASSPATH` / 主类，
+`build_file_java_args` 按顺序组装「bat 固定参数 → `-Xmx`（覆盖 bat 自带值）→ 加载器 agent → 极速启动 agent →
+用户 JVM 参数（`-X*`/`-XX*`/`-D`/`-agent*`/`--*` 前缀启发式拆分）→ `-cp` → 主类 → 用户游戏参数」；bat 解析失败
+回落 `default_bat_launch_command`（与官方脚本当前内容一致）。进程名变成 `javaw.exe`（缺 javaw 回落 java.exe），
+覆盖层 / 进程检测 / 停止游戏都按这个名字工作（javaw 本来就在 `TARGET_PROCESS_NAMES` 与 memclean 保护名单里）。
+代价：pzopt 的 AOT/GC 调优参数只写在 `ProjectZomboid64.json`（exe 专用），bat 路径不生效；Steam 成就 / 游戏时间
+统计等平台功能不可用；模组与存档不受影响。
+
+**42.22 签名 jar 与散装 class（"JNI ERROR"）**：42.22 正式版起官方 `projectzomboid.jar` 带签名
+（`META-INF/PROJECTZ.EC`）。classpath 里的 `.`（官方 bat/JSON 都有）会加载游戏目录下遗留的散装
+`.class`（旧版 pzopt / 手工替换，实测 445 个），与签名 jar 里的同名类**同一包混载**时 JVM 在加载主类
+阶段抛 `SecurityException: signer information does not match`，用户看到的就是启动弹 "JNI ERROR"、
+游戏秒退且不写 console。Java 没有关闭 JAR 签名校验的开关（`-Xverify:none` 只管字节码验证），所以
+**处理方式是"不喂散装类"**：`apply_launch_loader_at_paths` 在「jar 已签名（读 zip 中央目录的
+`META-INF/*.SF/.EC`）+ 游戏目录确有散装 `.class`」时，把 `ProjectZomboid64.json` 的 classpath 里
+`.`/`./` 条目去掉（`strip_dot_classpath_entries`）；「从游戏文件启动」的 java 命令行同理由
+`strip_dot_classpath_string` 去掉 bat 的 `./`。改动走既有的备份 + 原子写入事务，并在 launcher.log
+提示"建议删除散装 class 恢复官方目录结构"。未签名 jar（42.21 及更早）完全不动 classpath。
+
+**启动前模组兼容性预检**（`mod_compat.rs`，2026-11-11）：42.22.2 移除了
+`zombie.util.list.PZArrayList`，旧 Viewpoint 插件（DGVViewpointEyes 等 12 个）的类常量/字段描述符仍引用它；
+ZombieBuddy 在 `LuaManager.init` 反射暴露这些类时抛 `NoClassDefFoundError`，游戏在进主菜单前秒退。
+这类问题**无法靠版本号判断**（模组的 `versionMin` 早已满足），但可以直接比对字节码引用与游戏类表：
+`check_mod_compatibility` 读 `projectzomboid.jar` 中央目录得到类名集合，对每个**已启用** Java 模组
+（`jar_scan_inputs` + `jar_scan_candidates`，禁用模组的 `mod.info.disabled` 不参与）提取
+**类级**引用（`CONSTANT_Class` 条目 + 字段/方法描述符里的 `Lzombie/...;`，不取任意点分字符串，
+避免把方法名/日志误报成类），差集即"引用了当前游戏已不存在的类"。结果按「jar 路径 + size + mtime」
+与游戏 jar 指纹缓存在 `.pzmanager/mod-compat-cache.json`（实测冷扫描 47 个模组 ≈2.7s，热缓存 ≈1.4s）。
+前端在启动按钮里先调预检：有 issue 弹三选一「禁用这些模组并启动 / 仍然启动 / 取消」，
+"禁用"走现有 `mod.info` → `mod.info.disabled` 机制（`disable_mods_for_launch`，可随时恢复）；
+预检失败只记日志、绝不阻断启动。
+
+**覆盖层不得盖住 fatal error 弹窗**：游戏没起来而弹错误对话框时，那个弹窗是游戏进程的**第一个可见窗口**——
+`has_visible_window` 排除类名以 `#` 开头的系统窗口类（`#32770` 标准对话框），不把弹窗当"游戏窗口出现"，
+否则覆盖层会立刻注入并压在弹窗上，用户连错误内容都看不到（2026-11-10 用户实测）。排除后注入继续等真正的
+GLFW 主窗口；弹窗被点掉、进程退出，会话按"游戏进程已退出"正常收场。
+
+**「被拒绝加载的模组」收尾面板**（`overlay-core` 共享解析 + 启动器/DLL 双路）：游戏按 mod.info 的
+`versionMin`/`versionMax` 与 `require` 链拒绝加载模组时（`checkMissingMods` 静默移除，不打日志），
+覆盖层在加载完成时把差异列出来。数据源：console 的 `LOG : Mod … loading <id>` 行（每个实际加载的
+模组一行，`overlay_core::parse_loading_mod_line`）− `default.txt` 启用列表
+（`parse_enabled_mod_ids`，与 lua_mods 共用同一实现）→ 差集（`rejected_mod_ids`）。启动器在
+`track_console` 的四个「成功完成」出口（init 回调 / ≥97% advice / 主菜单标记 / 里程碑静默）计算差集并
+记 launcher.log；**差集为空立即收尾，正常启动不多等一秒**。**没有观察到任何 `loading` 行时不判定**——
+收尾可能发生在 ≥97% advice 那一刻、模组加载行还没出现，否则会把整份 `default.txt` 误报成"全部被拒"
+（2026-11-11 实测 118 个模组全被误报）。差集非空时经 `overlay-reject-warning` 事件
+把清单交给前端弹确认框（列表 + 「进入游戏」），覆盖层本身**不**为此停留——完成回调之后游戏进入
+Bink 过场/主菜单阶段，该阶段游戏不合成覆盖层绘制的内容，压上去只会黑屏（2026-11-11 实测：DLL 每帧
+都在画、屏幕全黑），旧设计本就在完成点立即退场，确认交互由启动器窗口承担。
+
+**离线映射的已知限制**：游戏 FS 层把**规范化后的绝对路径**映射回相对路径时只认注册过的根目录
+（`getRelativeFile` 的 "Invalid prefix found for" 校验）。联接目标在工坊库里，离线模式下该根未注册，
+所以穿过联接需要这种映射的内容会失败——实测是 3 个地砖模组（Take A Bath / EN_Newburbs / CommunityTilePack）
+的深度图（TileDepthTextures 捕获后打日志，贴图没有景深但不致崩溃）。Steam 模式下工坊根由 Steamworks 注册，
+无此问题。另外：模组"没被识别"与联接无关——游戏按 mod.info 的 `versionMin`/`versionMax` 与 `require` 链
+（`ChooseGameInfo$Mod.isAvailable`）逐个拒绝版本不匹配的模组（实测：游戏 42.21.0 时 Viewpoint 全家
+versionMin=42.22 → 连锁拒绝 38 个），Steam 模式同样会被拒；启动器的退出分类曾把这类正常退出误判成
+javaCrash（被捕获的 "Exception thrown" 行触发），已改为只认未捕获签名。
+
+**离线启动的创意工坊映射**（`offline_workshop.rs`）：游戏只扫描 `%USERPROFILE%\Zomboid\mods`，创意工坊模组
+平时靠 Steamworks API 提供——离线启动（Steam 未运行）时游戏扫不到它们。所以在文件启动且 `steam_is_running()`
+为假时，把当前所有已下载的创意工坊模组（`collect_mod_roots()` 的 workshop 部分）用**目录联接（junction）**
+逐个映射到 `Zomboid\mods\pzmanager-ws-<workshopId>-<模组名>`，游戏按本地模组扫描。实现用 `junction` crate
+（rustup 同款，`FSCTL_SET_REPARSE_POINT` 写 MOUNT_POINT reparse 点，无需管理员权限；不用 `mklink /J` 子进程，
+几百个模组快得多，也不怕模组名里的 cmd 元字符）。生命周期：**离线启动 = 先清残留再重建**；**游戏退出
+即清理**——离线启动持有游戏进程句柄，起 `pz-offline-cleanup` 线程 `wait()` 游戏退出后立刻拆除联接
+（启动器中途关闭时线程随进程消失，由下一次启动的清理兜底）；**Steam 启动 / 启动器重启 = 全部拆除**
+（游戏在跑时跳过，个别被占用拆不掉的记日志），避免与 Steam 工坊扫描重复加载。
+清理只动「名字带 `pzmanager-ws-` 前缀 **且** 确为联接点」的目录项，用户的同名真目录绝不误删；启动器的
+本地模组扫描（`collect_mod_roots` / `list_lua_mods`）都会跳过联接，映射存在期间不产生重复条目。映射结果
+随 `launch_project_zomboid` 的返回值拼进成功提示。
 
 > ⚠️ **进程检测禁止用 `tasklist`**（2026-11-08 事故）：本机实测 `tasklist /FI "IMAGENAME eq steam.exe" /NH`
 > 要 **85 秒**、`ProjectZomboid64.exe` 那条连带窗口枚举要 **113 秒**。它曾出现在启动路径（光影覆写的"游戏是否在运行"
@@ -207,7 +290,7 @@ PID/计时、弹错误提示（`steam_process_running` 区分「Steam 没起来�
 
 > ⚠️ `policy=allow-all` 是 ZombieBuddy 官方标注"不推荐"的模式：所有 Java 模组（含未签名/来源不明）都会被直接加载，且跳过 ZBS 签名校验。改成 `deny-new` 可保留校验但静默跳过未批准的模组。详见 [overlay-injection.md 附录](overlay-injection.md)。
 
-**极速启动（实验性，已跑通）**：开关在 设置 › 启动，且只在「模组加载器方案 = zombieBuddy」时可用。落地形态：
+**极速启动（实验性，已跑通）**：开关在 设置 › 实验性功能，且只在「模组加载器方案 = zombieBuddy」时可用。落地形态：
 
 * **缓存产出**：JAR 扫描结束时若开关开启，`build_fast_launch_cache()` 把**已批准且启用**的模组（jar 路径 / basePackage / jarHash / `@Patch` 类 / `@Exposer` 类）连同 FNV-1a 指纹写成 `%USERPROFILE%\Zomboid\.pzmanager\zb-prescan-cache.json`（`format` + `generatedAt` + `modSetHash` + `mods[]`）；实测一次扫描产出 25 个模组、Viewpoint 92 patches / 8 exposers。
 * **投送（JVMTI agent 早期加载，正式路线）**：启动器把覆盖层 DLL 作为 `-agentpath:<DLL>` 写进 `ProjectZomboid64.json` 的 `vmArgs`（必要时也写 `.bat` 的 `_JAVA_OPTIONS`），JVM 在启动最早期自己加载它并调 `Agent_OnLoad`：门禁（读 `settings.json` 的 `fastLaunch` + `modLoaderScheme`，前端禁用只是界面约束，注入器必须自己再判）→ 校验预扫描缓存（格式版本 + 指纹）→ `GetEnv(JVMTI)` → `AddCapabilities` → 注册 `VMInit` 回调 → **立刻打开 `ClassFileLoadHook`** → 之后在 `VMInit` 回调里 `DefineClass` 送进辅助类（onload 阶段拿不到 `JNIEnv`，实测 `GetEnv(vm, JNI_VERSION_1_6)` 返回 `JNI_EDETACHED = -2`）→ ZombieBuddy 自己加载 `PatchEngine` 时就地改成"包装式装配"。
@@ -303,14 +386,14 @@ PID/计时、弹错误提示（`steam_process_running` 区分「Steam 没起来�
 * 工坊浏览：`browse_workshop`（排序/必需与排除标签/分页/搜索词），`workshop_options` 返回可选项（含标签表），结果 5 分钟内存缓存。
 * 工坊详情（列表项右键 →「在窗口内打开」）：`fetch_workshop_item_detail` 调 `ISteamRemoteStorage/GetPublishedFileDetails`，取 `description`（新版接口叫 `file_description`，两个都认）里的 BBCode 原文走 `bbcode_to_html` + `add_translation_spans` 切段，前端再复用 `translate_developer_news_batch` 分批翻译、按 `sid` 回填 HTML（`replaceNewsTranslation`）。标题和正文共用一套 sid 方案（`w<id>_title` / `w<id>_t<node>_s<idx>`），所以标题会跟着一起翻译；工坊标题是纯文本，**不做** BBCode 剥离，否则 `[B42]` 这类后缀会被吃掉。
 * 光影下载：`fetch_shader_resources` / `fetch_shader_resource_files` 走 Modrinth 优先、CurseForge 兜底；`download_shader_file` 多线程下载到 `%USERPROFILE%\Zomboid\viewpoint-shaderpacks`，进度用事件推送。
-* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。翻译引擎可在「通用 › 翻译引擎」（`settings.json` 的 `translationEngine`）手动指定，没写过 / 坏值按 `google` 处理；默认链是**Google → 必应 → MyMemory**：Google 不可用（被墙 / 超时，熔断 10 分钟）时落到必应，必应走手机版 `cn.bing.com` 的 `ttranslatev3`（国内直连、质量好于 MyMemory；单次文本按 900 字切段，令牌过期/401 自动刷新重试一次，失败熔断 60 秒），再不行落到 MyMemory。手动指定某个引擎时它排链首，失败后按默认链回退其余引擎；「中转翻译」（relay，`{relay}/translate` → 本机 Argos，一次翻整批、失败熔断 10 分钟）只接 `zh-CN`/`en`/`ru`，仅在选择它时在批级先试。翻译来源在新闻卡片上按占比显示（`relay` 标为「中转翻译」，`bing` 标为「必应」）。
+* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。翻译引擎可在「通用 › 翻译引擎」（`settings.json` 的 `translationEngine`）手动指定，没写过 / 坏值按 `google` 处理；默认链是**Google → 必应 → MyMemory**：Google 不可用（被墙 / 超时，熔断 10 分钟）时落到必应，必应走手机版 `cn.bing.com` 的 `ttranslatev3`（国内直连、质量好于 MyMemory；单次文本按 900 字切段，令牌过期/401 自动刷新重试一次，失败熔断 60 秒），再不行落到 MyMemory。手动指定某个引擎时它排链首，失败后按默认链回退其余引擎；「中转翻译」（relay，`{relay}/translate` → 本机 Argos）已从可选引擎下线：设置页不再提供该选项，旧配置里的 `relay` 在读设置时按坏值回落 `google`；管线里的 relay 代码保留但不再被选中，缓存里旧的中转译文仍显示为「中转翻译」。翻译来源在新闻卡片上按占比显示（`relay` 标为「中转翻译」，`bing` 标为「必应」）。
 
 ### 6.6 背景图与截图/光影
 
 * 背景：自定义图存 `%USERPROFILE%\Zomboid\.pzmanager\backgrounds\<kind>\`；工坊模组的 title 图会被拼成四象限合成图（`compose_title_background_at`）；`set_background_path` 把选中项记进 `settings.json`；二进制经 `read_background` 回传。
 * 内置壁纸背景音乐「启动游戏自动暂停」：启动页 › 启动按钮 › 自定义背景 › 内置背景 里开关（`settings.json` 的 `pauseMusicOnLaunch`，缺省开，命令 `save_pause_music_on_launch`）。开启时，后端推送 `startup-timing`（界面出现「启动用时 XXXs」）的那一刻，前端给播放器发一次`pauseSignal`，播放器暂停并立刻落盘（`playing:false` + 当时的播放位置），下次启动保持暂停。只认事件推送，不认挂载时读到的"上次记录"，避免每次开启动器都误暂停。
-* 内置壁纸背景音乐：启动页在**内置壁纸生效时**（`wallpaperSeasonal`）左下角渲染播放器胶囊 `src/components/launchMusic.tsx`——复用创意工坊背景信息的展开按钮 / 展开菜单样式（共用 `.pz-launch-workshop-info*` 类名），面板内容换成播放器（曲名 / 播放暂停 / 可点击进度条 / 时间）。音源固定为壁纸目录 `public/backgrounds/main.mp3`（打包后 `/backgrounds/main.mp3`），`loop` 循环、收起不打断播放；与创意工坊胶囊互斥（选了工坊背景就不显示内置壁纸）。**播放器带音量调节**（静音按钮 + 0–100 滑条，键盘方向键 ±5）与**播放状态持久化**：音量 / 是否在播 / 播放位置 / 面板展开四项写进 `settings.json` 的 `launchMusic`（命令 `set_launch_music_state`，与 `set_wallpaper_effect` 同款「前端规整后原样存取」约定）；播放中每 5 秒落盘一次位置，播放/暂停/拖动进度/调音量/开关面板立即落盘，`pagehide`/卸载时再兜一次。**默认自动播放、默认音量 30**：没写过状态（或字段坏掉）时按"播放 + 30"处理，用户手动暂停后存档的 `false` 会被尊重；存档带格式版本 `v`（当前 2），**老存档（无 `v`）按新默认迁移一次**——只保留播放位置与面板展开，否则改版前写进去的"暂停 + 音量 60"会让新默认看起来没生效。WebView2 默认按手势策略拦截有声自动播放，`tauri.conf.json` / `tauri.dev.conf.json` 的 `additionalBrowserArgs` 都加了 `--autoplay-policy=no-user-gesture-required`；即便被拒，也还有"第一次 `pointerdown` / `keydown` 补放"兜底。真正起播时通过 `onMusicStarted` 回调让启动页弹一条右上角提示（`notice` 类型）。下次启动读取并恢复：音量立即生效，位置在 `loadedmetadata` 后定位一次。**落盘两层**：先同步写 `localStorage`（键 `pzmanager.launchMusic`），再走 IPC 写 settings.json；启动时两份按 `savedAt` 取新的（`pickNewerMusicState`）。原因：页面刷新/关窗瞬间 IPC 可能来不及到达后端，实测"暂停 + 进度"就是这样丢的；localStorage 是同步写入，刷新后仍在。另外**读档完成前禁止落盘**（`loadedRef`）——否则组件在读档前被卸载会把默认值（播放/0s）写回去，把上次的暂停与进度覆盖掉。**恢复期间的落盘还必须保护存档位置**（`persistedPosition`）：起播会触发 `onPlay` 立刻落盘，定位在 `loadedmetadata/durationchange/loadeddata/canplay/play/timeupdate` 任一事件上应用一次（Tauri 资源协议下 `duration` 常为 `Infinity`，不能以"duration 有限"作为定位前提）；`flushState` 里的 `playing` 以 `<audio>.paused` 实况为准，避免 play/pause 事件乱序写反；那一刻 `audio.currentTime` 还是 0，直接写就会把存档进度抹掉、导致每次启动都从头播（2026-11-08 实测问题）；恢复目标一直保留到真正应用为止，暂停时也走同一层保护。纯逻辑（状态规整、音量换算、`m:ss` 格式化、进度百分比）在 `src/launchMusicUi.ts`，测试 `tests/launchMusicUi.test.ts`。
-* 四季粒子特效：四季壁纸之上叠一层 canvas（`src/seasonalParticles.ts`，移植自参考 HTML）——春=白色光带、夏=细雨、秋=五裂枫叶、冬=雪花光晕；粒子数量按 `WallpaperEffect.weights` 动态平衡，换季时此消彼长。只在"真壁纸"那份渲染（亚克力副本是模糊克隆，不重复跑），`visibilitychange` 隐藏时停表，尺寸由 `resize` + `ResizeObserver` 跟踪。
+* 内置壁纸背景音乐：播放器拆成常驻的 `LaunchMusicProvider`（挂在 App 根部，`enabled = wallpaperSeasonal`，持有 `<audio>` 与全部播放状态）和启动页左下角的胶囊控件 `LaunchMusicControls`（同在 `src/components/launchMusic.tsx`）——切到其它页面时控件随页面卸载、`<audio>` 不卸载，音乐不中断；换成自定义壁纸时 `enabled` 变 `false`，自动暂停。控件复用创意工坊背景信息的展开按钮 / 展开菜单样式（共用 `.pz-launch-workshop-info*` 类名），面板内容换成播放器（曲名 / 播放暂停 / 可点击进度条 / 时间）。音源固定为壁纸目录 `public/backgrounds/main.mp3`（打包后 `/backgrounds/main.mp3`），`loop` 循环、收起不打断播放；与创意工坊胶囊互斥（选了工坊背景就不显示内置壁纸）。**播放器带音量调节**（静音按钮 + 0–100 滑条，键盘方向键 ±5）与**播放状态持久化**：音量 / 是否在播 / 播放位置 / 面板展开四项写进 `settings.json` 的 `launchMusic`（命令 `set_launch_music_state`，与 `set_wallpaper_effect` 同款「前端规整后原样存取」约定）；播放中**每 300ms** 把进度同步写进 localStorage（独立定时器，不依赖 `timeupdate` 约 250ms 的节奏，实测间隔稳定 300ms），刷新/关窗最多丢 0.3 秒；settings.json 仍每 5 秒一次 IPC，播放/暂停/拖动进度/调音量/开关面板立即落盘，`pagehide`/卸载时再兜一次。**默认自动播放、默认音量 30**：没写过状态（或字段坏掉）时按"播放 + 30"处理，用户手动暂停后存档的 `false` 会被尊重；存档带格式版本 `v`（当前 2），**老存档（无 `v`）按新默认迁移一次**——只保留播放位置与面板展开，否则改版前写进去的"暂停 + 音量 60"会让新默认看起来没生效。WebView2 默认按手势策略拦截有声自动播放，`tauri.conf.json` / `tauri.dev.conf.json` 的 `additionalBrowserArgs` 都加了 `--autoplay-policy=no-user-gesture-required`；即便被拒，也还有"第一次 `pointerdown` / `keydown` 补放"兜底。真正起播时通过 `onMusicStarted` 回调让启动页弹一条右上角提示（`notice` 类型）。下次启动读取并恢复：音量立即生效，位置在 `loadedmetadata` 后定位一次。**落盘两层**：先同步写 `localStorage`（键 `pzmanager.launchMusic`），再走 IPC 写 settings.json；启动时两份按 `savedAt` 取新的（`pickNewerMusicState`）。原因：页面刷新/关窗瞬间 IPC 可能来不及到达后端，实测"暂停 + 进度"就是这样丢的；localStorage 是同步写入，刷新后仍在。另外**读档完成前禁止落盘**（`loadedRef`）——否则组件在读档前被卸载会把默认值（播放/0s）写回去，把上次的暂停与进度覆盖掉。**恢复期间的落盘还必须保护存档位置**（`persistedPosition`）：起播会触发 `onPlay` 立刻落盘，定位在 `loadedmetadata/durationchange/loadeddata/canplay/play/timeupdate` 任一事件上应用一次（Tauri 资源协议下 `duration` 常为 `Infinity`，不能以"duration 有限"作为定位前提）；`flushState` 里的 `playing` 以 `<audio>.paused` 实况为准，避免 play/pause 事件乱序写反；那一刻 `audio.currentTime` 还是 0，直接写就会把存档进度抹掉、导致每次启动都从头播（2026-11-08 实测问题）；恢复目标一直保留到真正应用为止，暂停时也走同一层保护。纯逻辑（状态规整、音量换算、`m:ss` 格式化、进度百分比）在 `src/launchMusicUi.ts`，测试 `tests/launchMusicUi.test.ts`。
+* 四季粒子特效：四季壁纸之上叠一层 canvas（`src/seasonalParticles.ts`，移植自参考 HTML）——春=白色光带、夏=细雨、秋=五裂枫叶、冬=雪花光晕；粒子数量按 `WallpaperEffect.weights` 动态平衡，换季时此消彼长；粒子层套用与季节图**同一套滤镜链**（`url(#pz-seasonal-curve-*)` + 亮度 / 对比度 / 饱和度），色调随壁纸一起变化。只在"真壁纸"那份渲染（亚克力副本是模糊克隆，不重复跑），`visibilitychange` 隐藏时停表，尺寸由 `resize` + `ResizeObserver` 跟踪。
 * 内置背景：图片随前端打包在 `public/backgrounds/` 下（当前一张 `default.jpg`，来源是用户给的 `IMG_20261013_134024.png`，转 JPEG q92 存原生 1666×944、494KB）。`settings.json` 里存成 `builtin:<id>` 哨兵值——磁盘上没有对应文件，前端直接用打包 URL 渲染，所以 `set_background_path` 对 `builtin:` 前缀跳过 `background_path_allowed` 目录校验；`backgroundPath` 为 `null`（老配置或没选过）时前端回落这张内置图当默认外观，应用不提供"纯色/无背景"选项。
 * 截图/光影：只允许操作托管目录内的文件（`managed_file_path` / `background_path_allowed` 做目录穿越防护），截图上限按支持格式过滤。
 * 光影包配置覆写（`shaderpack_config.rs`，**默认关闭**）：`settings.json` 的 `shaderpackOverrideEnabled` 为开时才会在启动前写 `viewpoint-live.properties`；默认关闭状态下光影包页点「配置」会先弹确认框说明「接管期间游戏内修改不会保存」，同意后才把开关置真并打开配置面板。「设置 › 通用 › 启动器接管光影管理」可随时关闭，关闭后启动不再覆写任何光影配置文件（若还留着上次未还原的备份，启动时会先恢复原文件）。
@@ -374,6 +457,7 @@ PID/计时、弹错误提示（`steam_process_running` 区分「Steam 没起来�
 | --- | --- | --- | --- |
 | `%USERPROFILE%\Zomboid\console.txt` | 游戏 | 启动器（tail） | `[ZB]` 进度与完成标记的唯一来源；启动器只**追加**自己的 `[PZManager]` 记录 |
 | `%USERPROFILE%\Zomboid\mods\default.txt` | 游戏/启动器 | 启动器 | Lua 模组启用列表与顺序；启动器只替换 `mods{}` 块 |
+| `%USERPROFILE%\Zomboid\options.ini` | 游戏（退出时整份重写）/ 启动器 | 游戏 / 启动器 | 游戏设置：启动器「设置 › 游戏设置」行级读取与修改（`game_options.rs`），每项显示粗略中文名并按小标题分组（`gameOptionsLabels.ts` 16 组：画面模式与性能 / 画质与纹理 / 天气与特效 / 缩放与地图 / 字体与语言 / 界面布局 / 准星与高亮 / 聊天显示 / 信息与提示 / 新手引导与一次性标记 / 声音与音乐 / 语音聊天 / 移动与自动操作 / 键位与手柄 / 镜头与战斗 / 单位与杂项，未收录的键落到「其他」），搜索同时匹配中文名与键名，空分组自动隐藏；游戏运行中只读，写前备份到 `.pzmanager\game-options-backups\`（保留 5 份） |
 | `%USERPROFILE%\Zomboid\viewpoint-shaderpacks\` | 启动器 | 启动器 | 光影包托管目录（下载与导入都落这里） |
 | `%USERPROFILE%\Zomboid\viewpoint-live.properties` | **Viewpoint（游戏）** | 启动器（行级覆写）/ Viewpoint | Viewpoint 的实时设置总表；启动器启动前只覆写 `minecraft.<packId>.*` / `minecraftProfile.<packId>` 键（行级编辑保留注释与顺序），游戏退出后整文件还原为启动前备份 |
 | `%USERPROFILE%\Zomboid\.pzmanager\shaderpack-overrides.json` | 启动器 | 启动器 | 每个光影包的参数覆写配置（packName / profile / values） |

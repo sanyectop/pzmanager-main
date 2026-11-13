@@ -63,6 +63,9 @@ export function SeasonalWallpaper({ effect, idSuffix = "" }: { effect: Wallpaper
   const { centerBoost } = effect;
   // 同一个页面上可能同时挂两份（真壁纸 + 启动页亚克力的副本），SVG filter id 必须可区分。
   const filterId = `pz-seasonal-curve${idSuffix}`;
+  // 壁纸的调色链（逐通道曲线 + 亮度 / 对比度 / 饱和度）：粒子层也套同一份，
+  // 否则雪花/枫叶会是"未经调色"的纯色，和季节图的色调对不上。
+  const imageFilter = `url(#${filterId}) brightness(${effect.brightness.toFixed(2)}) contrast(${effect.filterContrast.toFixed(2)}) saturate(${effect.saturation.toFixed(2)})`;
   const particlesRef = useRef<ReturnType<typeof createSeasonalParticles> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // 亚克力副本（idSuffix 非空）是壁纸的模糊克隆，粒子在它上面只会错位，不重复跑。
@@ -101,9 +104,7 @@ export function SeasonalWallpaper({ effect, idSuffix = "" }: { effect: Wallpaper
       </svg>
       <div
         className="pz-seasonal-wallpaper-images"
-        style={{
-          filter: `url(#${filterId}) brightness(${effect.brightness.toFixed(2)}) contrast(${effect.filterContrast.toFixed(2)}) saturate(${effect.saturation.toFixed(2)})`,
-        }}
+        style={{ filter: imageFilter }}
       >
         {SEASONAL_BACKGROUNDS.map((background) => (
           <img
@@ -141,6 +142,7 @@ export function SeasonalWallpaper({ effect, idSuffix = "" }: { effect: Wallpaper
           aria-hidden="true"
           className="pz-seasonal-wallpaper-particles"
           ref={canvasRef}
+          style={{ filter: imageFilter }}
         />
       ) : null}
     </div>

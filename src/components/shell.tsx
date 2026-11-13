@@ -106,7 +106,10 @@ export function WindowTitlebar({
       }`}
     >
       {children}
-      <Box aria-label="拖动窗口" className="pz-window-drag-region" data-tauri-drag-region onMouseDown={(event) => { if (currentWindow && event.button === 0) runWindowAction(() => currentWindow.startDragging()); }} onDoubleClick={(event) => { if (currentWindow && !(event.target as HTMLElement).closest("[data-titlebar-control]")) runWindowAction(() => currentWindow.toggleMaximize()); }} />
+      {/* 拖动与双击最大化都交给 Tauri 注入的 drag-region 脚本（tauri/src/window/scripts/drag.js）：
+          mousedown detail=1 → start_dragging，detail=2 → internal_toggle_maximize。
+          不能在这里再手动 startDragging——第二击也会触发拖动，双击最大化会被拖动吃掉。 */}
+      <Box aria-label="拖动窗口" className="pz-window-drag-region" data-tauri-drag-region />
       <button
         aria-expanded={taskPanelOpen}
         aria-label={taskCount > 0 ? "任务中心，" + taskCount + " 个进行中" : "任务中心"}

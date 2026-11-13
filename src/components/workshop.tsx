@@ -25,6 +25,7 @@ import { EmptyState, SkeletonGate, SkeletonList } from "./common";
 import { FallbackImage } from "../FallbackImage";
 import { RESOURCE_DIALOG_EXIT_MS, initialShaderDownloadFilters } from "../app/constants";
 import { invoke } from "@tauri-apps/api/core";
+import { Pagination } from "./pagination";
 import { useDialogAutoHeight } from "./shell";
 import { useEffect, useRef, useState } from "react";
 
@@ -527,29 +528,13 @@ export function ResourceDownloadBrowser({
           </SkeletonGate>
         </Box>
 
-        {response && Math.ceil(response.total / response.pageSize) > 1 && (
-          <HStack justify="center" mt="3" gap="1" wrap="wrap">
-            <Button
-              disabled={filters.page <= 1}
-              onClick={() => updateFilters({ page: filters.page - 1 }, 0, false)}
-              size="sm"
-              variant="outline"
-            >
-              上一页
-            </Button>
-            <Text color="gray.500" fontSize="xs" px="2">
-              第 {response.page} / {Math.ceil(response.total / response.pageSize)} 页
-            </Text>
-            <Button
-              disabled={filters.page >= Math.ceil(response.total / response.pageSize)}
-              onClick={() => updateFilters({ page: filters.page + 1 }, 0, false)}
-              size="sm"
-              variant="outline"
-            >
-              下一页
-            </Button>
-          </HStack>
-        )}
+        {response ? (
+          <Pagination
+            onChange={(page) => updateFilters({ page }, 0, false)}
+            page={response.page}
+            totalPages={Math.ceil(response.total / response.pageSize)}
+          />
+        ) : null}
       </Box>
 
       {/* 正文框 .pz-main 带 backdrop-filter + overflow:hidden，会让 position:fixed 的弹层

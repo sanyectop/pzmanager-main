@@ -26,6 +26,8 @@ mod steam_relay;
 mod update;
 mod versioning;
 mod workshop;
+mod auto_join;
+pub(crate) use auto_join::*;
 mod backgrounds;
 pub(crate) use backgrounds::*;
 mod fast_launch;
@@ -38,8 +40,13 @@ mod launch_options;
 pub(crate) use launch_options::*;
 mod lua_mods;
 pub(crate) use lua_mods::*;
+mod mod_compat;
+pub(crate) use mod_compat::*;
+mod offline_workshop;
 mod settings;
 pub(crate) use settings::*;
+mod game_options;
+pub(crate) use game_options::*;
 mod shaderpack_config;
 pub(crate) use shaderpack_config::*;
 mod steam;
@@ -216,7 +223,7 @@ struct AppSettings {
     /// 记住的窗口尺寸（逻辑像素）。缺失 = 用 tauri.conf.json 的默认 840×560。
     window_width: Option<u32>,
     window_height: Option<u32>,
-    /// 「窗口 › 原生窗口标题栏」：开启后交给系统画标题栏（decorations），
+    /// 「通用 › 外观 › 原生窗口标题栏」：开启后交给系统画标题栏（decorations），
     /// 作为自绘标题栏在个别设备 / WebView 上拖不动的兜底。缺失 = 关（自绘）。
     #[serde(default)]
     native_titlebar: bool,
@@ -259,6 +266,10 @@ struct AppSettings {
     /// 游戏退出后还原。缺失 / false = 不接管（光影包页首次点「配置」时弹框询问后再开启）。
     #[serde(default)]
     shaderpack_override_enabled: bool,
+    /// 「从游戏文件启动（离线）」：勾选后「启动游戏」不经过 Steam，
+    /// 直接用游戏目录自带的 jre64 启动，并把创意工坊模组联接进 Zomboid\mods。
+    #[serde(default)]
+    launch_from_game_files: bool,
     /// 「激进内存清理」：常规清理之外，再把系统的已修改页 / 待机缓存还给空闲列表。
     #[serde(default)]
     aggressive_memory_clean: bool,
@@ -290,9 +301,21 @@ struct AppSettings {
     /// 隐私协议：用户最后同意的版本号。缺失 = 从未同意过（首次启动会弹同意框）。
     #[serde(default)]
     privacy_consented_version: Option<String>,
+    /// 「实验性 › 自动加入服务器」：启动游戏后自动连入配置的服务器（原理见 auto_join.rs）。
+    /// 关闭时保存命令会把目标与密码一起清空，不留在 settings.json 里。
+    #[serde(default)]
+    auto_join_enabled: bool,
+    /// 目标服务器 `主机:端口`（保存命令里已归一化校验；坏值按未配置处理）。
+    #[serde(default)]
+    auto_join_target: Option<String>,
+    /// 服务器密码（可选）；游戏收藏里保存过密码的服务器优先用收藏的。
+    #[serde(default)]
+    auto_join_password: Option<String>,
 }
 
-fn default_version_parallel_enabled() -> bool {
+/// 「缺失 = 默认开启」的开关：版本保存多线程（version_parallel）与保存时备份模组
+/// （version_include_mods）都用它；settings.rs 在没有 settings.json 时也要按这个默认值补。
+pub(crate) fn default_version_parallel_enabled() -> bool {
     true
 }
 
@@ -745,10 +768,13 @@ fn collect_mod_roots() -> Vec<mod_versioning::ModRoot> {
 
     if let Ok(zomboid) = user_zomboid_directory() {
         if let Ok(items) = fs::read_dir(zomboid.join("mods")) {
-            for entry in items
-                .flatten()
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            {
+            for entry in items.flatten().filter(|entry| {
+                // 跳过联接（symlink）：离线启动会把创意工坊模组联接进这里，
+                // 不跳过的话模组页 / 版本快照会把同一个模组数成两次。
+                entry
+                    .file_type()
+                    .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+            }) {
                 push_mod_root(&mut roots, &mut seen, entry.path(), "local", None);
             }
         }
@@ -1000,6 +1026,15 @@ fn capture_mod_versions(
                 }
             }
             Err(error) => {
+                // 433/1167 是整块盘掉线：后面每个模组都会以同样的错误失败，
+                // 继续循环只会刷出几百条日志（用户反馈里出现过 525 条），直接中止。
+                if versioning::is_device_gone_message(&error) {
+                    return Err(format!(
+                        "保存「{}」时磁盘已从系统断开，已停止本次保存（后面还有 {} 个模组未处理）。这不是模组文件损坏——是整块磁盘掉线；请检查硬盘的数据线/供电，重启电脑后再试。\n\n原始错误：{error}",
+                        root.name,
+                        total.saturating_sub(index + 1)
+                    ));
+                }
                 failures += 1;
                 launcher_log::error(&format!("模组「{}」记录版本失败：{error}", root.name));
             }
@@ -1105,6 +1140,14 @@ fn restore_mod_refs(
                 }
             }
             Err(error) => {
+                // 还原是写操作：盘掉线后继续只会反复失败，还可能留下半还原的模组。
+                if versioning::is_device_gone_message(&error) {
+                    return Err(format!(
+                        "还原「{}」时磁盘已从系统断开，已停止本次还原（后面还有 {} 个模组未处理）。请检查硬盘的数据线/供电，重启电脑后再试。\n\n原始错误：{error}",
+                        root.name,
+                        total.saturating_sub(index + 1)
+                    ));
+                }
                 skipped += 1;
                 launcher_log::error(&format!("还原模组「{}」失败：{error}", root.name));
             }
@@ -2069,7 +2112,9 @@ fn mod_root_has_pending_changes(
 }
 
 /// 一键保存模组变更：只保存「有待捕获变化 / 还没有版本」的模组，
-/// 无变化的模组自动跳过。不创建整合包（那是一键保存全部模组的职责）。
+/// 无变化的模组自动跳过。保存成功后写一条「变更记录」（kind=changes 的整合包），
+/// 之后可以在整合包列表里「还原整套」——只还原这次保存的那几个模组；
+/// 全量记录（所有模组）是一键保存全部模组的职责。
 #[tauri::command(async)]
 fn start_mod_version_save_changes(app: tauri::AppHandle) -> Result<u64, String> {
     let (store_base, parallel) = configured_version_options()?;
@@ -2100,16 +2145,40 @@ fn start_mod_version_save_changes(app: tauri::AppHandle) -> Result<u64, String> 
             let skipped = total - pending.len();
             let (references, failures) =
                 capture_mod_versions(&pending, "保存变化", parallel, progress)?;
+            // 一个都没保存成功就没有可还原的东西，不写记录。
+            let mut pack_note = String::new();
+            if !references.is_empty() {
+                let created_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+                let mut packs = mod_versioning::read_packs(&store_base)?;
+                // 编号只数变更记录，避免和「整合包 N」交叉出现「变更 3」的怪序。
+                let index = packs
+                    .iter()
+                    .filter(|pack| pack.kind == mod_versioning::PACK_KIND_CHANGES)
+                    .count()
+                    + 1;
+                let label = format!("变更 {index}");
+                packs.push(mod_versioning::ModPackRecord {
+                    id: format!("pack-{created_at}-{}", packs.len() + 1),
+                    label: label.clone(),
+                    created_at,
+                    kind: mod_versioning::PACK_KIND_CHANGES.to_string(),
+                    mods: references.clone(),
+                });
+                mod_versioning::write_packs(&store_base, &packs)?;
+                pack_note = format!("，已记为变更记录「{label}」，可在下方整套还原");
+            }
             let failure_note = if failures > 0 {
                 format!("，{failures} 个失败")
             } else {
                 String::new()
             };
             Ok(format!(
-                "已保存 {} 个模组的变更（{} 个无变化跳过{}）。",
+                "已保存 {} 个模组的变更（{} 个无变化跳过{failure_note}）{pack_note}。",
                 references.len(),
-                skipped,
-                failure_note
+                skipped
             ))
         },
     )
@@ -2152,6 +2221,7 @@ fn start_mod_version_save_all(
                 id: format!("pack-{created_at}-{}", packs.len() + 1),
                 label: pack_label.clone(),
                 created_at,
+                kind: mod_versioning::PACK_KIND_ALL.to_string(),
                 mods: references.clone(),
             };
             packs.push(record);
@@ -2630,7 +2700,26 @@ fn apply_launch_loader_at_paths(
             .map_err(|error| format!("读取 ProjectZomboid64.json 失败: {error}"))?;
         let (patched, changed) =
             patch_json_launcher_with_agent(&content, memory_mb, policy_agent, fast_launch_agent)?;
-        if changed {
+        // 42.22 起官方 jar 带签名：classpath 里的 `.` 会让游戏目录下遗留的散装
+        // `.class` 与签名 jar 混载，JVM 抛 signer mismatch（启动弹 "JNI ERROR"）。
+        // 只在「jar 已签名 + 确有散装 class」时去掉 `.`，其它版本保持原样。
+        let (patched, stripped_dot) = if project_zomboid_jar_is_signed(game_path)
+            && loose_class_file_count(game_path) > 0
+        {
+            let (patched, stripped) = strip_dot_classpath_entries(&patched)?;
+            if stripped {
+                launcher_log::warn(&format!(
+                    "游戏目录里有散装 .class 且 projectzomboid.jar 已签名（42.22+）；\
+                     已从启动 classpath 去掉 '.' 规避 JNI ERROR。\
+                     建议删除 {} 等散装 class 以恢复官方目录结构。",
+                    game_path.display()
+                ));
+            }
+            (patched, stripped)
+        } else {
+            (patched, false)
+        };
+        if changed || stripped_dot {
             files.push((json_path.clone(), patched.into_bytes()));
         }
     }
@@ -2661,6 +2750,50 @@ fn apply_launch_loader_at_paths(
     Ok(true)
 }
 
+/// 工坊里 ZombieBuddy 正式版的发布版本号（`mods/ZombieBuddy/java/VERSION`）。
+#[cfg(windows)]
+fn zombie_buddy_release_version() -> Option<String> {
+    let roots = steam_roots();
+    for library in all_libraries_from_roots(&roots) {
+        let Some(source) = zombie_buddy_source_from_library(&library) else {
+            continue;
+        };
+        let Ok(version) = fs::read_to_string(source.join("java").join("VERSION")) else {
+            continue;
+        };
+        let version = version.trim();
+        if !version.is_empty() {
+            return Some(version.to_string());
+        }
+    }
+    None
+}
+
+/// 42.22+ 的游戏 jar 带签名，而工坊 ZombieBuddy 正式版官方支持范围只到 B42.21。
+/// 这种「未支持组合」下，旧 Java 模组引用已移除类会在 `LuaManager.init` 阶段闪退
+/// （如 DGVViewpointEyes 引用 `zombie.util.list.PZArrayList`）。每次运行只记一条，
+/// 配合启动前兼容性预检定位问题模组；不阻断启动。
+#[cfg(windows)]
+fn log_zombie_buddy_support_notice() {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Some(game_path) = project_zomboid_install_path() else {
+        return;
+    };
+    if !project_zomboid_jar_is_signed(&game_path) {
+        return;
+    }
+    let version = zombie_buddy_release_version()
+        .map(|value| format!("v{value}"))
+        .unwrap_or_else(|| "未知版本".to_string());
+    launcher_log::warn(&format!(
+        "ZombieBuddy 版本提示：工坊正式版 {version} 官方支持 B42.12–B42.21，当前游戏为 42.22+，\
+         属未支持组合。若启动闪退，请优先用启动前兼容性预检禁用引用已移除类的旧模组。"
+    ));
+}
+
 /// 显式动作（例如配置 Viewpoint 3D）用的入口：无条件按 ZombieBuddy 方案改写。
 #[allow(dead_code)]
 fn force_zombie_buddy_policy_at_paths(
@@ -2668,6 +2801,77 @@ fn force_zombie_buddy_policy_at_paths(
     memory_mb: Option<u64>,
 ) -> Result<bool, String> {
     apply_launch_loader_at_paths(game_path, memory_mb, Some(ZOMBIE_BUDDY_POLICY_AGENT), None)
+}
+
+/// `projectzomboid.jar` 是否带签名（42.22 官方开始签名，`META-INF/PROJECTZ.EC`）。
+///
+/// 只看 zip 中央目录里的签名文件，不解压，几十毫秒内完成。
+fn project_zomboid_jar_is_signed(game_path: &Path) -> bool {
+    let jar_path = game_path.join("projectzomboid.jar");
+    let Ok(file) = fs::File::open(&jar_path) else {
+        return false;
+    };
+    let Ok(archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    let mut signed = false;
+    for name in archive.file_names() {
+        if name.starts_with("META-INF/")
+            && (name.ends_with(".SF")
+                || name.ends_with(".RSA")
+                || name.ends_with(".DSA")
+                || name.ends_with(".EC"))
+        {
+            signed = true;
+            break;
+        }
+    }
+    signed
+}
+
+/// 统计游戏目录里的散装 `.class`（旧版 pzopt / 手工替换的残留），上限 1000。
+///
+/// 跳过自带 JRE、资源与模组目录——它们量大且与签名 jar 无关。
+fn loose_class_file_count(game_path: &Path) -> usize {
+    const SKIP_DIRS: [&str; 7] = [
+        "jre64",
+        "media",
+        "mods",
+        "workshop",
+        "pzopt",
+        "natives",
+        ".pzmanager-backups",
+    ];
+    let mut count = 0usize;
+    let mut stack = vec![game_path.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                stack.push(entry.path());
+            } else if kind.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("class"))
+            {
+                count += 1;
+                if count >= 1000 {
+                    return count;
+                }
+            }
+        }
+    }
+    count
 }
 
 
@@ -2700,26 +2904,207 @@ fn resolve_fast_launch_agent_path(raw: &str) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+/// 从 bat 内容里按引号感知切 token：引号内空白不算分隔符，引号本身不保留。
+#[cfg(windows)]
+fn tokenize_bat_line(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ' ' | '\t' if !in_quotes => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// `ProjectZomboid64.bat` 里解析出的 java 启动命令固定部分。
+#[cfg(windows)]
+struct BatLaunchCommand {
+    /// bat 里 `-cp` 之前的固定 JVM 参数（已剔除 -Xmx / 加载器 agent，它们由启动器显式传）。
+    fixed_vm_args: Vec<String>,
+    classpath: String,
+    main_class: String,
+}
+
+/// 从 `ProjectZomboid64.bat` 解析 java 启动命令（第一条 java 行，重试分支忽略）。
+///
+/// 「从游戏文件启动」不走 `ProjectZomboid64.exe`：它是原生启动器，Steam 相关
+/// 初始化在没有 Steam 环境时直接弹 fatal error（2026-11-10 实测，Steam 客户端
+/// 未运行即复现，游戏进程 1 秒内退出码 1）；bat 的 java 命令行不经过那一步，
+/// Steam 未运行也能进游戏（游戏侧自行降级无 Steam 模式）。所以照抄 bat 的
+/// 命令行 —— 固定参数 / classpath / 主类运行时从 bat 解析，pzopt 或游戏更新
+/// 改了 bat 也能跟上；内存上限与加载器 agent 在 bat 里走 `_JAVA_OPTIONS`，
+/// 这里改成显式 VM 参数（同一套值，见 [`build_file_java_args`]）。
+#[cfg(windows)]
+fn parse_bat_launch_command(bat_content: &str) -> Option<BatLaunchCommand> {
+    let classpath_var = bat_content
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.trim().split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("SET PZ_CLASSPATH")
+                .then(|| value.trim().to_string())
+        })
+        // bat 没有 SET PZ_CLASSPATH 时按当前官方脚本的值兜底。
+        .unwrap_or_else(|| "./;projectzomboid.jar".to_string());
+
+    // 取第一条 java 启动行（bat 的 IF %ERRORLEVEL% 重试分支里的第二条忽略）。
+    let line = bat_content.lines().find(|line| {
+        let lowered = line.to_ascii_lowercase();
+        lowered.contains("jre64") && lowered.contains("java.exe")
+    })?;
+    let tokens = tokenize_bat_line(line);
+    // 形如：[java 路径, 固定参数..., "-cp", %PZ_CLASSPATH%, 主类, %1, %2]
+    let cp_index = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("-cp") || token.eq_ignore_ascii_case("-classpath"))?;
+    let classpath = tokens
+        .get(cp_index + 1)?
+        .replace("%PZ_CLASSPATH%", &classpath_var);
+    let main_class = tokens.get(cp_index + 2)?.clone();
+    let fixed_vm_args = tokens[1..cp_index]
+        .iter()
+        .filter(|token| {
+            !is_memory_arg(token)
+                && !is_fast_launch_agent_token(token)
+                && !is_zombie_buddy_agent_token(token)
+                && token.as_str() != "--"
+        })
+        .cloned()
+        .collect();
+    Some(BatLaunchCommand {
+        fixed_vm_args,
+        classpath,
+        main_class,
+    })
+}
+
+/// bat 解析失败（结构变了 / 文件缺失）时的兜底：与当前官方 bat 的第一条 java 行一致。
+#[cfg(windows)]
+fn default_bat_launch_command() -> BatLaunchCommand {
+    BatLaunchCommand {
+        fixed_vm_args: [
+            "-Djava.awt.headless=true",
+            "--enable-native-access=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+            "-Dzomboid.steam=1",
+            "-Dzomboid.znetlog=1",
+            "-XX:-CreateCoredumpOnCrash",
+            "-XX:-OmitStackTraceInFastThrow",
+            "-XX:+UseZGC",
+            "-Djava.library.path=./win64/;./",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        classpath: "./;projectzomboid.jar".to_string(),
+        main_class: "zombie.gameStates.MainScreenState".to_string(),
+    }
+}
+
+/// 把用户额外启动参数拆成 JVM 参数与主类（游戏）参数：
+/// `-X*` / `-XX*` / `-D`（大小写敏感，`-debug` 是游戏参数）/ `-agent*` / `--*`
+/// 是 JVM 参数（必须放在 `-cp` 之前），其余跟在主类后面。agent 与 `-Xmx`
+/// 由启动器显式写入，这里跳过避免重复。
+#[cfg(windows)]
+fn split_user_launch_args(extra_args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut vm_args = Vec::new();
+    let mut game_args = Vec::new();
+    for token in extra_args {
+        let token = token.trim();
+        if token.is_empty()
+            || token == "--"
+            || is_zombie_buddy_agent_token(token)
+            || is_fast_launch_agent_token(token)
+            || is_memory_arg(token)
+        {
+            continue;
+        }
+        if token.starts_with("-X")
+            || token.starts_with("-XX")
+            || token.starts_with("-D")
+            || token.starts_with("-agent")
+            || token.starts_with("--")
+        {
+            vm_args.push(token.to_string());
+        } else {
+            game_args.push(token.to_string());
+        }
+    }
+    (vm_args, game_args)
+}
+
+/// 组装「从游戏文件启动」的完整 java 参数（顺序即 JVM 语义）：
+/// bat 固定参数 → `-Xmx`（放最后覆盖 bat 自带的值）→ 加载器 agent → 极速启动
+/// agent → 用户 JVM 参数 → `-cp` → 主类 → 用户游戏参数。
+#[cfg(windows)]
+fn build_file_java_args(
+    command: &BatLaunchCommand,
+    memory_mb: u64,
+    extra_args: &[String],
+    policy_agent: Option<&str>,
+    fast_launch_agent: Option<&str>,
+) -> Vec<String> {
+    let (user_vm_args, user_game_args) = split_user_launch_args(extra_args);
+    let mut args = command.fixed_vm_args.clone();
+    args.push(memory_arg(memory_mb));
+    if let Some(agent) = policy_agent {
+        args.push(agent.to_string());
+    }
+    if let Some(agent) = fast_launch_agent {
+        args.push(agent.to_string());
+    }
+    args.extend(user_vm_args);
+    args.push("-cp".to_string());
+    args.push(command.classpath.clone());
+    args.push(command.main_class.clone());
+    args.extend(user_game_args);
+    args
+}
+
+/// `launch_source`：`None` / `"steam"` = 走 Steam 协议启动（默认，行为与旧版一致）；
+/// `"files"` = 不经过 Steam 与 `ProjectZomboid64.exe`，按游戏目录 bat 的方式用
+/// 自带 jre64 的 java 命令行直接启动。
+/// 两种来源共用同一套启动配置（内存上限 / 加载器 agent / 极速启动 / 光影覆写 / 清理内存）。
 #[tauri::command(async)]
 fn launch_project_zomboid(
     memory_mb: u64,
     launch_args: Vec<String>,
     fast_launch_dll_path: Option<String>,
-) -> Result<(), String> {
+    launch_source: Option<String>,
+) -> Result<String, String> {
     #[cfg(not(windows))]
     {
-        let _ = (memory_mb, launch_args, fast_launch_dll_path);
+        let _ = (memory_mb, launch_args, fast_launch_dll_path, launch_source);
         return Err("启动 Project Zomboid 只支持 Windows".to_string());
     }
 
     #[cfg(windows)]
     {
+        let from_files = matches!(launch_source.as_deref(), Some("files"));
         let total_memory_mb = system_memory_mb()?;
         validate_memory_limit_mb(memory_mb, total_memory_mb)?;
-        let steam_configs = current_steam_config_paths();
-        if steam_configs.is_empty() {
-            return Err("找不到 Steam localconfig.vdf".to_string());
-        }
+        log_zombie_buddy_support_notice();
+        // 从游戏文件启动时不需要碰 Steam 配置：Steam 没装 / 没登录也要能玩。
+        let steam_configs = if from_files {
+            Vec::new()
+        } else {
+            let configs = current_steam_config_paths();
+            if configs.is_empty() {
+                return Err("找不到 Steam localconfig.vdf".to_string());
+            }
+            configs
+        };
         // 读一次设置：「模组加载器方案」决定 agent 处理，`fastLaunch` 决定要不要写极速启动的 agent。
         let settings = load_app_settings_at(&app_settings_path()?).ok();
         let scheme = settings
@@ -2728,6 +3113,13 @@ fn launch_project_zomboid(
             .and_then(|value| normalize_mod_loader_scheme(&value))
             .unwrap_or_else(|| DEFAULT_MOD_LOADER_SCHEME.to_string());
         let policy_agent = mod_loader_policy_agent(&scheme);
+
+        // 自动加入服务器（实验性）：只认「开关打开 + 地址合法」的配置，坏地址按未配置处理。
+        let auto_join_target = settings
+            .as_ref()
+            .filter(|settings| settings.auto_join_enabled)
+            .and_then(|settings| settings.auto_join_target.as_deref())
+            .and_then(normalize_auto_join_target);
 
         // 极速启动（`-agentpath`）的三个前提：设置开关打开、方案是 ZombieBuddy、DLL 真的存在。
         // 任一不满足都传 None —— 那会**摘掉**已经写在启动文件里的 `-agentpath:`，
@@ -2756,16 +3148,20 @@ fn launch_project_zomboid(
             strip_loader_agent_tokens(&mut effective_launch_args);
         }
         launcher_log::info(&format!(
-            "启动游戏：内存 {memory_mb} MB，加载器方案 {scheme}，极速启动 {}，启动参数 {}",
+            "启动游戏：内存 {memory_mb} MB，加载器方案 {scheme}，极速启动 {}，启动参数 {}，来源 {}",
             if fast_launch_agent.is_some() { "开" } else { "关" },
-            effective_launch_args.join(" ")
+            effective_launch_args.join(" "),
+            if from_files { "游戏文件" } else { "Steam" }
         ));
-        patch_steam_launch_options_at_paths(
-            &steam_configs,
-            Some(memory_mb),
-            &effective_launch_args,
-            policy_agent,
-        )?;
+        // 从游戏文件启动时不写 Steam LaunchOptions（没有 Steam 配置可写）。
+        if !from_files {
+            patch_steam_launch_options_at_paths(
+                &steam_configs,
+                Some(memory_mb),
+                &effective_launch_args,
+                policy_agent,
+            )?;
+        }
 
         // 再改写游戏自带的启动文件：内存上限始终写（与加载器无关，否则 JSON 里旧的 -Xmx
         // 会覆盖启动器设置）；只有方案启用了加载器时才把它的 agent 归一化成 policy=allow-all
@@ -2776,12 +3172,124 @@ fn launch_project_zomboid(
             steam_configs.len()
         ));
 
+        // 从游戏文件启动：解析游戏目录的 bat 拿到 java 启动命令，并确认 jre64 真的存在。
+        // 缺了立刻报错，别让"游戏没起来"留到前端 15 秒熔断才暴露。
+        // 注意这里不用 ProjectZomboid64.json：那是 exe 启动器读的，bat 路径有自己的
+        // 固定参数（pzopt 的 AOT/GC 调优只存在于 JSON，bat 路径不生效，见 parse 文档）。
+        let file_launch_java = if from_files {
+            let game_path = project_zomboid_install_path()
+                .ok_or_else(|| "找不到游戏安装目录，无法从游戏文件启动。请先在启动页检测到游戏。".to_string())?;
+            let java = game_path.join("jre64").join("bin").join("javaw.exe");
+            let java = if java.is_file() {
+                java
+            } else {
+                let console_java = game_path.join("jre64").join("bin").join("java.exe");
+                if !console_java.is_file() {
+                    return Err(format!(
+                        "游戏目录里找不到自带 JRE（{}），无法从游戏文件启动。",
+                        console_java.display()
+                    ));
+                }
+                console_java
+            };
+            let bat_content = fs::read(game_path.join("ProjectZomboid64.bat"))
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+            let mut command = parse_bat_launch_command(&bat_content)
+                .unwrap_or_else(default_bat_launch_command);
+            // 与 JSON 同理：签名 jar + 散装 class 时 classpath 里的 `.` 会触发
+            // signer mismatch（JNI ERROR），直接从命令行里去掉。
+            if project_zomboid_jar_is_signed(&game_path) && loose_class_file_count(&game_path) > 0 {
+                let (classpath, changed) = strip_dot_classpath_string(&command.classpath);
+                if changed {
+                    launcher_log::warn(&format!(
+                        "游戏目录里有散装 .class 且 projectzomboid.jar 已签名（42.22+）；\
+                         已从直启 classpath 去掉 '.' 规避 JNI ERROR。"
+                    ));
+                    command.classpath = classpath;
+                }
+            }
+            let args = build_file_java_args(
+                &command,
+                memory_mb,
+                &effective_launch_args,
+                policy_agent,
+                fast_launch_agent.as_deref(),
+            );
+            launcher_log::info(&format!(
+                "从游戏文件启动：{} {}",
+                java.display(),
+                args.join(" ")
+            ));
+            Some((game_path, java, args))
+        } else {
+            None
+        };
+
         // 光影包覆写：把启动器里配置的 minecraft.* 参数行级写进 viewpoint-live.properties。
         // 尽力而为：失败只记日志不阻断启动——游戏启动配置在上面已经写完，光影只是锦上添花。
         let shader_override_applied = apply_shaderpack_overrides_for_launch().unwrap_or_else(|error| {
             launcher_log::error(&format!("光影包覆写失败：{error}"));
             false
         });
+
+        // 自动加入服务器（设置 › 实验性功能）：钩子装进游戏目录 + 一次性配置写进 Zomboid
+        // 主目录，游戏退出后由后台线程清理（auto_join::spawn_auto_join_cleanup）。
+        // 失败都只记日志不阻断启动——大不了这次不自动连入。密码绝不进日志。
+        let auto_join_armed = if let Some(target) = auto_join_target.as_deref() {
+            let auto_join_password = settings
+                .as_ref()
+                .and_then(|settings| settings.auto_join_password.as_deref());
+            match project_zomboid_install_path() {
+                Some(game_path) => match install_auto_join_hook_at(&game_path) {
+                    Ok(true) => {
+                        launcher_log::info("自动加入：钩子已写入游戏目录 media/lua/client/。")
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        launcher_log::warn(&format!("自动加入：{error}（本次不会自动连入）"))
+                    }
+                },
+                None => launcher_log::warn(
+                    "自动加入：找不到游戏安装目录，钩子未安装（本次不会自动连入）。",
+                ),
+            }
+            match write_auto_join_config(target, auto_join_password) {
+                Ok(()) => {
+                    launcher_log::info(&format!(
+                        "自动加入：本次启动将连入 {target}（密码：{}）。",
+                        describe_auto_join_password(auto_join_password)
+                    ));
+                    true
+                }
+                Err(error) => {
+                    launcher_log::warn(&format!("自动加入：{error}（本次不会自动连入）"));
+                    false
+                }
+            }
+        } else {
+            // 未启用：顺手清理残留。钩子文件在游戏运行时先留着（游戏启动时已读进内存，
+            // 也不会有配置触发它），下次启动再摘；一次性配置现在就能删。
+            // 这里只能用 game_running_quick（纯进程快照）：启动路径禁止 project_zomboid_running，
+            // 它枚举窗口同步取标题，无响应窗口会把启动卡住（2026-11-08 的教训）。
+            if !game_running_quick() {
+                if let Some(game_path) = project_zomboid_install_path() {
+                    match remove_auto_join_hook_at(&game_path) {
+                        Ok(true) => {
+                            launcher_log::info("自动加入：功能未启用，已移除游戏目录里的钩子。")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if clear_auto_join_config() {
+                launcher_log::info("自动加入：功能未启用，已清理残留的一次性配置。");
+            }
+            false
+        };
+        if auto_join_armed {
+            spawn_auto_join_cleanup();
+        }
 
         // 「启动时清理内存」：拉起游戏之前先把各进程的工作集还给系统。
         // 此刻游戏还没起来，所以这次清理不会被 memclean 的保护名单挡掉任何东西。
@@ -2801,22 +3309,100 @@ fn launch_project_zomboid(
             );
         }
 
-        let launch_result = Command::new("cmd")
-            .args([
-                "/C",
-                "start",
-                "",
-                &format!("steam://rungameid/{PROJECT_ZOMBOID_APP_ID}"),
-            ])
-            .spawn();
+        // 离线启动的创意工坊映射：Steam 没在跑时把工坊模组联接进 Zomboid\mods，
+        // 否则游戏扫不到创意工坊模组（游戏只认 Zomboid\mods，工坊靠 Steamworks 提供）。
+        // Steam 启动（或 Steam 在跑时的离线启动）则拆掉旧映射，避免与 Steam 工坊扫描重复。
+        // 尽力而为：失败只记日志不阻断启动——大不了游戏里看不到工坊模组。
+        let offline_note = if from_files {
+            match offline_workshop::sync_offline_workshop_links() {
+                Ok(note) => {
+                    launcher_log::info(&format!("离线工坊映射：{note}"));
+                    note
+                }
+                Err(error) => {
+                    let message = format!("创建离线工坊映射失败：{error}");
+                    launcher_log::error(&message);
+                    message
+                }
+            }
+        } else {
+            match offline_workshop::remove_offline_workshop_links() {
+                Ok(0) => String::new(),
+                Ok(count) => {
+                    let note = format!("已清理 {count} 个离线工坊映射。");
+                    launcher_log::info(&format!("离线工坊映射：{note}"));
+                    note
+                }
+                Err(error) => {
+                    let message = format!("清理离线工坊映射失败：{error}");
+                    launcher_log::error(&message);
+                    message
+                }
+            }
+        };
+
+        let launch_result = if let Some((game_path, java, args)) = file_launch_java.as_ref() {
+            // 直接用游戏自带 jre64 的 javaw 启动 JVM：进程名是 javaw.exe，
+            // 覆盖层注入 / 游戏进程检测 / 停止游戏进程都按这个名字工作。
+            // javaw（而非 java）与 exe 启动的观感一致：不带一个常驻控制台窗口。
+            Command::new(java)
+                .current_dir(game_path)
+                .args(args)
+                .spawn()
+        } else {
+            Command::new("cmd")
+                .args([
+                    "/C",
+                    "start",
+                    "",
+                    &format!("steam://rungameid/{PROJECT_ZOMBOID_APP_ID}"),
+                ])
+                .spawn()
+        };
         match launch_result {
-            Ok(_) => {
-                launcher_log::info("已发送 Steam 启动请求。");
+            Ok(mut child) => {
+                // 离线映射的生命周期与本次游戏进程绑定：起清理线程等游戏退出后
+                // 立刻拆除联接，不再等下一次启动/重启启动器。启动器中途关闭时
+                // 线程随进程消失，由下一次启动时的清理兜底。等待失败/清理失败
+                // 都只记日志——联接被占用拆不掉时 remove 会跳过并留到下次。
+                if from_files {
+                    let spawned = std::thread::Builder::new()
+                        .name("pz-offline-cleanup".to_string())
+                        .spawn(move || {
+                            let exit_status = child.wait();
+                            match offline_workshop::remove_offline_workshop_links() {
+                                Ok(0) => {}
+                                Ok(count) => launcher_log::info(&format!(
+                                    "游戏退出（{}）：已清理 {count} 个离线工坊映射。",
+                                    exit_status
+                                        .map(|status| format!("退出码 {status}"))
+                                        .unwrap_or_else(|error| format!("等待失败：{error}"))
+                                )),
+                                Err(error) => launcher_log::warn(&format!(
+                                    "游戏退出：清理离线工坊映射失败：{error}"
+                                )),
+                            }
+                        });
+                    if let Err(error) = spawned {
+                        launcher_log::warn(&format!("创建离线映射清理线程失败：{error}"));
+                    }
+                }
+                // 返回值给前端拼成功提示：离线启动时带上工坊映射结果。
+                let message = if from_files {
+                    offline_note
+                } else {
+                    "已发送 Steam 启动请求。".to_string()
+                };
+                launcher_log::info(if from_files {
+                    "已从游戏文件启动游戏。"
+                } else {
+                    "已发送 Steam 启动请求。"
+                });
                 // 光影覆写真正写入了才需要还原监听：等游戏退出后把 viewpoint-live.properties 整文件还原。
                 if shader_override_applied {
                     overlay_session::start_shaderpack_restore_watcher();
                 }
-                Ok(())
+                Ok(message)
             }
             Err(error) => {
                 let message = format!("启动 Project Zomboid 失败: {error}");
@@ -2894,6 +3480,24 @@ pub fn run() {
             );
             memclean::start_silent_loop(app.handle().clone());
 
+            // 上次离线启动留下的创意工坊映射：启动器一重启就清掉，避免 Steam 模式
+            // 重复加载工坊模组、模组页出现重复条目。游戏还在跑时联接可能被占用，
+            // 跳过（下次启动再清）；个别拆不掉的由 remove_offline_workshop_links 记日志。
+            #[cfg(windows)]
+            if !overlay::imp::image_name_running("ProjectZomboid64.exe")
+                && !overlay::imp::image_name_running("javaw.exe")
+            {
+                match offline_workshop::remove_offline_workshop_links() {
+                    Ok(0) => {}
+                    Ok(count) => launcher_log::info(&format!(
+                        "启动器启动：已清理上次离线启动留下的 {count} 个工坊映射。"
+                    )),
+                    Err(error) => launcher_log::error(&format!(
+                        "启动器启动：清理离线工坊映射失败：{error}"
+                    )),
+                }
+            }
+
             // 恢复上一次记住的窗口尺寸（拖动窗口边缘调整后会自动记住）。
             // 默认 840×560 由 tauri.conf.json 提供，这里只在有有效记录时覆盖。
             if let Some(settings) = loaded_settings.as_ref() {
@@ -2938,6 +3542,9 @@ pub fn run() {
             save_developer_mode,
             save_steam_account_hidden,
             save_pause_music_on_launch,
+            save_launch_from_game_files,
+            read_game_options,
+            save_game_option,
             save_shaderpack_override_enabled,
             save_translation_language,
             save_translation_engine,
@@ -2950,6 +3557,7 @@ pub fn run() {
             restore_default_window_size,
             save_native_titlebar,
             save_launch_arguments,
+            save_auto_join_settings,
             save_mod_loader_scheme,
             save_jar_mod_use_disk_state_on_startup,
             save_fast_launch,
@@ -3013,6 +3621,8 @@ pub fn run() {
             read_lua_mod_poster,
             start_zombie_buddy_jar_scan,
             find_jar_mods_with_injection_item,
+            check_mod_compatibility,
+            disable_mods_for_launch,
             list_lua_mods,
             set_lua_mod_enabled,
             set_lua_mods_enabled,

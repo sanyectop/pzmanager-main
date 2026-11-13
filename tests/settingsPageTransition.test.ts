@@ -14,8 +14,8 @@ test("settings sub-pages replay a directional slide on switch", () => {
   assert.match(appSource, /key=\{settingsPage\}/);
   assert.match(appSource, /data-direction=\{settingsTransitionDirection\}/);
   assert.match(appSource, /function switchSettingsPage\(nextPage: SettingsPage\)/);
-  // 方向按侧栏顺序判断，6 个分页点击都走 switchSettingsPage。
-  for (const page of ["about", "general", "toolbox", "logs", "modLoader", "startup"]) {
+  // 方向按侧栏顺序判断，7 个分页点击都走 switchSettingsPage。
+  for (const page of ["about", "general", "toolbox", "logs", "modLoader", "startup", "experimental"]) {
     assert.match(appSource, new RegExp(`switchSettingsPage\\("${page}"\\)`));
   }
 

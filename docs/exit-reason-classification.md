@@ -31,6 +31,7 @@
 | `javaCrash` | JVM 内 Java 层异常退出（uncaughtException 等） | console.txt 崩溃签名 |
 | `nativeCrash` | JVM/游戏原生崩溃 | 退出码为 NT 异常码、`hs_err_pid<pid>.log`、WER 事件 |
 | `externalTerminate` | 被外部终止（任务管理器结束进程、Steam 强退更新、关机） | 退出码 1 且无任何崩溃证据 |
+| `launcherStop` | 启动器「停止游戏进程」强杀 | `stop_game_process` 在 taskkill 前写 pid 标记，退出监视消费后**跳过全部停止分析**（不读 console / hs_err、不弹报告） |
 | `unknown` | 证据不足，无法归类 | 兜底 |
 
 （serde 序列化即上表的 camelCase 字符串；事件载荷 `OverlaySessionUpdate.stopReason` /
@@ -73,11 +74,31 @@ JVM 原生崩溃（访问违例、栈溢出等）会写 `hs_err_pid<pid>.log`，
 `diagnose_game_exit_from_console` 保留，签名表从硬编码 if 链改为数据驱动的
 `&[(匹配串, 停止原因, 诊断文案)]`，便于新增：
 
-- `NoClassDefFoundError` / `ClassNotFoundException` → `java_crash`（类名提取进诊断，
-  现状已做）。
-- `OutOfMemoryError` → `java_crash`（内存诊断，现状已做）。
-- `uncaughtException` / `Exception thrown` → `java_crash`。
-- `EXCEPTION_ACCESS_VIOLATION` / `siginfo:` / `hs_err` 引用行 → `native_crash`。
+按优先级（最具体 → 兜底）匹配，命中即返回；命中行会压成一行摘要（去掉
+`ERROR: General f:0 at Xxx > ` 前缀、折叠空白、截断 140 字）：
+
+| 规则 | 触发签名 | 诊断方向 |
+|---|---|---|
+| 服务器字典缺失 | `Missing dictionary script on client:` | 客户端与服务端模组不一致 |
+| 脚本冲突 | `Tile duplicate: <贴图格>` | 统计游戏本体 `media/scripts` 里该 `entity` 的声明文件数：≥2 本体重复 / =1 模组覆盖 / 其余模组间冲突 |
+| 脚本加载 | `Script load errors` | 某个模组的 scripts 定义没通过校验 |
+| 缺失类 | `NoClassDefFoundError` / `ClassNotFoundException` | 游戏版本与模组不匹配 |
+| 类签名不匹配 | `NoSuchMethodError` / `NoSuchFieldError` / `AbstractMethodError` / `IncompatibleClassChangeError` / `IllegalAccessError` / `VerifyError` | 同上（链接失败家族） |
+| 内存 | `OutOfMemoryError` / `GC overhead limit exceeded` / `Metaspace` / `unable to create new native thread` | 调高内存上限 / 减少模组 |
+| 本地库 | `UnsatisfiedLinkError` / `java.library.path` / `Native Library` | 模组自带 DLL 缺失 / 位数不符 / 被杀软拦截 |
+| Steam | `SteamAPI_Init` / `steam_api64` / `Could not initialize Steam` | Steam 未启动；离线启动下依赖 Steam 的模组可能不可用 |
+| 窗口/OpenGL | `Failed to create window` / `OpenGL context` / `GLFW error` / `Pixel format not accelerated` | 显卡驱动 / 远程桌面 / 无 GPU |
+| 存档 | `Error loading save` / `save file is corrupted` / `Failed to load world` 等 | 存档损坏或版本/模组不匹配 |
+| Lua（**需未捕获签名**） | `attempt(ed) to call nil value` / `stack traceback:` / `LuaManager` | 模组 Lua 脚本错误 |
+| 模组加载（需未捕获签名） | `failed to load mod` / `Error loading mod` 等 | 模组不兼容 / 依赖缺失 |
+| 着色器（需未捕获签名） | `shader compile error` / `Failed to compile shader` 等 | 光影包 / 材质模组 / 驱动 |
+| 贴图缺失（需未捕获签名） | `TEXTURE NOT FOUND` / `Couldn't find texture` / `Couldn't find sprite` | 资源包或材质模组未适配 |
+| 兜底 | `uncaughtException` 等未捕获签名 | 模组与版本不匹配，先禁用最近新增的模组 |
+
+> 带「需未捕获签名」的规则只在 console 里确实出现 `uncaughtException` / `Exception in thread` /
+> `FATAL EXCEPTION` / `ExceptionInInitializerError` / `StackOverflowError` 时才采纳——正常情况下
+> 模组 Lua 报错、贴图缺失只是警告，游戏照常运行（`<方法>> Exception thrown` 是"被捕获后打印"，
+> 从来不算崩溃证据）。
 
 **签名必须属于本次会话**：现有「console.txt 被本次启动重写后才读取」的 fresh 逻辑
 已保证尾部是本次内容；二次确认取「签名行 mtime ≥ session_start」或依赖 fresh 判定，
@@ -170,3 +191,25 @@ reason 明确写「不判定加载完成」，且不再把兜底时长记成启�
 - 12:54 那次 ZB 行数=8、无签名：若退出码为 1 → `external_terminate`（更符合
   「转换游戏类阶段 6 秒即退」的疑似手动终止）；若拿不到退出码 → `unknown`。
   现状两者都只显示「游戏进程已退出」，改造后可区分。
+**2026-11-11 最终定位**：42.22.2 移除了 `zombie.util.list.PZArrayList`，而旧版
+Viewpoint 插件（DGVViewpointEyes 等）的类常量/字段描述符仍引用它；ZombieBuddy
+在 `LuaManager.init → Exposer.exposeClassNow` 反射暴露这些类时才触发类加载，
+所以 `hs_err` 依旧没有、console 签名是唯一证据。现在由**启动前兼容性预检**
+（`mod_compat.rs`）在拉起游戏前扫出这批模组并支持一键禁用，不必再等崩溃后反查。
+
+### 案例：2026-11-12 官方 42.22 脚本重复（MetalSmallPoleFence）
+
+- 现象：进游戏（不连服务器）在脚本加载阶段退出，诊断弹窗点名
+  `RuntimeException: [MetalSmallPoleFence] Tile duplicate: constructedobjects_01_61 at
+  SpriteConfigScript...` + `IOException: Script load errors`。
+- 定位：官方 42.22 的 `media/scripts/generated/entities/walls/` 里有两份声明**同名实体**
+  `MetalSmallPoleFence` 的脚本——`entity_metal_smallpolefence.txt`（带
+  `OnCreate = BuildRecipeCode.fenceOrWall.OnCreate`，11-11 随更新新写入）与
+  `entity_metal_smallpolelfence.txt`（旧拼写、无 OnCreate，10-18 旧文件，Steam 更新未清理）。
+  两份都把 face N 指到 `constructedobjects_01_61`，触发 Tile duplicate。
+- 修复（已在本机执行）：删除旧拼写一份（先备份到
+  `.pzmanager-backups/20261112-manual-dupfix/`），保留带 OnCreate 的新版。
+  注意 `pzopt` 目录曾放过生成的散装 class，`generated/` 下同时存在 11-11 新文件与
+  10-18 旧文件是 pzopt 生成目录未被 Steam 清理的迹象。
+- 教训：脚本类错误要按「实体名 → 声明文件数」区分"游戏本体重复"与"模组覆盖本体"，
+  诊断已实现（`count_entity_script_definitions`）。

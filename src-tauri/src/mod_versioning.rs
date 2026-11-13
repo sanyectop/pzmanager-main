@@ -64,15 +64,27 @@ pub struct ModVersionStatus {
     pub operation_running: bool,
 }
 
-/// 一个「整合包」＝某一时刻所有模组各自版本的集合。
+/// 记录种类：「整合包 N」是一键保存全部模组（所有模组），
+/// 「变更 N」是一键保存模组变更（只含当次有变化的模组）。还原范围就是记录里列出的模组。
+pub const PACK_KIND_ALL: &str = "all";
+pub const PACK_KIND_CHANGES: &str = "changes";
+
+/// 一个「整合包 / 变更记录」＝某一时刻若干模组各自版本的集合。
 /// 每条模组版本仍存在自己的链里，这里只保存引用。
+/// `kind` 是后加的字段：旧 `modpacks.json` 里没有，读回时按整合包处理。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModPackRecord {
     pub id: String,
     pub label: String,
     pub created_at: u64,
+    #[serde(default = "mod_pack_kind_default")]
+    pub kind: String,
     pub mods: Vec<versioning::ModVersionRef>,
+}
+
+fn mod_pack_kind_default() -> String {
+    PACK_KIND_ALL.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,19 +374,21 @@ mod tests {
         let store_base = directory.path().join("versions");
         assert!(read_packs(&store_base).unwrap().is_empty());
 
+        let reference = versioning::ModVersionRef {
+            key: "local-alpha".to_string(),
+            mod_id: "Alpha".to_string(),
+            name: "Alpha".to_string(),
+            source: "local".to_string(),
+            workshop_id: None,
+            version_id: "v1".to_string(),
+            root_path: "C:\\mods\\Alpha".to_string(),
+        };
         let record = ModPackRecord {
             id: "pack-1".to_string(),
             label: "整合包 1".to_string(),
             created_at: 1_700_000_000,
-            mods: vec![versioning::ModVersionRef {
-                key: "local-alpha".to_string(),
-                mod_id: "Alpha".to_string(),
-                name: "Alpha".to_string(),
-                source: "local".to_string(),
-                workshop_id: None,
-                version_id: "v1".to_string(),
-                root_path: "C:\\mods\\Alpha".to_string(),
-            }],
+            kind: PACK_KIND_ALL.to_string(),
+            mods: vec![reference.clone()],
         };
         write_packs(&store_base, std::slice::from_ref(&record)).unwrap();
 
@@ -382,8 +396,43 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "pack-1");
         assert_eq!(loaded[0].label, "整合包 1");
+        assert_eq!(loaded[0].kind, PACK_KIND_ALL);
         assert_eq!(loaded[0].mods.len(), 1);
         assert_eq!(loaded[0].mods[0].version_id, "v1");
+
+        // 变更记录（一键保存模组变更写的）也要原样读回。
+        let changes = ModPackRecord {
+            id: "pack-2".to_string(),
+            label: "变更 1".to_string(),
+            created_at: 1_700_000_100,
+            kind: PACK_KIND_CHANGES.to_string(),
+            mods: vec![reference],
+        };
+        write_packs(&store_base, &[changes]).unwrap();
+        let loaded = read_packs(&store_base).unwrap();
+        assert_eq!(loaded[0].kind, PACK_KIND_CHANGES);
+        assert_eq!(loaded[0].label, "变更 1");
+
+        // 旧格式（加 kind 之前的 modpacks.json）没有 kind 字段：读回按整合包处理。
+        fs::write(
+            store_base.join("modpacks.json"),
+            r#"{
+  "format": 1,
+  "packs": [
+    {
+      "id": "pack-old",
+      "label": "整合包 1",
+      "createdAt": 1700000000,
+      "mods": []
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+        let legacy = read_packs(&store_base).unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].id, "pack-old");
+        assert_eq!(legacy[0].kind, PACK_KIND_ALL);
 
         write_packs(&store_base, &[]).unwrap();
         assert!(read_packs(&store_base).unwrap().is_empty());

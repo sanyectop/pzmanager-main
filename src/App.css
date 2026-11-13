@@ -635,25 +635,35 @@ body {
 }
 
 .pz-window-icon-restore {
-  border: 1px solid currentColor;
-  /* 前面那块要盖住后面那块的重叠边框，否则看起来像两个错位的方框 */
-  background: var(--pz-window-icon-bg);
+  /* 纯定位容器：前 / 后两个 8×8 方框都用伪元素画（重绘版）。
+     旧画法主体 11×11 + ::before 顶到 -3px，后面的方框探出图标盒右缘 1px，
+     看起来整体向右上漂、比例也不对；现在是标准 Windows 还原字形——
+     两块等大方框沿对角线错开 3px，前面的方框带不透明底色盖住重叠边框。 */
 }
 
 .pz-window-icon-restore::before {
   position: absolute;
-  top: -3px;
-  left: 3px;
-  width: 9px;
-  height: 9px;
-  /* 只画上/右两条边，得到标准 Windows「还原」图标的台阶感 */
-  border-top: 1px solid currentColor;
-  border-right: 1px solid currentColor;
-  background: transparent;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
   content: "";
 }
 
-.pz-window-control:hover .pz-window-icon-restore {
+.pz-window-icon-restore::after {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  /* 前面那块要盖住后面那块的重叠边框，否则看起来像两个错位的方框 */
+  background: var(--pz-window-icon-bg);
+  content: "";
+}
+
+.pz-window-control:hover .pz-window-icon-restore::after {
   background: var(--pz-window-icon-bg-hover);
 }
 
@@ -1998,11 +2008,21 @@ body {
 .pz-resource-center-sidebar-item {
   width: 100%;
   justify-content: flex-start !important;
+  gap: 0.45rem;
   padding-inline: 0.6rem !important;
   border-radius: var(--pz-radius-sm) !important;
   color: var(--pz-text-label) !important;
   font-size: var(--pz-font-base) !important;
   text-align: left;
+}
+
+/* 设置分类侧栏的标签图标：固定宽度 + 跟随文字颜色（激活态自动变强调色）。 */
+.pz-settings-nav-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex: 0 0 0.95rem;
+  color: inherit;
+  opacity: 0.85;
 }
 
 .pz-resource-center-sidebar-item:hover {
@@ -2214,13 +2234,30 @@ body {
   background: var(--pz-surface-card);
   border: 1px solid var(--pz-line);
   border-radius: 0.5rem;
-  margin-top: 0.75rem;
+  margin-top: 0.45rem;
   overflow: hidden;
   box-shadow: var(--pz-shadow-sm);
 }
 
 .pz-settings-row + .pz-settings-row {
   border-top: 1px solid var(--chakra-colors-gray-100, #edf2f7);
+}
+
+/* 设置行紧凑化：Chakra 的 p="4" / mt="1" 只保留结构，实际尺寸在这里收窄。
+   纵向留白、标签与说明的行高都压一档，一屏能多看到两三行；横向留白略收，
+   但保持卡片边缘到文字的可读间距。改这几条时注意别把开关行压得贴边。 */
+.pz-settings-row {
+  padding: 0.55rem 0.9rem !important;
+}
+
+.pz-settings-row-label,
+.pz-settings-row-hint,
+.pz-settings-section-title {
+  line-height: 1.35 !important;
+}
+
+.pz-settings-row-hint {
+  margin-top: 0.125rem !important;
 }
 
 /* 「百宝箱」（设置 › 百宝箱）：翻译器 / 下载器 / 控制台三张卡片。
@@ -3112,7 +3149,8 @@ body {
    只管层级）。亚克力 = 背景模糊 + 半透明底色 + 颗粒 + 顶边内高光；模糊参数见 --pz-menu-*。 */
 .pz-workshop-tag-menu-content,
 .pz-workshop-context-menu,
-.pz-mod-context-menu {
+.pz-mod-context-menu,
+.pz-version-save-menu {
   border: 1px solid var(--pz-line);
   border-radius: var(--pz-radius-sm);
   background-color: var(--pz-menu-tint);
@@ -3143,6 +3181,11 @@ body {
 .pz-workshop-context-menu,
 .pz-mod-context-menu {
   min-width: 170px;
+}
+
+/* 概览「保存版本」下拉：两项（保存变化 / 完整保存），顶部可能带一条链深提示。 */
+.pz-version-save-menu {
+  min-width: 180px;
 }
 
 .pz-menu-positioner {
@@ -4134,6 +4177,19 @@ body {
 .pz-lua-mod-title-row {
   min-width: 0;
   align-items: baseline !important;
+}
+
+/* 当前加载顺序指示：跟在模组名后面的小号等宽数字（#3）。
+   等宽 + 最小宽度让个位/两位数字对齐；停用的模组不渲染这一项。 */
+.pz-lua-mod-order {
+  flex: 0 0 auto;
+  color: var(--pz-accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--pz-font-xs);
+  font-weight: 700;
+  line-height: 1.2;
+  min-width: 1.6em;
+  opacity: 0.85;
 }
 
 .pz-lua-mod-description {

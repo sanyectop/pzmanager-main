@@ -19,7 +19,7 @@
 
 | 部分 | 状态 | 证据 |
 | --- | --- | --- |
-| 设置 › 启动 › 极速启动开关（仅 zombieBuddy 可用 + 免责声明 + 缓存状态行） | ✅ 完成 | 前端构建通过；状态行数据来自 `fast_launch_cache_status` |
+| 设置 › 实验性功能 › 极速启动开关（仅 zombieBuddy 可用 + 免责声明 + 缓存状态行） | ✅ 完成 | 前端构建通过；状态行数据来自 `fast_launch_cache_status` |
 | 预扫描缓存产出（只收「已批准且启用」） | ✅ 完成并**实测** | 一次真实扫描产出 **25~26 个模组 / ~45 KB / 16 位十六进制指纹**，含 `Viewpoint 92 patches / 8 exposers` |
 | **缓存持久化（只在「刷新 JAR 列表」时重建）** | ✅ 完成 | `should_write_fast_launch_cache()`：显式刷新必重建、自动扫描仅在缓存缺失时补一份；`write_jar_mod_state()` / `set_jar_mod_info_enabled()` 里的自动删除已移除（有单测） |
 | 缓存一致性状态（提示用，不再自动删） | ✅ 完成 | `fast_launch_cache_matches()` / `fast_launch_cache_status()`；设置页状态行在不一致时提示重建 |
@@ -528,7 +528,7 @@ java.lang.LinkageError: loader 'app' attempted duplicate class definition for
 
 ## 7. 安全状态与红线
 
-* **开关（玩家可见）**：设置 › 启动 › 极速启动。只有它打开 **且** 方案是 `zombieBuddy` **且** 覆盖层 DLL
+* **开关（玩家可见）**：设置 › 实验性功能 › 极速启动。只有它打开 **且** 方案是 `zombieBuddy` **且** 覆盖层 DLL
   存在时，启动器才会写 `-agentpath:`；任一不成立都会**摘掉**已有参数（`-agentpath` 指向的文件不存在
   会让 JVM 直接启动失败，所以"关开关必须真的清干净"）。关开关时**当场**清理，不等下一次启动；
 * **应急关闭**：环境变量 `PZM_FAST_LAUNCH_DISABLE=1` 让 agent 立刻什么都不做（不需要改任何文件）；
@@ -576,7 +576,7 @@ java.lang.LinkageError: loader 'app' attempted duplicate class definition for
 ```
 src-tauri/src/lib.rs                     缓存构造/读/写/一致性/失效、save_fast_launch、fast_launch_cache_status、
                                          -agentpath 归一化 + launch_project_zomboid 接线 + resolve_fast_launch_agent_path
-src/App.tsx                              设置 › 启动 分类、极速启动开关、缓存状态行、启动时把 DLL 路径透传给后端
+src/App.tsx                              设置 › 实验性功能 分类、极速启动开关、缓存状态行、启动时把 DLL 路径透传给后端
 overlay-dll/Cargo.toml                   新增 jni = "0.21"（不开 invocation feature）
 overlay-dll/src/fastlaunch.rs            table_fn（三种环境的函数表）、agent 链路、VMInit 回调、类加载回调、远程调试链路
 overlay-dll/src/classfile.rs             字节码工具链 + 包装式装配（10 个单测）

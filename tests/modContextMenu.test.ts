@@ -91,5 +91,5 @@ test("opening a workshop page still falls back to https when Steam is unavailabl
 
 test("the mod context menu reuses the acrylic menu surface", () => {
   assert.match(cssSource, /\.pz-mod-context-menu \{\s*min-width: 170px;/);
-  assert.match(cssSource, /\.pz-workshop-tag-menu-content,\s*\.pz-workshop-context-menu,\s*\.pz-mod-context-menu \{/);
+  assert.match(cssSource, /\.pz-workshop-tag-menu-content,\s*\.pz-workshop-context-menu,\s*\.pz-mod-context-menu,\s*\.pz-version-save-menu \{/);
 });

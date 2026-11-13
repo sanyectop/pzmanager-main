@@ -23,8 +23,9 @@ pub(crate) fn normalize_translation_language(language: &str) -> Option<String> {
 
 /// 「通用 › 翻译引擎」的取值：auto = 默认链（Google → 必应 → MyMemory）；
 /// 其余为手动指定的优先引擎，失败后仍按默认顺序回退其余引擎。
-/// relay 是中转服务器上的 Argos 离线翻译（批级、只接 zh-CN/en/ru）。
-pub(crate) const TRANSLATION_ENGINES: [&str; 5] = ["auto", "bing", "google", "mymemory", "relay"];
+/// relay（中转服务器的 Argos 离线翻译）已从可选引擎下线：旧配置里的 relay
+/// 归一化时不在列表内，自动回落默认引擎；管线里的 relay 代码保留但不再被选中。
+pub(crate) const TRANSLATION_ENGINES: [&str; 4] = ["auto", "bing", "google", "mymemory"];
 
 /// 没写过 / 写坏时的默认引擎：Google（2026-11-06 起由「默认链首选必应」改为 Google 优先）。
 pub(crate) const DEFAULT_TRANSLATION_ENGINE: &str = "google";
@@ -147,10 +148,14 @@ pub(crate) fn app_settings_path() -> Result<PathBuf, String> {
 
 pub(crate) fn load_app_settings_at(path: &Path) -> Result<AppSettings, String> {
     if !path.is_file() {
-        // `AppSettings::default()` 来自 derive，布尔字段全是 false；这里把默认开启的
-        // 「启动时保留 JAR 模组启用状态」补上，和 serde 的 default 函数保持一致。
+        // `AppSettings::default()` 来自 derive，布尔字段全是 false；这里把 serde 里
+        // 「缺失 = 默认开启」的字段补上，否则全新安装会和默认值对不上：
+        // - 「启动时保留 JAR 模组启用状态」
+        // - 版本保存多线程 / 保存版本时同时备份模组（版本页的默认开关应为开）
         let mut settings = AppSettings::default();
         settings.jar_mod_use_disk_state_on_startup = default_jar_mod_use_disk_state_on_startup();
+        settings.version_parallel = crate::default_version_parallel_enabled();
+        settings.version_include_mods = crate::default_version_parallel_enabled();
         return Ok(settings);
     }
     let content = fs::read_to_string(path).map_err(|error| format!("读取应用设置失败: {error}"))?;
@@ -286,6 +291,39 @@ pub(crate) fn save_launch_arguments(arguments: Vec<String>) -> Result<Vec<String
     Ok(load_app_settings_at(&app_settings_path()?)?.launch_arguments)
 }
 
+/// 「实验性 › 自动加入服务器」：保存开关 / 目标地址 / 密码。
+/// 开启时目标必须是 `主机:端口`（校验失败整次拒绝，不留半开状态）；
+/// 关闭时把目标与密码一起清空（明文不留盘），并顺手清掉残留的一次性配置。
+#[tauri::command]
+pub(crate) fn save_auto_join_settings(
+    enabled: bool,
+    target: String,
+    password: String,
+) -> Result<(), String> {
+    let normalized_target = if enabled {
+        Some(normalize_auto_join_target(&target).ok_or_else(|| {
+            "服务器地址格式不对：应为 主机:端口，例如 1.2.3.4:16261".to_string()
+        })?)
+    } else {
+        None
+    };
+    let normalized_password = if enabled {
+        let trimmed = password.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    } else {
+        None
+    };
+    update_app_settings(|settings| {
+        settings.auto_join_enabled = enabled;
+        settings.auto_join_target = normalized_target;
+        settings.auto_join_password = normalized_password;
+    })?;
+    if !enabled && clear_auto_join_config() {
+        launcher_log::info("自动加入：已关闭并清理残留的一次性配置。");
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) fn save_developer_mode(enabled: bool) -> Result<(), String> {
     update_app_settings(|settings| settings.developer_mode = enabled)?;
@@ -295,6 +333,12 @@ pub(crate) fn save_developer_mode(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 pub(crate) fn save_shaderpack_override_enabled(enabled: bool) -> Result<(), String> {
     update_app_settings(|settings| settings.shaderpack_override_enabled = enabled)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn save_launch_from_game_files(enabled: bool) -> Result<(), String> {
+    update_app_settings(|settings| settings.launch_from_game_files = enabled)?;
     Ok(())
 }
 
@@ -354,7 +398,7 @@ pub(crate) fn save_font_family(value: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 覆盖层背景色（设置 › 通用）：存 `#RRGGBB`，写空串 = 恢复默认纯红。
+/// 覆盖层背景色（设置 › 通用 › 外观）：存 `#RRGGBB`，写空串 = 恢复默认纯红。
 #[tauri::command]
 pub(crate) fn save_overlay_background_color(value: String) -> Result<(), String> {
     update_app_settings(|settings| {
@@ -425,7 +469,7 @@ pub(crate) fn save_mod_loader_scheme(scheme: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 「窗口 › 原生窗口标题栏」：切换系统原生标题栏（decorations），立即生效并落盘。
+/// 「通用 › 外观 › 原生窗口标题栏」：切换系统原生标题栏（decorations），立即生效并落盘。
 /// 自定义标题栏在个别设备 / WebView 上拖不动时用它兜底；开启后前端把自绘标题栏
 /// 两侧的 LOGO 与窗口按钮滑出隐藏（动画在 CSS），中间的导航保留。
 #[tauri::command]

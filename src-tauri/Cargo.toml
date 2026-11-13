@@ -1,6 +1,6 @@
 [package]
 name = "pzmanager"
-version = "1.6.261108"
+version = "1.7.261114-devbuild.1794501007"
 description = "Project Zomboid launcher + mod manager"
 authors = ["叁葉 (sanyectop)"]
 license = "GPL-3.0-or-later"
@@ -75,6 +75,8 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
 ] }
+# 离线启动的创意工坊映射：创建目录联接（junction，无需管理员权限），rustup 同款实现。
+junction = "1"
 # 可选注入后端，仅在启用 dll-syringe-inject feature 时参与编译（需要 nightly）。
 # 只启用 syringe 功能：默认 features 会额外拉入 RPC 与“x64 注入 x86”支持，本阶段用不上。
 dll-syringe = { version = "0.18.2", optional = true, default-features = false, features = ["syringe"] }

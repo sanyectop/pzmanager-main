@@ -327,7 +327,7 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 | 保存时同时备份模组 | 默认开启；保存游戏版本后，为**当前启用**的模组各存一个版本，并把引用写进该游戏版本；还原这个游戏版本时一并还原 |
 | 模组版本 | 每个模组目录一条链（`<store>/mods/<key>`）；第一次完整保存，之后只存变化；行内展开看时间线与还没保存的变化 |
 | 版本记录 | 模组管理列表右键入口，模态框用时间线展示（最新在上、序号圆形胶囊 + 连线 + 日期矩形） |
-| 整合包 | 「一键保存全部模组」把每个模组各存一个版本并记成一条集成记录（`<store>/modpacks.json`），可整套还原或删除记录（各模组版本保留） |
+| 整合包 | 「一键保存全部模组」把每个模组各存一个版本并记成一条集成记录（`<store>/modpacks.json`，kind=all）；「一键保存模组变更」只存有变化的模组并记成一条变更记录（kind=changes）。两种都可整套还原或删除记录（各模组版本保留） |
 | 多线程加速 | 游戏和模组版本共用；默认开启，下次操作生效 |
 
 ### 3.8 百宝箱
@@ -463,6 +463,7 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 | `jar_mods.rs` | JAR 扫描、状态文件、ZombieBuddy 决策、模组预设 | — |
 | `support.rs` | ZombieBuddy / PZ Optimization / Viewpoint 3D | — |
 | `fast_launch.rs` | 极速启动预扫描缓存与启动配置备份 | — |
+| `auto_join.rs` | 自动加入服务器：钩子 Lua 安装、一次性配置读写与清理 | 见 [docs/auto-join.md](docs/auto-join.md) |
 | `viewpoint_media.rs` | Viewpoint 截图与光影包管理 | — |
 | `fs_utils.rs` | 文件写入、事务式替换、备份 | — |
 | `workshop.rs` | 工坊浏览（HTML/SSR 解析，无 API Key）、详情 API | 300 s 缓存 |

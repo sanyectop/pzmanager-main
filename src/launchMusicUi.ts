@@ -169,3 +169,7 @@ export function pickNewerMusicState(
   const localAt = fromLocal.savedAt ?? 0;
   return localAt > fileAt ? fromLocal : fromFile;
 }
+
+/** 播放中进度写本地缓存的周期（毫秒）。用独立定时器而不是挂在 `timeupdate` 上：
+ *  后者在不同环境约 250ms 一次，再叠加节流会把实际间隔拉长到 0.5 秒。 */
+export const MUSIC_PROGRESS_SAVE_INTERVAL_MS = 300;

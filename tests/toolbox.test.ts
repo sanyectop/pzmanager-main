@@ -22,7 +22,7 @@ test("百宝箱 is a settings category, not a top-level nav page", () => {
   // 设置 › 设置分类里新增「百宝箱」
   assert.match(
     appSource,
-    /export type SettingsPage =\s*\| "about"\s*\| "general"\s*\| "toolbox"\s*\| "logs"\s*\| "modLoader"\s*\| "startup"\s*\| "developer";/,
+    /export type SettingsPage =\s*\| "about"\s*\| "general"\s*\| "gameOptions"\s*\| "toolbox"\s*\| "logs"\s*\| "modLoader"\s*\| "startup"\s*\| "experimental"\s*\| "developer";/,
   );
   assert.match(appSource, /onClick=\{\(\) => switchSettingsPage\("toolbox"\)\}/);
   assert.match(appSource, /aria-current=\{settingsPage === "toolbox" \? "page" : undefined\}/);
@@ -89,7 +89,27 @@ test("设置 › 通用 的分区卡片与百宝箱同一种亚克力材质", ()
   assert.match(settingsCard, /box-shadow:\s*var\(--pz-shadow-sm\)/);
   assert.doesNotMatch(settingsCard, /background:\s*#fff/);
   assert.match(toolboxCard, /background:\s*var\(--pz-surface-card\)/);
-  // 圆角与留白保持设置卡片自己的节奏，只换材质。
+  // 圆角与留白保持设置卡片自己的节奏，只换材质；标题到卡片的间距压到 0.45rem（紧凑版）。
   assert.match(settingsCard, /border-radius:\s*0\.5rem/);
-  assert.match(settingsCard, /margin-top:\s*0\.75rem/);
+  assert.match(settingsCard, /margin-top:\s*0\.45rem/);
+});
+
+test("设置行紧凑：收窄内边距、压紧标签与说明的行距", () => {
+  // 组件侧挂上可定位的类名，CSS 才能真正覆盖 Chakra 的 p="4" / mt="1"。
+  assert.match(appSource, /className="pz-settings-row-hint"/);
+  assert.match(appSource, /className="pz-settings-row-label"/);
+  assert.match(appSource, /className="pz-settings-section-title"/);
+
+  // 注意 `.pz-settings-row + .pz-settings-row` 里也含 ".pz-settings-row {"，
+  // 这里直接用正则匹配单条规则，避免 rule() 取到相邻兄弟选择器。
+  assert.match(cssSource, /\.pz-settings-row \{\s*padding:\s*0\.55rem 0\.9rem !important/);
+
+  const hint = rule(".pz-settings-row-hint");
+  assert.match(hint, /margin-top:\s*0\.125rem !important/);
+
+  // 标题、说明、分区标题共用一档更紧的行高。
+  assert.match(
+    cssSource,
+    /\.pz-settings-row-label,\s*\.pz-settings-row-hint,\s*\.pz-settings-section-title\s*\{\s*line-height:\s*1\.35 !important/,
+  );
 });

@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use overlay_core::{
@@ -244,6 +244,7 @@ pub fn default_console_path() -> PathBuf {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::Path;
 
     fn write_console(path: &Path, text: &str) {
         let mut file = File::create(path).unwrap();
@@ -282,6 +283,7 @@ mod tests {
             "LOG  : General f:0> [ZB] Running callbacks for onGameInitComplete\n",
         );
         let mut console = reader(&path);
+        // 没有被拒模组：完成即收尾，不进确认等待。
         let poll = console.poll(Instant::now());
         assert_eq!(
             poll.complete.as_deref(),
@@ -347,7 +349,7 @@ mod tests {
             &path,
             "LOG  : General f:0> [ZB] Running callbacks for onGameInitComplete\n",
         );
-        let mut console = ConsoleReader::new(path.clone(), None);
+        let mut console = reader(&path);
         // 把 session_start 设到文件 mtime 之后：模拟上一局的 console。
         console.session_start = SystemTime::now() + Duration::from_secs(60);
         let poll = console.poll(Instant::now());

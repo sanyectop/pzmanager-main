@@ -1,7 +1,7 @@
 {
   "name": "pzmanager",
   "private": true,
-  "version": "1.6.261108",
+  "version": "1.7.261114-devbuild.1794501007",
   "type": "module",
   "license": "GPL-3.0-or-later",
   "scripts": {

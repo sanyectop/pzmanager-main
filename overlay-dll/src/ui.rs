@@ -20,9 +20,10 @@ use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC,
-    DeleteObject, DrawTextW, FillRect, FrameRect, GetDC, ReleaseDC, SelectObject, SetBkMode,
-    SetTextColor, RedrawWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, DIB_RGB_COLORS, RDW_INVALIDATE, RDW_UPDATENOW,
+    DeleteObject, DrawTextW, FillRect, FrameRect, GetDC, GetMonitorInfoW, MonitorFromWindow,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, RedrawWindow, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DIB_RGB_COLORS, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, RDW_INVALIDATE, RDW_UPDATENOW,
     DEFAULT_CHARSET, DT_CENTER, DT_END_ELLIPSIS, DT_VCENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
     FF_DONTCARE, FW_BOLD, FW_NORMAL, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY, TRANSPARENT,
     CreatePen, Polyline, PS_SOLID,
@@ -77,6 +78,8 @@ static MUTEX_POISON_LOGGED: AtomicBool = AtomicBool::new(false);
 static CLIENT_RECT_PROBLEM_LOGGED: AtomicBool = AtomicBool::new(false);
 /// 「加载界面已生成」只记一次日志的打点。
 static IMAGE_READY_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 「全屏窗口跳过 GDI BitBlt」只记一次日志的打点。
+static FULLSCREEN_BLIT_NOTICE: AtomicBool = AtomicBool::new(false);
 /// UI 线程心跳计数（排查"界面线程是否还活着 / DIB 是否还在"）。
 static HEARTBEAT_TICKS: AtomicU32 = AtomicU32::new(0);
 /// 累计换帧次数（诊断用：界面没画出来时区分"图没生成"还是"游戏不再换帧"）。
@@ -366,8 +369,18 @@ fn run(game_pid: u32) {
                 paint_to_window(&mut ui, window, font, logo_big, logo_small);
                 // 游戏最近在持续换帧时，GL 覆盖随每一帧出现，BitBlt 退场；
                 // 换帧停了（呈现间隙，或游戏不走被挂钩的换帧路径）就靠 BitBlt 维持界面。
-                if !swap_recently(500) {
+                // 全屏窗口例外：DXGI 翻转模型下 GDI BitBlt 写入不可靠，可能只贴上
+                // 一部分、剩下的区域发黑（用户反馈的「红屏 + 左边黑一块」）。这种
+                // 窗口只让 GL 画；换帧前宁可显示游戏自己的加载画面。
+                if !swap_recently(500) && !window_is_fullscreen(window) {
                     blit_to_window(&ui, window);
+                } else if window_is_fullscreen(window)
+                    && !FULLSCREEN_BLIT_NOTICE.swap(true, Ordering::Relaxed)
+                {
+                    crate::log_ui(
+                        "检测到游戏窗口为全屏：GDI BitBlt 在翻转模型下不可靠，\
+                         加载界面改由 GL 覆盖绘制（换帧前显示游戏自己的画面）。",
+                    );
                 }
                 // 埋点：界面图是否真的生成（红屏无字时这一行决定排查方向）。
                 if ui.width > 0 && ui.height > 0 && !ui.rgba.is_empty() {
@@ -1272,6 +1285,37 @@ fn dpi_scale(window: HWND) -> f32 {
     } else {
         dpi as f32 / 96.0
     }
+}
+
+/// 游戏窗口是否铺满整个显示器（全屏 / 无边框全屏）。
+///
+/// 这类窗口通常走 DXGI 翻转模型，GDI 的 BitBlt 写入不可靠（会被丢弃或只画出
+/// 一部分，表现为红底上出现黑块）。判断方式：客户区尺寸不小于所在显示器的完整
+/// 分辨率。窗口模式（含最大化）的客户区比显示器小，仍走 BitBlt 兜底。
+fn window_is_fullscreen(window: HWND) -> bool {
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(window, &mut client) }.is_err() {
+        return false;
+    }
+    let width = client.right - client.left;
+    let height = client.bottom - client.top;
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.0.is_null() {
+        return false;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() == false {
+        return false;
+    }
+    let monitor_width = info.rcMonitor.right - info.rcMonitor.left;
+    let monitor_height = info.rcMonitor.bottom - info.rcMonitor.top;
+    monitor_width > 0 && monitor_height > 0 && width >= monitor_width && height >= monitor_height
 }
 
 fn progress_percent(progress: f32) -> i32 {

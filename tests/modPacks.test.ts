@@ -62,14 +62,17 @@ test("save-all reuses every mod's own chain and records the refs", () => {
   assert.match(backendSource, /"modSaveAll" \| "modSaveChanges" \| "modRestorePack" =>/);
 });
 
-test("save-changes picks only mods with pending changes and skips the pack", () => {
+test("save-changes picks only mods with pending changes and records a restorable change pack", () => {
   // 11-06 新增「一键保存模组变更」：逐模组元数据比对（不哈希）挑出有变化的，
-  // 无变化跳过；不创建整合包。完成后刷新模组状态（待捕获变化清零）。
+  // 无变化跳过。完成后写一条 kind=changes 的变更记录，可在整合包列表整套还原；
+  // 同时刷新模组状态（待捕获变化清零）。
   assert.match(backendSource, /fn start_mod_version_save_changes\(app: tauri::AppHandle\)/);
   assert.match(backendSource, /fn mod_root_has_pending_changes\(/);
   assert.match(backendSource, /"modSaveChanges"/);
   assert.match(backendSource, /所有模组都没有变化，无需保存。/);
   assert.match(backendSource, /capture_mod_versions\(&pending, "保存变化"/);
+  assert.match(backendSource, /kind: mod_versioning::PACK_KIND_CHANGES\.to_string\(\)/);
+  assert.match(backendSource, /已记为变更记录/);
   assert.match(backendSource, /            start_mod_version_save_changes,/);
   assert.match(appSource, /一键保存模组变更/);
   assert.match(appSource, /"start_mod_version_save_changes"/);
@@ -87,13 +90,19 @@ test("mod version tab exposes the save-all button and the pack list", () => {
   assert.match(appSource, /"delete_mod_version_pack"/);
   // 整合包操作也有任务中心条目。
   assert.match(appSource, /整合包 · 保存全部模组/);
+  // 还原弹窗按记录种类区分「整合包 / 变更记录」。
+  assert.match(appSource, /const noun = pack\.kind === "changes" \? "变更记录" : "整合包";/);
   assert.match(
     appSource,
-    /"start_mod_version_restore_pack",\s*\{ packId: pack\.id \},\s*"还原整合包",\s*pack\.label,/s,
+    /"start_mod_version_restore_pack",\s*\{ packId: pack\.id \},\s*`还原\$\{noun\}`,\s*pack\.label,/s,
   );
-  // 完成后刷新整合包列表 + 模组列表。
-  assert.match(appSource, /update\.operation === "modSaveAll" \|\| update\.operation === "modRestorePack"/);
+  // 完成后刷新整合包列表 + 模组列表（保存变更现在也会写记录，一并刷新）。
+  assert.match(
+    appSource,
+    /update\.operation === "modSaveAll" \|\|\s*update\.operation === "modRestorePack" \|\|\s*update\.operation === "modSaveChanges"/s,
+  );
   assert.match(versioningTsSource, /export type ModPackRecord = \{/);
+  assert.match(versioningTsSource, /kind: "all" \| "changes";/);
 });
 
 test("saving a pack opens the naming dialog and rename edits the label in place", () => {

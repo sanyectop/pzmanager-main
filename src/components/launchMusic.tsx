@@ -7,12 +7,25 @@
  *  播放状态（音量 / 是否在播 / 播放位置 / 面板是否展开）通过 `set_launch_music_state`
  *  落到 settings.json，下次启动自动恢复。
  *
+ *  播放逻辑放在常驻 App 根部的 `LaunchMusicProvider`，启动页只渲染胶囊控件
+ *  `LaunchMusicControls`：切到其它页面时控件随页面卸载，但 `<audio>` 不卸载，
+ *  音乐继续播；否则每次切页都会从头开始。
+ *
  *  默认自动播放：首次进入（没有存档状态）就直接起播；WebView 按手势策略拒绝时，
  *  等用户第一次点/按键再补放。真正开始播放时通过 `onMusicStarted` 让上层弹一条右上角提示。
  */
 import { Box, Button, HStack, Text } from "@chakra-ui/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   DEFAULT_LAUNCH_MUSIC_STATE,
   formatMusicTime,
@@ -31,21 +44,45 @@ import {
   normalizeLaunchMusicState,
   normalizeMusicVolume,
   persistedPosition,
+  MUSIC_PROGRESS_SAVE_INTERVAL_MS,
   pickNewerMusicState,
 } from "../launchMusicUi";
 
 /** 播放中每 5 秒落盘一次位置，避免频繁写 settings.json。 */
 const POSITION_SAVE_INTERVAL_MS = 5000;
 
-export function LaunchMusicPlayer({
+/** 胶囊控件需要的实时状态与操作，由常驻的 `LaunchMusicProvider` 提供。 */
+type LaunchMusicControlsValue = {
+  open: boolean;
+  playing: boolean;
+  current: number;
+  duration: number | null;
+  volume: number;
+  failed: boolean;
+  progressPercent: number;
+  toggleOpen: () => void;
+  togglePlay: () => void;
+  seekTo: (percent: number) => void;
+  applyVolume: (percent: number) => void;
+};
+
+const LaunchMusicContext = createContext<LaunchMusicControlsValue | null>(null);
+
+/** 常驻 App 根部的播放器：持有 `<audio>` 与全部播放状态，切页不会中断播放。 */
+export function LaunchMusicProvider({
+  enabled = true,
   onMusicStarted,
   pauseSignal = 0,
+  children,
 }: {
+  /** 当前是否是内置四季壁纸；切到自定义壁纸时音乐应当停下。 */
+  enabled?: boolean;
   /** 自动播放真正起播时回调一次（上层用它弹右上角提示）。 */
   onMusicStarted?: (message: string) => void;
   /** 每次自增表示上层要求暂停（如游戏启动完成）。0 = 从未触发。 */
   pauseSignal?: number;
-} = {}) {
+  children?: ReactNode;
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(false);
@@ -62,6 +99,8 @@ export function LaunchMusicPlayer({
   const startedNotifiedRef = useRef(false);
   /** 上层回调放 ref 里，避免把它塞进 effect 依赖导致自动播放被反复触发。 */
   const onMusicStartedRef = useRef(onMusicStarted);
+  /** `enabled` 的实时值：自动播放 / 补放的回调里要读它，但不想为此重建回调。 */
+  const enabledRef = useRef(enabled);
   /** 存档里的播放位置是否还没真正应用到 <audio> 上。
    *  未应用前绝不能把它覆盖成 audio.currentTime（那时还是 0），否则每次启动都从头播。 */
   const restorePendingRef = useRef(false);
@@ -73,11 +112,34 @@ export function LaunchMusicPlayer({
    *  就是组件在读档完成前被卸载/刷新触发了一次默认值写入。 */
   const loadedRef = useRef(false);
   onMusicStartedRef.current = onMusicStarted;
+  enabledRef.current = enabled;
 
   const progressPercent = useMemo(
     () => musicProgressPercent(current, duration),
     [current, duration],
   );
+
+  /** 只写本地缓存（同步），返回写入的快照。IPC 由调用方决定要不要发。 */
+  const writeLocalSnapshot = useCallback((): LaunchMusicState => {
+    const snapshot: LaunchMusicState = { ...stateRef.current, savedAt: Date.now() };
+    stateRef.current.savedAt = snapshot.savedAt;
+    try {
+      window.localStorage.setItem(LAUNCH_MUSIC_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // 隐私模式 / 配额满：忽略。
+    }
+    return snapshot;
+  }, []);
+
+  /** 把当前播放进度写进本地缓存（同步、便宜）；settings.json 仍走 IPC 的 5 秒节流。 */
+  const persistProgressNow = useCallback(() => {
+    if (!loadedRef.current || restorePendingRef.current) return;
+    const audio = audioRef.current;
+    if (!audio || audio.paused) return;
+    stateRef.current.playing = true;
+    stateRef.current.positionSec = audio.currentTime;
+    writeLocalSnapshot();
+  }, [writeLocalSnapshot]);
 
   /** 把 stateRef 里的状态写进 settings.json（合并成一次调用，忽略失败）。 */
   const flushState = useCallback(() => {
@@ -98,18 +160,11 @@ export function LaunchMusicPlayer({
       audioTime: audio ? audio.currentTime : null,
       storedPosition: stateRef.current.positionSec,
     });
-    // 传快照：stateRef 会被后续事件继续改，避免序列化时读到已经变过的值。
-    const snapshot: LaunchMusicState = { ...stateRef.current, savedAt: Date.now() };
-    stateRef.current.savedAt = snapshot.savedAt;
     // 先同步写本地缓存：刷新 / 关窗瞬间 `invoke` 可能来不及到后端（实测暂停状态就这样丢过），
     // localStorage 的写入是同步的，下一次启动会按 savedAt 取新的那份。
-    try {
-      window.localStorage.setItem(LAUNCH_MUSIC_STORAGE_KEY, JSON.stringify(snapshot));
-    } catch {
-      // 隐私模式 / 配额满：忽略，仍然走下面的 IPC。
-    }
+    const snapshot = writeLocalSnapshot();
     void invoke("set_launch_music_state", { state: snapshot }).catch(() => undefined);
-  }, []);
+  }, [writeLocalSnapshot]);
 
   /** 延迟落盘（音量拖动、播放位置这种高频变化用）。 */
   const scheduleSave = useCallback(
@@ -138,6 +193,8 @@ export function LaunchMusicPlayer({
 
   /** 尝试起播；被手势策略拒绝时安静失败，交给第一次用户交互补放。 */
   const attemptAutoplay = useCallback(() => {
+    // 当前不是内置壁纸：音乐不该响（播放器常驻后不能再靠卸载来挡住）。
+    if (!enabledRef.current) return;
     const audio = audioRef.current;
     if (!audio || !audio.paused) return;
     // 用户上次是手动暂停的，就不要自动起播了。
@@ -247,6 +304,15 @@ export function LaunchMusicPlayer({
     };
   }, [attemptAutoplay, applyRestoredPosition]);
 
+  // 换成自定义壁纸（enabled=false）时把音乐停下：Provider 常驻后不能再靠卸载停止播放。
+  // 暂停会走 <audio> 的 onPause，暂停位置和状态照常落盘，下次启动不会自己响。
+  useEffect(() => {
+    if (enabled) return;
+    const audio = audioRef.current;
+    if (!audio || audio.paused) return;
+    audio.pause();
+  }, [enabled]);
+
   // 自动播放被 WebView 拦下时，等用户第一次点击 / 按键补放（成功同样提示一次）。
   useEffect(() => {
     if (!ready) return;
@@ -266,7 +332,16 @@ export function LaunchMusicPlayer({
 
 
 
-  // 播放中定期落盘位置；卸载 / 页面隐藏时立刻落盘，避免关窗丢进度。
+  // 播放中每 300ms 把进度写进本地缓存：刷新 / 关窗最多丢 0.3 秒。
+  // 用独立定时器而不是 timeupdate（后者约 250ms 一次，节流后实际间隔会变成 0.5 秒）。
+  useEffect(() => {
+    if (!playing) return;
+    persistProgressNow();
+    const timer = window.setInterval(() => persistProgressNow(), MUSIC_PROGRESS_SAVE_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [playing, persistProgressNow]);
+
+  // 播放中定期把位置同步给 settings.json；卸载 / 页面隐藏时立刻落盘，避免关窗丢进度。
   useEffect(() => {
     if (!playing) return;
     const timer = window.setInterval(() => {
@@ -364,6 +439,93 @@ export function LaunchMusicPlayer({
     [scheduleSave],
   );
 
+  const controls = useMemo<LaunchMusicControlsValue>(
+    () => ({
+      open,
+      playing,
+      current,
+      duration,
+      volume,
+      failed,
+      progressPercent,
+      toggleOpen,
+      togglePlay,
+      seekTo,
+      applyVolume,
+    }),
+    [
+      open,
+      playing,
+      current,
+      duration,
+      volume,
+      failed,
+      progressPercent,
+      toggleOpen,
+      togglePlay,
+      seekTo,
+      applyVolume,
+    ],
+  );
+
+  return (
+    <LaunchMusicContext.Provider value={controls}>
+      {children}
+      <audio
+        loop
+        onDurationChange={syncDuration}
+        onError={() => setFailed(true)}
+        onLoadedMetadata={syncDuration}
+        onPause={() => {
+          setPlaying(false);
+          stateRef.current.playing = false;
+          // 暂停点就是下次续播点：取音频真实位置，并取消"待恢复"（用户已经给出明确位置）。
+          const pausedAt = audioRef.current?.currentTime;
+          if (pausedAt != null && Number.isFinite(pausedAt)) {
+            stateRef.current.positionSec = pausedAt;
+          }
+          restorePendingRef.current = false;
+          restoreTargetRef.current = 0;
+          scheduleSave(0);
+          void invoke("log_frontend_message", {
+            level: "info",
+            message: `背景音乐：暂停于 ${stateRef.current.positionSec.toFixed(2)}s，已保存暂停状态`,
+          }).catch(() => undefined);
+        }}
+        onPlay={() => {
+          setPlaying(true);
+          setFailed(false);
+          stateRef.current.playing = true;
+          scheduleSave(0);
+        }}
+        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
+        preload="metadata"
+        ref={audioRef}
+        src={LAUNCH_MUSIC_URL}
+        style={{ display: "none" }}
+      />
+    </LaunchMusicContext.Provider>
+  );
+}
+
+/** 启动页上的胶囊控件；切页时随页面卸载，音乐由常驻的 Provider 继续播。 */
+export function LaunchMusicControls() {
+  const music = useContext(LaunchMusicContext);
+  if (!music) return null;
+  const {
+    open,
+    playing,
+    current,
+    duration,
+    volume,
+    failed,
+    progressPercent,
+    toggleOpen,
+    togglePlay,
+    seekTo,
+    applyVolume,
+  } = music;
+
   return (
     <Box
       className={`pz-launch-workshop-info pz-launch-music${open ? " is-open" : ""}`}
@@ -455,38 +617,6 @@ export function LaunchMusicPlayer({
       >
         <span aria-hidden="true" className="pz-launch-workshop-info-chevron">›</span>
       </Button>
-      <audio
-        loop
-        onDurationChange={syncDuration}
-        onError={() => setFailed(true)}
-        onLoadedMetadata={syncDuration}
-        onPause={() => {
-          setPlaying(false);
-          stateRef.current.playing = false;
-          // 暂停点就是下次续播点：取音频真实位置，并取消"待恢复"（用户已经给出明确位置）。
-          const pausedAt = audioRef.current?.currentTime;
-          if (pausedAt != null && Number.isFinite(pausedAt)) {
-            stateRef.current.positionSec = pausedAt;
-          }
-          restorePendingRef.current = false;
-          restoreTargetRef.current = 0;
-          scheduleSave(0);
-          void invoke("log_frontend_message", {
-            level: "info",
-            message: `背景音乐：暂停于 ${stateRef.current.positionSec.toFixed(2)}s，已保存暂停状态`,
-          }).catch(() => undefined);
-        }}
-        onPlay={() => {
-          setPlaying(true);
-          setFailed(false);
-          stateRef.current.playing = true;
-          scheduleSave(0);
-        }}
-        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
-        preload="metadata"
-        ref={audioRef}
-        src={LAUNCH_MUSIC_URL}
-      />
     </Box>
   );
 }

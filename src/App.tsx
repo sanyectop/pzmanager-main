@@ -1,5 +1,5 @@
-import { Avatar, Badge, Box, Button, Checkbox, HStack, Image, Input, Menu, Portal, Slider, Stack, Switch, Text, Textarea, VStack } from "@chakra-ui/react";
-import { faAnglesDown, faAnglesUp, faCircleInfo, faClockRotateLeft, faCubes, faGear, faHouse, faImages, faPlus, faScrewdriverWrench, faSun, faTrash } from "@fortawesome/free-solid-svg-icons";
+import { Avatar, Badge, Box, Button, Checkbox, HStack, Image, Input, Menu, Portal, Stack, Switch, Text, Textarea, VStack } from "@chakra-ui/react";
+import { faAnglesDown, faAnglesUp, faCircleInfo, faClockRotateLeft, faCode, faCubes, faFileLines, faFlask, faGamepad, faGear, faHouse, faImages, faPlus, faPuzzlePiece, faRocket, faScrewdriverWrench, faSliders, faSun, faToolbox, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -72,6 +72,7 @@ import {
   JarModBatchDecisionResult,
   JarModInjectionMatch,
   JarModScanUpdate,
+  ModCompatReport,
   LauncherLogTail,
   LauncherUserDataClearResult,
   LauncherUpdateStatus,
@@ -95,6 +96,8 @@ import {
   ResourceCenterPage,
   ResourceFile,
   ResourceOptions,
+  GameOptionEntry,
+  GameOptionsSnapshot,
   ResourceSearchResponse,
   ScannedJarMod,
   SettingsPage,
@@ -205,14 +208,30 @@ import {
 } from "./sessionEnd";
 import { BackgroundMenu } from "./components/backgrounds";
 import { ConfirmDialog, type ConfirmRequest } from "./components/confirm";
-import { LaunchMusicPlayer } from "./components/launchMusic";
+import { Pagination } from "./components/pagination";
+import { LaunchMusicControls, LaunchMusicProvider } from "./components/launchMusic";
 import { launchTimeoutMessage, shouldBreakLaunchWait } from "./gameProcess";
+import {
+  classifyGameOptionValue,
+  filterGameOptions,
+  gameOptionBoolean,
+  groupGameOptions,
+  isValidGameOptionNumber,
+} from "./gameOptionsUi";
+import {
+  GAME_OPTION_CATEGORIES,
+  GAME_OPTION_CATEGORY_OF,
+  GAME_OPTION_FALLBACK_CATEGORY,
+  gameOptionDisplayName,
+  hasGameOptionLabel,
+} from "./gameOptionsLabels";
 import { CrashReportDialog, type CrashReport } from "./components/crashReport";
 import { ExternalArrowIcon } from "./components/icons";
 import { SettingsRow, SettingsSection } from "./components/settingsCards";
+import { SnapSlider } from "./components/snapSlider";
 import { FastLaunchCacheStatusLine, FastLaunchWarningDialog } from "./components/fastLaunch";
 import { ShaderpackConfigDialog } from "./components/shaderpackConfig";
-import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWarningDialog, VersionRenameDialog, VersionStoreDriveDialog } from "./components/version";
+import { ModPackNameDialog, ModVersionDialog, ModVersionTimeline, PzOptRestoreWarningDialog, VersionNameDialog, VersionRenameDialog, VersionStoreDriveDialog } from "./components/version";
 import { NotificationConsole, TaskArrivalFlight, TaskCenterPanel, ToastViewport } from "./components/tasks";
 import { ResourceDownloadBrowser, WorkshopDropdown, WorkshopTagPicker, WorkshopTagSelectionSummary } from "./components/workshop";
 import { WindowTitlebar, useDialogAutoHeight } from "./components/shell";
@@ -293,6 +312,10 @@ function App() {
   const launchClickedAtRef = useRef<number | null>(null);
   /** 本次启动是否已经熔断过：用于忽略晚到的成功回包，避免重复提示。 */
   const launchBreakerFiredRef = useRef(false);
+  /** 本次启动的来源：true = 从游戏文件直接启动（熔断提示不再往 Steam 上引）。 */
+  const launchFromFilesRef = useRef(false);
+  /** 本次运行是否已选择「仍然启动」（不再重复弹模组兼容性提示）。 */
+  const compatWarningIgnoredRef = useRef(false);
   /** 游戏窗口是否已就绪（决定按钮左滑 + 停止按钮划入） */
   const [gameWindowReady, setGameWindowReady] = useState(false);
   /** 上次切换/保存的版本名称（启动按钮下方一行）；null = 没有，不显示。 */
@@ -350,7 +373,7 @@ function App() {
   const fontFamilySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 下拉框当前选中的预设项（与 fontFamily 分开记：选「自定义」时保留原值给输入框编辑）。
   const [fontFamilyChoice, setFontFamilyChoice] = useState("default");
-  // 覆盖层背景色（设置 › 通用）：下发给注入到游戏里的 DLL，下次启动游戏时生效。
+  // 覆盖层背景色（设置 › 通用 › 外观）：下发给注入到游戏里的 DLL，下次启动游戏时生效。
   const [overlayBackgroundColor, setOverlayBackgroundColor] = useState(
     DEFAULT_OVERLAY_BACKGROUND_COLOR,
   );
@@ -358,7 +381,7 @@ function App() {
   // 记住的窗口尺寸（仅用于设置页展示；启动时的实际恢复由后端 setup 完成）。
   const [savedWindowSize, setSavedWindowSize] = useState<[number, number] | null>(null);
   const windowSizeSaveTimerRef = useRef<number | null>(null);
-  // 「窗口 › 原生窗口标题栏」：自绘标题栏在个别设备 / WebView 上拖不动时兜底。
+  // 「通用 › 外观 › 原生窗口标题栏」：自绘标题栏在个别设备 / WebView 上拖不动时兜底。
   const [nativeTitlebar, setNativeTitlebar] = useState(false);
   const [nativeTitlebarSaving, setNativeTitlebarSaving] = useState(false);
   // 模组加载器方案（设置 › 模组加载器）：启动时按它决定要不要挂加载器 agent。
@@ -367,7 +390,7 @@ function App() {
   // 「启动时保留 JAR 模组启用状态」：开启后启动/自动扫描以磁盘当前状态为基准，不改写 mod.info。
   const [jarModUseDiskStateOnStartup, setJarModUseDiskStateOnStartup] = useState(true);
   const [jarModUseDiskStateOnStartupSaving, setJarModUseDiskStateOnStartupSaving] = useState(false);
-  // 极速启动（实验性，设置 › 启动）：只在方案 = ZombieBuddy 时有意义。
+  // 极速启动（实验性，设置 › 实验性功能）：只在方案 = ZombieBuddy 时有意义。
   const [fastLaunch, setFastLaunch] = useState(false);
   const [fastLaunchSaving, setFastLaunchSaving] = useState(false);
   // 打开极速启动前先弹一次警告；关闭不需要确认。
@@ -380,9 +403,17 @@ function App() {
   );
   const [silentMemoryCleanupSaving, setSilentMemoryCleanupSaving] = useState(false);
   const [cleanMemoryOnLaunch, setCleanMemoryOnLaunch] = useState(false);
+  /** 「从游戏文件启动（离线）」：勾选后「启动游戏」不经 Steam（默认关）。 */
+  const [launchFromGameFiles, setLaunchFromGameFiles] = useState(false);
+  const [launchFromGameFilesSaving, setLaunchFromGameFilesSaving] = useState(false);
   /** 「启动器接管光影管理」：关闭时启动游戏不覆写光影配置文件（默认关）。 */
   const [shaderpackOverrideEnabled, setShaderpackOverrideEnabled] = useState(false);
   const [shaderpackOverrideSaving, setShaderpackOverrideSaving] = useState(false);
+  /** 「实验性 › 自动加入服务器」：启动游戏后自动连入配置的服务器。 */
+  const [autoJoinEnabled, setAutoJoinEnabled] = useState(false);
+  const [autoJoinTarget, setAutoJoinTarget] = useState("");
+  const [autoJoinPassword, setAutoJoinPassword] = useState("");
+  const [autoJoinSaving, setAutoJoinSaving] = useState(false);
   /** 「启动游戏自动暂停音乐」：启动完成（输出启动用时）时暂停内置壁纸背景音乐。 */
   const [pauseMusicOnLaunch, setPauseMusicOnLaunch] = useState(true);
   const [pauseMusicOnLaunchSaving, setPauseMusicOnLaunchSaving] = useState(false);
@@ -463,6 +494,14 @@ function App() {
   const launchCommandRef = useRef<HTMLDivElement | null>(null);
   const [resourceCenterPage, setResourceCenterPage] = useState<ResourceCenterPage>("workshop");
   const [settingsPage, setSettingsPage] = useState<SettingsPage>("general");
+  /** 游戏设置（options.ini）：进入「设置 › 游戏设置」时加载。 */
+  const [gameOptions, setGameOptions] = useState<GameOptionsSnapshot | null>(null);
+  const [gameOptionsLoading, setGameOptionsLoading] = useState(false);
+  const [gameOptionsQuery, setGameOptionsQuery] = useState("");
+  /** 正在保存的键（单行 loading）。 */
+  const [gameOptionSaving, setGameOptionSaving] = useState<string | null>(null);
+  /** 文本 / 数字框的未提交草稿：键 → 值。 */
+  const [gameOptionDrafts, setGameOptionDrafts] = useState<Record<string, string>>({});
   // 设置内分页切换的滑入方向：按侧栏顺序判断前进/后退，与主页面切换的方向感一致。
   const [settingsTransitionDirection, setSettingsTransitionDirection] = useState<"forward" | "backward">("forward");
   // 「设置 › 版本」：版本隔离状态、后台操作进度与存储目录草稿。
@@ -484,7 +523,7 @@ function App() {
   // 「中断」已点过但操作还没结束：按钮变成「正在中断…」，操作终结时复位。
   const [cancelRequested, setCancelRequested] = useState(false);
   const [versionVerified, setVersionVerified] = useState<VersionVerifyResult | null>(null);
-  const [versionLabelDraft, setVersionLabelDraft] = useState("");
+
   const [versionStoreDraft, setVersionStoreDraft] = useState("");
   const [versionStoreSaving, setVersionStoreSaving] = useState(false);
   const [versionParallel, setVersionParallel] = useState(true);
@@ -513,6 +552,9 @@ function App() {
     pack: ModPackRecord | null;
   } | null>(null);
   const [modPackNameDialogClosing, setModPackNameDialogClosing] = useState(false);
+  // 概览「完整保存」命名弹窗：名称可留空（后端自动命名），正文按首次/重复保存给不同提示。
+  const [versionSaveNameDialog, setVersionSaveNameDialog] = useState(false);
+  const [versionSaveNameDialogClosing, setVersionSaveNameDialogClosing] = useState(false);
   /** 「历史版本 › 重命名」弹窗：目标版本 + 退场动画 / 提交中状态。 */
   const [versionRenameTarget, setVersionRenameTarget] = useState<VersionRecord | null>(null);
   const [versionRenameClosing, setVersionRenameClosing] = useState(false);
@@ -1035,7 +1077,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
-  /** 「窗口 › 原生窗口标题栏」：交给系统画标题栏；后端先切换 decorations 再落盘。 */
+  /** 「通用 › 外观 › 原生窗口标题栏」：交给系统画标题栏；后端先切换 decorations 再落盘。 */
   async function updateNativeTitlebar(enabled: boolean) {
     const previous = nativeTitlebar;
     setNativeTitlebar(enabled);
@@ -1298,7 +1340,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   const lastSavedMemoryMbRef = useRef<number | null>(null);
 
   /** 启动参数：立即更新界面，落盘防抖 500ms；保存失败回滚到上一份并提示。
-      启动时后端读不到这个设置就用默认列表，所以失败必须让界面回到已保存的值。 */
+      启动时后端读不到这个设置就用默认列表，所以失败必须让界面回到已保存的值。
+      注意：**保存成功后不能用后端返回的裁剪结果覆盖编辑区**——后端会去掉空条目，
+      而用户点「新增参数」刚插入的空行必然会被裁掉，表现就是"新建一行马上消失、
+      来不及输入"。空行只在发送给后端的那份副本里过滤，界面保持用户输入的样子。 */
   function updateLaunchArguments(next: string[]) {
     const previous = launchArguments;
     setLaunchArguments(next);
@@ -1308,15 +1353,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     launchArgumentsSaveTimerRef.current = setTimeout(() => {
       launchArgumentsSaveTimerRef.current = null;
       const trimmed = next.map((argument) => argument.trim()).filter(Boolean);
-      void invoke<string[]>("save_launch_arguments", { arguments: trimmed })
-        .then((saved) => {
-          // 后端会裁剪空白/空条目，以它返回的为准对齐界面。
-          setLaunchArguments(saved);
-        })
-        .catch((error: unknown) => {
-          setLaunchArguments(previous);
-          showToast(error instanceof Error ? error.message : String(error), "error");
-        });
+      void invoke<string[]>("save_launch_arguments", { arguments: trimmed }).catch((error: unknown) => {
+        setLaunchArguments(previous);
+        showToast(error instanceof Error ? error.message : String(error), "error");
+      });
     }, 500);
   }
 
@@ -1398,7 +1438,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   function switchSettingsPage(nextPage: SettingsPage) {
     setSettingsPage((current) => {
       if (current !== nextPage) {
-        const order: SettingsPage[] = ["about", "general", "toolbox", "logs", "modLoader", "startup", "developer"];
+        const order: SettingsPage[] = ["about", "general", "gameOptions", "toolbox", "logs", "modLoader", "startup", "experimental", "developer"];
         setSettingsTransitionDirection(
           order.indexOf(nextPage) >= order.indexOf(current) ? "forward" : "backward",
         );
@@ -2545,6 +2585,21 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }
   }
 
+  /** 「从游戏文件启动（离线）」：只落盘；下次点「启动游戏」时生效。 */
+  async function updateLaunchFromGameFiles(enabled: boolean) {
+    const previous = launchFromGameFiles;
+    setLaunchFromGameFiles(enabled);
+    setLaunchFromGameFilesSaving(true);
+    try {
+      await invoke("save_launch_from_game_files", { enabled });
+    } catch (error: unknown) {
+      setLaunchFromGameFiles(previous);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setLaunchFromGameFilesSaving(false);
+    }
+  }
+
   /** 「启动器接管光影管理」：只落盘；启动时由后端判断要不要覆写。 */
   async function updateShaderpackOverrideEnabled(enabled: boolean): Promise<boolean> {
     const previous = shaderpackOverrideEnabled;
@@ -2559,6 +2614,39 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       return false;
     } finally {
       setShaderpackOverrideSaving(false);
+    }
+  }
+
+  /** 「实验性 › 自动加入服务器」：保存开关 / 地址 / 密码。
+      开关保存失败时前端状态不动（Switch 由 state 控制，会自动弹回）；
+      关闭成功时后端已清空地址与密码，前端同步清掉输入框。 */
+  async function saveAutoJoinSettings(
+    enabled: boolean,
+    targetText: string,
+    passwordText: string,
+  ): Promise<boolean> {
+    setAutoJoinSaving(true);
+    try {
+      await invoke("save_auto_join_settings", {
+        enabled,
+        target: targetText,
+        password: passwordText,
+      });
+      setAutoJoinEnabled(enabled);
+      if (!enabled) {
+        setAutoJoinTarget("");
+        setAutoJoinPassword("");
+      }
+      showToast(
+        enabled ? "自动加入服务器已开启，下次启动游戏时生效。" : "自动加入服务器已关闭。",
+        "success",
+      );
+      return true;
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+      return false;
+    } finally {
+      setAutoJoinSaving(false);
     }
   }
 
@@ -3078,6 +3166,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           setPauseMusicOnLaunch(pauseMusic);
           pauseMusicOnLaunchRef.current = pauseMusic;
           setShaderpackOverrideEnabled(Boolean(settingsResult.value.shaderpackOverrideEnabled));
+          setLaunchFromGameFiles(Boolean(settingsResult.value.launchFromGameFiles));
+          setAutoJoinEnabled(Boolean(settingsResult.value.autoJoinEnabled));
+          setAutoJoinTarget(settingsResult.value.autoJoinTarget ?? "");
+          setAutoJoinPassword(settingsResult.value.autoJoinPassword ?? "");
           setAggressiveMemoryClean(Boolean(settingsResult.value.aggressiveMemoryClean));
           setBackgroundPath(settingsResult.value.backgroundPath);
           setWallpaperEffectSettings(normalizeWallpaperEffectSettings(settingsResult.value.wallpaperEffect));
@@ -3531,6 +3623,54 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     void refreshLauncherLog();
   }, [settingsPage]);
 
+  // 「设置 › 游戏设置」：进入页面时读取 options.ini（游戏退出会整份重写，缓存没有意义）。
+  useEffect(() => {
+    if (activePage !== "settings" || settingsPage !== "gameOptions") return;
+    void loadGameOptions();
+  }, [activePage, settingsPage]);
+
+  async function loadGameOptions() {
+    setGameOptionsLoading(true);
+    try {
+      const snapshot = await invoke<GameOptionsSnapshot>("read_game_options");
+      setGameOptions(snapshot);
+      setGameOptionDrafts({});
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setGameOptionsLoading(false);
+    }
+  }
+
+  /** 保存一项游戏设置：成功后原地更新列表，失败提示并重读整份文件。 */
+  async function saveGameOption(key: string, value: string) {
+    if (gameOptionSaving) return;
+    setGameOptionSaving(key);
+    try {
+      await invoke("save_game_option", { key, value });
+      setGameOptions((current) =>
+        current
+          ? {
+              ...current,
+              entries: current.entries.map((entry) =>
+                entry.key === key ? { ...entry, value } : entry,
+              ),
+            }
+          : current,
+      );
+      setGameOptionDrafts((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : String(error), "error");
+      void loadGameOptions();
+    } finally {
+      setGameOptionSaving(null);
+    }
+  }
+
   // 「设置 › 关于」：读取本机提交过的反馈编号，给「已提交的反馈」列表用。
   useEffect(() => {
     if (activePage !== "settings" || settingsPage !== "about") return;
@@ -3626,6 +3766,21 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     }).then((cleanup) => {
       if (disposed) cleanup();
     }).catch(() => undefined);
+    // 有模组被游戏（版本/依赖检查）拒绝加载：覆盖层不拦截加载流程，
+    // 由启动器弹确认框列出清单，用户确认后继续。
+    void listen<string[]>("overlay-reject-warning", (event) => {
+      const ids = (event.payload ?? []).filter(Boolean);
+      if (!ids.length) return;
+      const shown = ids.slice(0, 12).join("、");
+      const suffix = ids.length > 12 ? ` 等 ${ids.length} 个` : "";
+      void showConfirm({
+        title: "有模组被拒绝加载",
+        body: `以下 ${ids.length} 个模组被游戏拒绝加载（常见原因：模组的版本要求高于当前游戏版本，或依赖链上指向了这类模组）：\n${shown}${suffix}。\n\n完整列表见启动器日志（launcher.log）。游戏将继续启动；如需恢复这些模组，请把游戏和模组更新到同一版本。`,
+        actions: [{ label: "进入游戏", value: "ok" }],
+      });
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+    }).catch(() => undefined);
     return () => {
       disposed = true;
       unlisten?.();
@@ -3664,9 +3819,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         void loadModVersionTargets();
       }
       // 整合包操作没有 rootPath：完成后刷新整合包列表和模组列表。
+      // 一键保存模组变更现在也会写一条变更记录，同样要刷新。
       if (
         update.status === "completed" &&
-        (update.operation === "modSaveAll" || update.operation === "modRestorePack")
+        (update.operation === "modSaveAll" ||
+          update.operation === "modRestorePack" ||
+          update.operation === "modSaveChanges")
       ) {
         void loadModVersionPacks();
       }
@@ -4199,10 +4357,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           setStartupStartedAt(null);
           // 命令可能还挂在后端：把"启动中"的界面状态一起解开，按钮立刻可重试。
           setLaunchingGame(false);
-          // 覆盖层会话线程还在等，这里只收界面：查一下 Steam 是否在跑，让提示指向正确的排查方向。
-          void invoke<boolean>("steam_process_running")
-            .then((steamRunning) => showToast(launchTimeoutMessage(steamRunning), "error"))
-            .catch(() => showToast(launchTimeoutMessage(false), "error"));
+          // 从游戏文件启动时游戏进程压根不经过 Steam，超时提示指向游戏本体；
+          // Steam 启动才区分"Steam 没起来"和"Steam 在但游戏没拉起"两种排查方向。
+          if (launchFromFilesRef.current) {
+            showToast(
+              "启动超时：15 秒内没有拉起游戏进程，已中断本次启动等待。请确认游戏目录完整（ProjectZomboid64.exe 存在），可直接重试或改用 Steam 启动。",
+              "error",
+            );
+          } else {
+            // 查一下 Steam 是否在跑，让提示指向正确的排查方向。
+            void invoke<boolean>("steam_process_running")
+              .then((steamRunning) => showToast(launchTimeoutMessage(steamRunning), "error"))
+              .catch(() => showToast(launchTimeoutMessage(false), "error"));
+          }
           return;
         }
       } catch {
@@ -4240,10 +4407,60 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   async function launchProjectZomboid() {
+    // 启动来源由「启动设置 › 从游戏文件启动（离线）」开关决定。
+    const fromFiles = launchFromGameFiles;
     setLaunchingGame(true);
     try {
       if (memoryLimitMb === null) {
         throw new Error(memoryError ?? "正在读取系统内存，请稍后再试。");
+      }
+      // 启动前模组兼容性预检：已启用 Java 模组的字节码引用了当前游戏已移除的
+      // 类时（42.22 移除 zombie.util.list.PZArrayList，旧 Viewpoint 插件仍在引用），
+      // 游戏会在 LuaManager.init 阶段直接闪退，连主菜单都进不去。先查一遍，
+      // 让用户在启动前决定禁用还是硬闯。预检失败绝不阻断启动。
+      if (!compatWarningIgnoredRef.current) {
+        try {
+          const report = await invoke<ModCompatReport>("check_mod_compatibility");
+          if (report.issues.length > 0) {
+            const lines = report.issues.slice(0, 12).map(
+              (issue) =>
+                `· ${issue.name}（${issue.modId}）→ ${issue.missingClasses.join("、")}`,
+            );
+            const more =
+              report.issues.length > 12
+                ? `\n…等 ${report.issues.length} 个模组（完整列表见启动器日志）`
+                : "";
+            const answer = await showConfirm({
+              title: "模组与当前游戏版本不兼容",
+              body: `以下模组的字节码引用了当前游戏已不存在的类，启动后可能直接闪退：\n\n${lines.join("\n")}${more}\n\n禁用后可以正常进入游戏，之后可在「模组管理」重新启用。`,
+              actions: [
+                { label: "禁用这些模组并启动", value: "disable" },
+                { label: "仍然启动", value: "proceed" },
+                { label: "取消", value: "cancel" },
+              ],
+            });
+            if (answer === "cancel") {
+              return;
+            }
+            if (answer === "disable") {
+              const disabled = await invoke<number>("disable_mods_for_launch", {
+                modInfoPaths: report.issues.map((issue) => issue.modInfoPath),
+              });
+              showToast(`已禁用 ${disabled} 个不兼容模组，正在启动游戏。`, "notice");
+              // 模组页的列表在后台刷新，用户切过去时看到的是最新启停状态。
+              void loadJarMods();
+            } else {
+              // 本次会话不再重复询问；下次启动（或重启后）仍会提示。
+              compatWarningIgnoredRef.current = true;
+            }
+          }
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          void invoke("log_frontend_message", {
+            level: "warn",
+            message: `模组兼容性预检失败（不影响启动）：${message}`,
+          }).catch(() => undefined);
+        }
       }
       const normalizedLaunchArguments = launchArguments.map((argument) => argument.trim()).filter(Boolean);
       const joinedLaunchArguments = joinLaunchArguments(normalizedLaunchArguments);
@@ -4252,6 +4469,8 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       //（2026-11-08 实测：启动命令卡死时界面毫无反馈，也报不出超时）。
       launchClickedAtRef.current = Date.now();
       launchBreakerFiredRef.current = false;
+      // 熔断提示要知道本次的启动来源：从游戏文件启动时提 Steam 就是误导。
+      launchFromFilesRef.current = fromFiles;
       setOverlaySession(null);
       setOverlayZbProgress(null);
       setStartupResult(null);
@@ -4260,12 +4479,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       setGameWindowReady(false);
       setGamePid(null);
       setWatchingGame(true);
-      await invoke("launch_project_zomboid", {
+      // 离线启动时后端返回工坊映射结果，拼进成功提示（Steam 启动返回固定文案，忽略）。
+      const launchNote = await invoke<string>("launch_project_zomboid", {
         launchArgs: normalizedLaunchArguments,
         memoryMb: memoryLimitMb,
         // 极速启动（实验性）走 JVMTI agent 早期加载，需要把覆盖层 DLL 的路径交给后端，
         // 由它在 ProjectZomboid64.json / .bat 里写 `-agentpath:`（开关关闭时后端会把它摘掉）。
         fastLaunchDllPath: overlayDllPath.trim() || null,
+        // "files" = 不经 Steam，按游戏目录 bat 的方式用自带 jre64 的 java 启动；
+        // Steam 没在跑时后端会把创意工坊模组联接进 Zomboid\mods 供游戏扫描。
+        launchSource: fromFiles ? "files" : null,
       });
       // 熔断已经报过超时：这条命令晚到的成功不再提示（游戏确实起来了也不重复打扰），
       // 但覆盖层仍然挂上，免得晚到的游戏丢掉注入。
@@ -4286,8 +4509,9 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         }
       }
       if (!breached) {
+        const sourceNote = fromFiles ? "（从游戏文件启动，未经 Steam）" : "";
         showToast(
-          `游戏已启动。内存限制 ${formatMemoryMb(memoryLimitMb)}${joinedLaunchArguments ? `，启动参数 ${joinedLaunchArguments}` : ""}。${overlayNote}`,
+          `游戏已启动${sourceNote}。内存限制 ${formatMemoryMb(memoryLimitMb)}${joinedLaunchArguments ? `，启动参数 ${joinedLaunchArguments}` : ""}${fromFiles && launchNote ? `。${launchNote}` : ""}。${overlayNote}`,
           "success",
         );
       }
@@ -4870,33 +5094,54 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     });
   }
 
-  async function createVersionSnapshot() {
-    const label = versionLabelDraft.trim();
+  /** 概览「完整保存」命名弹窗的正文：首次保存和重复保存讲不同的注意事项。 */
+  function versionSaveBodyText() {
     const existing = versionStatus?.versions.length ?? 0;
     const modNote = versionIncludeMods ? "\n\n当前启用的模组也会各存一份。" : "";
     // 用最近一个版本的大小估算游戏目录体积，让「占用大量空间」有具体数字。
     const versions = versionStatus?.versions ?? [];
     const latestBytes = versions.length > 0 ? versions[versions.length - 1].totalBytes : 0;
     const sizeNote = latestBytes > 0 ? `（约 ${formatVersionBytes(latestBytes)}）` : "";
-    const confirmed = await askConfirm(
-      "完整保存",
-      existing > 0
-        ? `一般完整保存一份母版本就够了，日常改动用「保存变化」只记录差异、省空间。\n\n再完整保存一份会把整个游戏目录${sizeNote}原样再复制一份，占用大量空间。${modNote}\n\n确定继续吗？`
-        : `这是第一次保存：会把整个游戏目录${sizeNote}完整复制一份作为母版本。${modNote}\n\n确定继续吗？`,
-      { okLabel: "完整保存" },
-    );
-    if (!confirmed) return;
-    startVersionOperation(
-      "start_version_snapshot",
-      { label: label || null, includeMods: versionIncludeMods },
-      "完整保存",
-    );
+    return existing > 0
+      ? `一般完整保存一份母版本就够了，日常改动用「保存变化」只记录差异、省空间。\n\n再完整保存一份会把整个游戏目录${sizeNote}原样再复制一份，占用大量空间。${modNote}`
+      : `这是第一次保存：会把整个游戏目录${sizeNote}完整复制一份作为母版本。${modNote}`;
+  }
+
+  function openVersionSaveNameDialog() {
+    setVersionSaveNameDialog(true);
+  }
+
+  /** 关闭完整保存命名弹窗（取消或点遮罩）；确认走 confirmVersionSaveName。 */
+  function closeVersionSaveNameDialog() {
+    if (versionSaveNameDialogClosing) return;
+    setVersionSaveNameDialogClosing(true);
+    window.setTimeout(() => {
+      setVersionSaveNameDialog(false);
+      setVersionSaveNameDialogClosing(false);
+    }, RESOURCE_DIALOG_EXIT_MS);
+  }
+
+  /** 完整保存（带可选名称，留空走后端默认命名）并关掉弹窗。 */
+  function confirmVersionSaveName(label: string) {
+    if (versionSaveNameDialogClosing) return;
+    const trimmed = label.trim();
+    setVersionSaveNameDialogClosing(true);
+    window.setTimeout(() => {
+      setVersionSaveNameDialog(false);
+      setVersionSaveNameDialogClosing(false);
+      startVersionOperation(
+        "start_version_snapshot",
+        { label: trimmed || null, includeMods: versionIncludeMods },
+        trimmed ? `完整保存 · ${trimmed}` : "完整保存",
+      );
+    }, RESOURCE_DIALOG_EXIT_MS);
   }
 
   function captureVersion() {
+    // 保存变化不再带备注输入，label 留空走后端默认标签「保存变化」。
     startVersionOperation(
       "start_version_capture",
-      { label: versionLabelDraft.trim() || null, includeMods: versionIncludeMods },
+      { includeMods: versionIncludeMods },
       "保存变化",
     );
   }
@@ -5279,16 +5524,17 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   }
 
   async function restoreModVersionPack(pack: ModPackRecord) {
+    const noun = pack.kind === "changes" ? "变更记录" : "整合包";
     const confirmed = await askConfirm(
-      `还原整合包「${pack.label}」`,
-      `请先关闭 Project Zomboid。\n\n会把包里的 ${pack.mods.length} 个模组都换成记录时的版本，当前没保存过的修改会丢失；找不到的模组会跳过。`,
+      `还原${noun}「${pack.label}」`,
+      `请先关闭 Project Zomboid。\n\n会把${noun}里的 ${pack.mods.length} 个模组都换成记录时的版本，当前没保存过的修改会丢失；找不到的模组会跳过。`,
       { danger: true, okLabel: "还原" },
     );
     if (!confirmed) return;
     void startModPackOperation(
       "start_mod_version_restore_pack",
       { packId: pack.id },
-      "还原整合包",
+      `还原${noun}`,
       pack.label,
     );
   }
@@ -5587,7 +5833,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     if (
       !(await askConfirm(
         "清除启动器用户数据",
-        "将删除 %USERPROFILE%\\Zomboid\\.pzmanager 下的全部启动器数据：设置、JAR 模组状态、模组预设、日志、背景图、反馈记录、极速启动备份和版本备份。\n\n此操作不可恢复，不会影响游戏本体、存档和模组文件。如果开启过极速启动，建议先在「设置 › 启动」里关闭，以便恢复游戏启动配置。",
+        "将删除 %USERPROFILE%\\Zomboid\\.pzmanager 下的全部启动器数据：设置、JAR 模组状态、模组预设、日志、背景图、反馈记录、极速启动备份和版本备份。\n\n此操作不可恢复，不会影响游戏本体、存档和模组文件。如果开启过极速启动，建议先在「设置 › 实验性功能」里关闭，以便恢复游戏启动配置。",
         { danger: true, okLabel: "清除" },
       ))
     ) {
@@ -5829,12 +6075,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
   const launchContent = (
     <>
       <AcrylicGlass backgroundUrl={backgroundUrl} seasonal={wallpaperSeasonal} effect={wallpaperEffect} />
-      {wallpaperSeasonal && (
-        <LaunchMusicPlayer
-          onMusicStarted={(message) => showToast(message, "notice")}
-          pauseSignal={musicPauseSignal}
-        />
-      )}
+      {wallpaperSeasonal && <LaunchMusicControls />}
       {selectedWorkshopBackground && (
         <Box
           className={`pz-launch-workshop-info${workshopBackgroundInfoOpen ? " is-open" : ""}`}
@@ -6000,6 +6241,29 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               />
             </HStack>
 
+            <HStack align="center" gap="3" justify="space-between" mb="3" wrap="wrap">
+              <Box flex="1" minW="200px">
+                <Text color="gray.800" fontSize="sm" fontWeight="700">
+                  从游戏文件启动（离线）
+                </Text>
+                <Text color="gray.500" fontSize="xs" mt="1">
+                  勾选后点「启动游戏」不经过 Steam，直接用游戏目录自带的 JRE 启动；
+                  Steam 未运行时会把创意工坊模组联接进模组目录，保证离线也能加载。
+                </Text>
+              </Box>
+              <Switch.Root
+                aria-label="从游戏文件启动（离线）"
+                checked={launchFromGameFiles}
+                disabled={launchFromGameFilesSaving}
+                onCheckedChange={(details) => void updateLaunchFromGameFiles(details.checked)}
+              >
+                <Switch.HiddenInput />
+                <Switch.Control>
+                  <Switch.Thumb />
+                </Switch.Control>
+              </Switch.Root>
+            </HStack>
+
             <HStack justify="space-between" gap="3" mb="2" wrap="wrap">
               <Text color="gray.700" fontSize="sm" fontWeight="700">
                 游戏内存
@@ -6011,35 +6275,17 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             {systemMemoryMb !== null && memoryLimitMb !== null ? (
               <>
                 <Box className="pz-memory-slider-wrap">
-                  <Slider.Root
-                    aria-label={["游戏内存限制"]}
+                  {/* 拖动连续、松手吸附到 512MB 档位；保存只在松手后发一次。 */}
+                  <SnapSlider
+                    ariaLabel="游戏内存限制"
                     className="pz-memory-slider"
                     max={systemMemoryMb}
                     min={MIN_MEMORY_MB}
                     step={MEMORY_STEP_MB}
-                    value={[memoryLimitMb]}
-                    onValueChange={({ value }) => {
-                      const nextValue = value[0];
-                      if (nextValue !== undefined) {
-                        updateMemoryLimit(nextValue);
-                      }
-                    }}
-                    onValueChangeEnd={({ value }) => {
-                      const nextValue = value[0];
-                      if (nextValue !== undefined) {
-                        void commitMemoryLimit(nextValue);
-                      }
-                    }}
-                  >
-                    <Slider.Control>
-                      <Slider.Track>
-                        <Slider.Range />
-                      </Slider.Track>
-                      <Slider.Thumb index={0}>
-                        <Slider.HiddenInput />
-                      </Slider.Thumb>
-                    </Slider.Control>
-                  </Slider.Root>
+                    value={memoryLimitMb}
+                    onChange={updateMemoryLimit}
+                    onCommit={commitMemoryLimit}
+                  />
                 </Box>
                 <HStack justify="space-between" color="gray.500" fontSize="xs" mt="2">
                   <Text>{formatMemoryMb(MIN_MEMORY_MB)}</Text>
@@ -7066,49 +7312,11 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 </Text>
               </HStack>
 
-              {workshopResponse.meta.totalPages > 1 && (
-                <HStack className="pz-workshop-pagination" justify="center" gap="1" wrap="wrap">
-                  <Button
-                    disabled={workshopFilters.page <= 1}
-                    onClick={() => updateWorkshopFilters({ page: workshopFilters.page - 1 }, 0, false)}
-                    size="sm"
-                    variant="outline"
-                  >
-                    上一页
-                  </Button>
-                  {Array.from(
-                    new Set(
-                      [
-                        1,
-                        workshopResponse.meta.totalPages,
-                        workshopFilters.page,
-                        workshopFilters.page - 1,
-                        workshopFilters.page + 1,
-                      ].filter((page) => page >= 1 && page <= workshopResponse.meta.totalPages),
-                    ),
-                  )
-                    .sort((left, right) => left - right)
-                    .map((page) => (
-                      <Button
-                        key={page}
-                        colorPalette={page === workshopFilters.page ? "blue" : "gray"}
-                        onClick={() => updateWorkshopFilters({ page }, 0, false)}
-                        size="sm"
-                        variant={page === workshopFilters.page ? "solid" : "outline"}
-                      >
-                        {page}
-                      </Button>
-                    ))}
-                  <Button
-                    disabled={workshopFilters.page >= workshopResponse.meta.totalPages}
-                    onClick={() => updateWorkshopFilters({ page: workshopFilters.page + 1 }, 0, false)}
-                    size="sm"
-                    variant="outline"
-                  >
-                    下一页
-                  </Button>
-                </HStack>
-              )}
+              <Pagination
+                onChange={(page) => updateWorkshopFilters({ page }, 0, false)}
+                page={workshopFilters.page}
+                totalPages={workshopResponse.meta.totalPages}
+              />
             </>
           ) : (
             <EmptyState text="准备加载创意工坊..." />
@@ -7353,7 +7561,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       <SettingsSection title="通用">
         <SettingsRow
           label="开发者模式"
-          hint="开启后显示更多技术细节，包括加载方式、模组标签、冲突分析和详细通知。"
+          hint="显示加载方式、冲突分析等技术细节。"
         >
           <Switch.Root
             aria-label="开发者模式"
@@ -7369,10 +7577,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         </SettingsRow>
         <SettingsRow
           label="启动器接管光影管理"
-          hint={
-            "开启后，启动游戏前会把光影包页配置的参数写入 Viewpoint 配置文件，游戏退出后自动还原；" +
-            "接管期间游戏内对光影包设置的修改不会保存。关闭后不再覆写任何配置文件，光影完全由游戏管理。"
-          }
+          hint="启动前写入光影包配置，退出后还原；关闭后完全不碰配置文件。"
         >
           <Switch.Root
             aria-label="启动器接管光影管理"
@@ -7386,12 +7591,154 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             </Switch.Control>
           </Switch.Root>
         </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title="外观">
+        <SettingsRow
+          label="字体对比度"
+          hint="文字看不清时往右拉，最左端为默认配色。"
+        >
+          <Box flex="1" maxW="320px" minW="200px">
+            <HStack justify="space-between" mb="1">
+              <Text color="gray.500" fontSize="xs">
+                {fontContrast === 0 ? "默认配色" : "文字压深"}
+              </Text>
+              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+                {fontContrast}%
+              </Text>
+            </HStack>
+            {/* 与启动页内存滑块同一个样式类，观感一致（类名叫 memory 是历史原因）。 */}
+            {/* 拖动连续、松手吸附到 5% 档位；落盘走 updateFontContrast 的 250ms 防抖。 */}
+            <SnapSlider
+              ariaLabel="字体对比度"
+              className="pz-memory-slider"
+              max={100}
+              min={0}
+              step={5}
+              value={fontContrast}
+              onChange={updateFontContrast}
+            />
+          </Box>
+        </SettingsRow>
+        <SettingsRow
+          label="模糊度"
+          hint="毛玻璃强度：0 为关闭模糊，往右更厚重。"
+        >
+          <Box flex="1" maxW="320px" minW="200px">
+            <HStack justify="space-between" mb="1">
+              <Text color="gray.500" fontSize="xs">
+                {blurStrength === 0
+                  ? "关闭模糊"
+                  : blurStrength === DEFAULT_BLUR_STRENGTH
+                    ? "默认"
+                    : blurStrength < DEFAULT_BLUR_STRENGTH
+                      ? "更通透"
+                      : "更厚重"}
+              </Text>
+              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+                {blurStrength}%
+              </Text>
+            </HStack>
+            {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
+            <SnapSlider
+              ariaLabel="模糊度"
+              className="pz-memory-slider"
+              max={MAX_BLUR_STRENGTH}
+              min={MIN_BLUR_STRENGTH}
+              step={BLUR_STRENGTH_STEP}
+              value={blurStrength}
+              onChange={updateBlurStrength}
+            />
+          </Box>
+        </SettingsRow>
+        <SettingsRow
+          label="界面字号"
+          hint="缩放界面文字，窗口与控件大小不变。"
+        >
+          <Box flex="1" maxW="320px" minW="200px">
+            <HStack justify="space-between" mb="1">
+              <Text color="gray.500" fontSize="xs">
+                {fontScale === DEFAULT_FONT_SCALE
+                  ? "默认"
+                  : fontScale < DEFAULT_FONT_SCALE
+                    ? "更紧凑"
+                    : "更大"}
+              </Text>
+              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
+                {fontScale}%
+              </Text>
+            </HStack>
+            {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
+            <SnapSlider
+              ariaLabel="界面字号"
+              className="pz-memory-slider"
+              max={MAX_FONT_SCALE}
+              min={MIN_FONT_SCALE}
+              step={FONT_SCALE_STEP}
+              value={fontScale}
+              onChange={updateFontScale}
+            />
+          </Box>
+        </SettingsRow>
+        <SettingsRow
+          label="界面字体"
+          hint="选择系统字体，或自定义字体名 / CSS 字体列表。"
+        >
+          <HStack gap="2" align="center">
+            <WorkshopDropdown
+              ariaLabel="界面字体"
+              onChange={(value) => {
+                setFontFamilyChoice(value);
+                if (value === "custom") {
+                  // 保留当前值（可能是预设的 CSS 列表），由旁边的输入框直接编辑。
+                  return;
+                }
+                updateFontFamily(FONT_FAMILY_PRESET_CSS[value] ?? "");
+              }}
+              options={FONT_FAMILY_PRESETS}
+              value={fontFamilyChoice}
+              width="11rem"
+            />
+            {fontFamilyChoice === "custom" && (
+              <Input
+                aria-label="自定义字体"
+                placeholder="字体名，如 思源黑体 / Sarasa Gothic SC"
+                value={fontFamily}
+                width="13rem"
+                onChange={(event) => updateFontFamily(event.target.value)}
+              />
+            )}
+          </HStack>
+        </SettingsRow>
+        <SettingsRow
+          label="窗口大小"
+          hint="拖动窗口边缘调整，启动器自动记住。"
+        >
+          <HStack gap="2" align="center">
+            <Text color="gray.500" fontSize="xs">
+              {savedWindowSize
+                ? `已记住 ${savedWindowSize[0]} × ${savedWindowSize[1]}`
+                : `默认 ${DEFAULT_WINDOW_WIDTH} × ${DEFAULT_WINDOW_HEIGHT}`}
+            </Text>
+            <Button
+              aria-label="恢复默认窗口大小"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                void invoke("restore_default_window_size")
+                  .then(() => setSavedWindowSize(null))
+                  .catch((error: unknown) => {
+                    showToast(error instanceof Error ? error.message : String(error), "error");
+                  });
+              }}
+            >
+              恢复默认
+            </Button>
+          </HStack>
+        </SettingsRow>
         <SettingsRow
           label="原生窗口标题栏"
-          hint={
-            "改用系统自带的标题栏：自绘标题栏在某些设备 / WebView 上无法拖动时用它兜底。" +
-            "开启后自绘标题栏两侧的 LOGO 与窗口按钮会滑出隐藏，中间的导航保留；立即生效，下次启动按这个设置打开。"
-          }
+          hint="自绘标题栏无法拖动时用它兜底，立即生效。"
         >
           <Switch.Root
             aria-label="原生窗口标题栏"
@@ -7407,7 +7754,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         </SettingsRow>
         <SettingsRow
           label="覆盖层背景色"
-          hint="游戏加载时覆盖层的底色（默认纯红）。文字会自动按背景深浅换成白字或深色字，浅色背景也能看清。改动在下次启动游戏时生效。"
+          hint="游戏加载时覆盖层的底色，下次启动游戏生效。"
         >
           <HStack gap="2" align="center" wrap="wrap">
             {OVERLAY_BACKGROUND_PRESETS.map((preset) => {
@@ -7460,199 +7807,10 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         </SettingsRow>
       </SettingsSection>
 
-      <SettingsSection title="外观">
-        <SettingsRow
-          label="字体对比度"
-          hint="觉得文字和背景颜色太接近、看不清楚时往右拉：文字会变得更深，最左端保持默认配色。"
-        >
-          <Box flex="1" maxW="320px" minW="200px">
-            <HStack justify="space-between" mb="1">
-              <Text color="gray.500" fontSize="xs">
-                {fontContrast === 0 ? "默认配色" : "文字压深"}
-              </Text>
-              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
-                {fontContrast}%
-              </Text>
-            </HStack>
-            {/* 与启动页内存滑块同一个样式类，观感一致（类名叫 memory 是历史原因）。 */}
-            <Slider.Root
-              aria-label={["字体对比度"]}
-              className="pz-memory-slider"
-              max={100}
-              min={0}
-              step={5}
-              value={[fontContrast]}
-              onValueChange={({ value }) => {
-                const nextValue = value[0];
-                if (nextValue !== undefined) {
-                  updateFontContrast(nextValue);
-                }
-              }}
-            >
-              <Slider.Control>
-                <Slider.Track>
-                  <Slider.Range />
-                </Slider.Track>
-                <Slider.Thumb index={0}>
-                  <Slider.HiddenInput />
-                </Slider.Thumb>
-              </Slider.Control>
-            </Slider.Root>
-          </Box>
-        </SettingsRow>
-        <SettingsRow
-          label="模糊度"
-          hint="毛玻璃效果的强度：往左更通透（0 等于关闭模糊），往右更厚重。面板、菜单、弹层和提示气泡会一起变化。"
-        >
-          <Box flex="1" maxW="320px" minW="200px">
-            <HStack justify="space-between" mb="1">
-              <Text color="gray.500" fontSize="xs">
-                {blurStrength === 0
-                  ? "关闭模糊"
-                  : blurStrength === DEFAULT_BLUR_STRENGTH
-                    ? "默认"
-                    : blurStrength < DEFAULT_BLUR_STRENGTH
-                      ? "更通透"
-                      : "更厚重"}
-              </Text>
-              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
-                {blurStrength}%
-              </Text>
-            </HStack>
-            {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
-            <Slider.Root
-              aria-label={["模糊度"]}
-              className="pz-memory-slider"
-              max={MAX_BLUR_STRENGTH}
-              min={MIN_BLUR_STRENGTH}
-              step={BLUR_STRENGTH_STEP}
-              value={[blurStrength]}
-              onValueChange={({ value }) => {
-                const nextValue = value[0];
-                if (nextValue !== undefined) {
-                  updateBlurStrength(nextValue);
-                }
-              }}
-            >
-              <Slider.Control>
-                <Slider.Track>
-                  <Slider.Range />
-                </Slider.Track>
-                <Slider.Thumb index={0}>
-                  <Slider.HiddenInput />
-                </Slider.Thumb>
-              </Slider.Control>
-            </Slider.Root>
-          </Box>
-        </SettingsRow>
-        <SettingsRow
-          label="界面字号"
-          hint="整体放大或缩小界面文字：往左更紧凑，往右更大更易读。窗口和控件大小保持不变。"
-        >
-          <Box flex="1" maxW="320px" minW="200px">
-            <HStack justify="space-between" mb="1">
-              <Text color="gray.500" fontSize="xs">
-                {fontScale === DEFAULT_FONT_SCALE
-                  ? "默认"
-                  : fontScale < DEFAULT_FONT_SCALE
-                    ? "更紧凑"
-                    : "更大"}
-              </Text>
-              <Text color="blue.700" fontFamily="mono" fontSize="xs" fontWeight="700">
-                {fontScale}%
-              </Text>
-            </HStack>
-            {/* 与上面两项同一个滑块样式（类名叫 memory 是历史原因）。 */}
-            <Slider.Root
-              aria-label={["界面字号"]}
-              className="pz-memory-slider"
-              max={MAX_FONT_SCALE}
-              min={MIN_FONT_SCALE}
-              step={FONT_SCALE_STEP}
-              value={[fontScale]}
-              onValueChange={({ value }) => {
-                const nextValue = value[0];
-                if (nextValue !== undefined) {
-                  updateFontScale(nextValue);
-                }
-              }}
-            >
-              <Slider.Control>
-                <Slider.Track>
-                  <Slider.Range />
-                </Slider.Track>
-                <Slider.Thumb index={0}>
-                  <Slider.HiddenInput />
-                </Slider.Thumb>
-              </Slider.Control>
-            </Slider.Root>
-          </Box>
-        </SettingsRow>
-        <SettingsRow
-          label="界面字体"
-          hint="选择系统常见字体；选「自定义…」后可填入本机安装的任意字体名，也可以直接粘贴 CSS font-family 列表。"
-        >
-          <HStack gap="2" align="center">
-            <WorkshopDropdown
-              ariaLabel="界面字体"
-              onChange={(value) => {
-                setFontFamilyChoice(value);
-                if (value === "custom") {
-                  // 保留当前值（可能是预设的 CSS 列表），由旁边的输入框直接编辑。
-                  return;
-                }
-                updateFontFamily(FONT_FAMILY_PRESET_CSS[value] ?? "");
-              }}
-              options={FONT_FAMILY_PRESETS}
-              value={fontFamilyChoice}
-              width="11rem"
-            />
-            {fontFamilyChoice === "custom" && (
-              <Input
-                aria-label="自定义字体"
-                placeholder="字体名，如 思源黑体 / Sarasa Gothic SC"
-                value={fontFamily}
-                width="13rem"
-                onChange={(event) => updateFontFamily(event.target.value)}
-              />
-            )}
-          </HStack>
-        </SettingsRow>
-        <SettingsRow
-          label="窗口大小"
-          hint={
-            `直接拖动窗口边缘即可调整大小（最小 ${DEFAULT_WINDOW_WIDTH} × ${DEFAULT_WINDOW_HEIGHT}），` +
-            "启动器会自动记住，下次启动按这个尺寸打开。"
-          }
-        >
-          <HStack gap="2" align="center">
-            <Text color="gray.500" fontSize="xs">
-              {savedWindowSize
-                ? `已记住 ${savedWindowSize[0]} × ${savedWindowSize[1]}`
-                : `默认 ${DEFAULT_WINDOW_WIDTH} × ${DEFAULT_WINDOW_HEIGHT}`}
-            </Text>
-            <Button
-              aria-label="恢复默认窗口大小"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                void invoke("restore_default_window_size")
-                  .then(() => setSavedWindowSize(null))
-                  .catch((error: unknown) => {
-                    showToast(error instanceof Error ? error.message : String(error), "error");
-                  });
-              }}
-            >
-              恢复默认
-            </Button>
-          </HStack>
-        </SettingsRow>
-      </SettingsSection>
-
       <SettingsSection title="翻译">
         <SettingsRow
           label="翻译语言"
-          hint="开发者新闻和创意工坊详情的正文、标题都按这个语言翻译；选 English 时不翻译，直接显示原文。"
+          hint="新闻和创意工坊详情按此语言翻译，English 即原文。"
         >
           {/* 与资源中心筛选行同一个下拉组件，样式完全一致（含 26px 控件高度与 ▾ 箭头）。 */}
           <WorkshopDropdown
@@ -7666,7 +7824,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         </SettingsRow>
         <SettingsRow
           label="翻译引擎"
-          hint="优先使用所选引擎翻译开发者新闻、创意工坊详情与翻译器文本，失败时自动回退其余引擎。默认顺序：Google → 必应 → MyMemory；「中转翻译」是中转服务器上的离线翻译，只支持中文 / 英语 / 俄语。"
+          hint="优先使用所选引擎，失败自动回退其余引擎。"
         >
           <WorkshopDropdown
             ariaLabel="翻译引擎"
@@ -7737,7 +7895,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         </SettingsRow>
         <SettingsRow
           label="本地代理"
-          hint="带本地端口的代理（Clash / V2Ray 等）通常比中转更快；留空不使用。"
+          hint="Clash / V2Ray 等本地代理，通常比中转更快。"
         >
           <VStack align="flex-end" gap="2">
             <HStack align="center" gap="2" wrap="wrap">
@@ -8035,61 +8193,14 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     </Box>
   );
 
-  /** 设置 › 启动：启动阶段的实验性优化开关。
-      「极速启动」只在模组加载器方案 = ZombieBuddy 时可用（其它方案没有可短路的加载器）。 */
+  /** 设置 › 启动：启动阶段的内存清理与启动器行为。
+      「极速启动」已移到「实验性功能」页（见 experimentalSettingsContent）。 */
   const startupSettingsContent = (
     <Box className="pz-panel pz-startup-settings-panel">
       <Text color="gray.900" fontSize="lg" fontWeight="700">启动</Text>
       <Text color="gray.500" fontSize="sm" mt="1">
-        启动阶段的实验性优化，默认关闭；出问题关掉就能回到原版流程。
+        启动时的内存清理与启动器行为；「极速启动」等实验性开关在「实验性功能」页。
       </Text>
-      <HStack align="center" gap="4" justify="space-between" mt="4" wrap="wrap">
-        <Box flex="1" minW="240px">
-          <HStack gap="2" wrap="wrap">
-            <Text color="gray.800" fontSize="sm" fontWeight="700">极速启动</Text>
-            <Badge colorPalette="orange" size="sm">实验性</Badge>
-            <HintDot
-              label="极速启动说明"
-              text={
-                "让游戏跳过启动时的模组全量扫描，直接使用启动器预先整理好的模组清单，明显加快启动速度。任何一步出问题都会自动退回游戏原本的加载方式，不影响正常游玩。\n\n" +
-                "需要通过本启动器的「启动游戏」按钮启动游戏。开启时会先备份游戏的启动配置（原文件保存在 .pzmanager\\fast-launch-backup），关闭时自动恢复。" +
-                (modLoaderScheme === "zombieBuddy"
-                  ? "\n\n清单只包含「已启用」的 JAR 模组，会一直保留：改动模组后想立即生效，到「模组管理 › JAR」点一次「刷新 JAR 列表」即可。"
-                  : "") +
-                "\n\n此功能会修改游戏的启动方式，建议只在单机或自建服务器环境使用。"
-              }
-            />
-          </HStack>
-          {modLoaderScheme === "zombieBuddy" ? null : (
-            <Text color="orange.700" fontSize="xs" mt="1">
-              仅支持 ZombieBuddy 模组加载器：当前选择的是「不使用（原版加载）」，请先到
-              设置 › 模组加载器 更改。
-            </Text>
-          )}
-          <FastLaunchCacheStatusLine
-            enabled={fastLaunch && !fastLaunchWarningOpen && modLoaderScheme === "zombieBuddy"}
-          />
-        </Box>
-        <Switch.Root
-          aria-label="极速启动"
-          checked={fastLaunch}
-          disabled={fastLaunchSaving || modLoaderScheme !== "zombieBuddy"}
-          onCheckedChange={(details) => {
-            if (details.checked) {
-              // 先临时设为开，让受控开关的隐藏 input 跟上点击；确认后才落盘，取消时退回。
-              setFastLaunch(true);
-              setFastLaunchWarningOpen(true);
-            } else {
-              void updateFastLaunch(false);
-            }
-          }}
-        >
-          <Switch.HiddenInput />
-          <Switch.Control>
-            <Switch.Thumb />
-          </Switch.Control>
-        </Switch.Root>
-      </HStack>
 
       <Box mt="5" pt="4" borderTopWidth="1px" borderColor="gray.200">
         <HStack align="center" gap="4" justify="space-between" wrap="wrap">
@@ -8122,30 +8233,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                   {silentMemoryCleanupThreshold}%
                 </Text>
               </HStack>
-              <Slider.Root
-                aria-label={["静默内存清理触发阈值"]}
+              <SnapSlider
+                ariaLabel="静默内存清理触发阈值"
                 className="pz-memory-slider"
                 disabled={!silentMemoryCleanup || silentMemoryCleanupSaving}
                 max={MAX_SILENT_MEMORY_PERCENT}
                 min={MIN_SILENT_MEMORY_PERCENT}
                 step={SILENT_MEMORY_PERCENT_STEP}
-                value={[silentMemoryCleanupThreshold]}
-                onValueChange={({ value }) => {
-                  const nextValue = value[0];
-                  if (nextValue !== undefined) {
-                    updateSilentMemoryCleanupThreshold(nextValue);
-                  }
-                }}
-              >
-                <Slider.Control>
-                  <Slider.Track>
-                    <Slider.Range />
-                  </Slider.Track>
-                  <Slider.Thumb index={0}>
-                    <Slider.HiddenInput />
-                  </Slider.Thumb>
-                </Slider.Control>
-              </Slider.Root>
+                value={silentMemoryCleanupThreshold}
+                onChange={updateSilentMemoryCleanupThreshold}
+              />
               <HStack color="gray.500" fontSize="xs" justify="space-between" mt="1">
                 <Text>{MIN_SILENT_MEMORY_PERCENT}%（更频繁）</Text>
                 <Text>{MAX_SILENT_MEMORY_PERCENT}%（更保守）</Text>
@@ -8250,6 +8347,155 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           </Switch.Root>
         </HStack>
       </Box>
+    </Box>
+  );
+
+  /** 设置 › 实验性功能：极速启动 + 自动加入服务器。
+      原理：启动器往游戏目录写 pzmanager 的钩子 Lua，主菜单就绪后替用户点一次「连接」；
+      只依赖 B42 原生 API，游戏更新导致 API 变化时钩子静默失效，不影响正常启动。 */
+  const experimentalSettingsContent = (
+    <Box className="pz-panel pz-general-settings-panel">
+      <Text color="gray.900" fontSize="lg" fontWeight="700">实验性功能</Text>
+      <Text color="gray.500" fontSize="sm" mt="1">
+        还在打磨的新功能，默认关闭；出问题关掉就能回到原版流程。
+      </Text>
+      <SettingsSection
+        title="极速启动"
+        titleExtra={<Badge colorPalette="orange" size="sm">实验性</Badge>}
+      >
+        <HStack align="center" gap="4" justify="space-between" p="4" wrap="wrap">
+          <Box flex="1" minW="240px">
+            <HStack gap="2" wrap="wrap">
+              <Text color="gray.800" fontSize="sm" fontWeight="700">
+                跳过启动时的模组全量扫描
+              </Text>
+              <HintDot
+                label="极速启动说明"
+                text={
+                  "让游戏跳过启动时的模组全量扫描，直接使用启动器预先整理好的模组清单，明显加快启动速度。任何一步出问题都会自动退回游戏原本的加载方式，不影响正常游玩。\n\n" +
+                  "需要通过本启动器的「启动游戏」按钮启动游戏。开启时会先备份游戏的启动配置（原文件保存在 .pzmanager\\fast-launch-backup），关闭时自动恢复。" +
+                  (modLoaderScheme === "zombieBuddy"
+                    ? "\n\n清单只包含「已启用」的 JAR 模组，会一直保留：改动模组后想立即生效，到「模组管理 › JAR」点一次「刷新 JAR 列表」即可。"
+                    : "") +
+                  "\n\n此功能会修改游戏的启动方式，建议只在单机或自建服务器环境使用。"
+                }
+              />
+            </HStack>
+            {modLoaderScheme === "zombieBuddy" ? null : (
+              <Text color="orange.700" fontSize="xs" mt="1">
+                仅支持 ZombieBuddy 模组加载器：当前选择的是「不使用（原版加载）」，请先到
+                设置 › 模组加载器 更改。
+              </Text>
+            )}
+            <FastLaunchCacheStatusLine
+              enabled={fastLaunch && !fastLaunchWarningOpen && modLoaderScheme === "zombieBuddy"}
+            />
+          </Box>
+          <Switch.Root
+            aria-label="极速启动"
+            checked={fastLaunch}
+            disabled={fastLaunchSaving || modLoaderScheme !== "zombieBuddy"}
+            onCheckedChange={(details) => {
+              if (details.checked) {
+                // 先临时设为开，让受控开关的隐藏 input 跟上点击；确认后才落盘，取消时退回。
+                setFastLaunch(true);
+                setFastLaunchWarningOpen(true);
+              } else {
+                void updateFastLaunch(false);
+              }
+            }}
+          >
+            <Switch.HiddenInput />
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Root>
+        </HStack>
+      </SettingsSection>
+      <SettingsSection
+        title="自动加入服务器"
+        titleExtra={<Badge colorPalette="orange" size="sm">实验性</Badge>}
+      >
+        <SettingsRow
+          label="启动游戏后自动连入服务器"
+          hint="打开开关并填好地址后，从启动器点「启动游戏」（Steam / 游戏文件方式都支持）。游戏进入主菜单时会自动发起连接；游戏收藏里保存过该服务器密码时优先用收藏的。"
+        >
+          <Switch.Root
+            aria-label="启动游戏后自动连入服务器"
+            checked={autoJoinEnabled}
+            disabled={autoJoinSaving}
+            onCheckedChange={(details) => {
+              if (!details.checked) {
+                void saveAutoJoinSettings(false, autoJoinTarget, autoJoinPassword);
+                return;
+              }
+              // 打开时先展开地址/密码输入：后端要求开启状态必须有合法地址，
+              // 地址还没填就整次落盘会被拒（开关原地弹回去，反而打不开输入框）。
+              setAutoJoinEnabled(true);
+              if (autoJoinTarget.trim()) {
+                void saveAutoJoinSettings(true, autoJoinTarget, autoJoinPassword);
+              } else {
+                showToast("请填写服务器地址后点「保存设置」完成开启。", "info");
+              }
+            }}
+          >
+            <Switch.HiddenInput />
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Root>
+        </SettingsRow>
+        {autoJoinEnabled ? (
+          <>
+            <SettingsRow
+              label="服务器地址"
+              hint="格式 主机:端口，例如 1.2.3.4:16261 或 play.example.com:16261（暂不支持 IPv6）。"
+            >
+              <Input
+                aria-label="自动加入的服务器地址"
+                width="220px"
+                value={autoJoinTarget}
+                onChange={(event) => setAutoJoinTarget(event.currentTarget.value)}
+                placeholder="1.2.3.4:16261"
+                disabled={autoJoinSaving}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label="服务器密码（可选）"
+              hint="仅当收藏夹里没有保存该服务器密码时使用。密码只落在本机 Zomboid 目录的 pzm-autojoin.ini，游戏退出后自动删除，日志只记位数不记明文。"
+            >
+              <Input
+                aria-label="自动加入的服务器密码"
+                type="password"
+                width="220px"
+                value={autoJoinPassword}
+                onChange={(event) => setAutoJoinPassword(event.currentTarget.value)}
+                placeholder="留空 = 用收藏夹保存的密码"
+                disabled={autoJoinSaving}
+              />
+            </SettingsRow>
+            <HStack className="pz-settings-row" p="4" gap="2" justify="flex-end">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={autoJoinSaving}
+                loading={autoJoinSaving}
+                onClick={() =>
+                  void saveAutoJoinSettings(autoJoinEnabled, autoJoinTarget, autoJoinPassword)
+                }
+              >
+                保存设置
+              </Button>
+            </HStack>
+          </>
+        ) : null}
+      </SettingsSection>
+      <Text color="gray.500" fontSize="xs" mt="3">
+        实现说明：往游戏目录 media/lua/client/ 写一个 pzmanager 的钩子（pzm_autojoin.lua，散装
+        Lua 游戏会自动加载），主菜单就绪后调用与直连弹窗「连接」按钮相同的官方 API；
+        模组同步确认、密码错误、Google 二次验证等弹窗仍会正常出现，不想自动连时在游戏里点返回即可。
+        游戏大版本更新清掉钩子后，下一次从启动器启动会自动重装。
+      </Text>
     </Box>
   );
 
@@ -8793,56 +9039,64 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                 <Text color="gray.700" fontSize="xs">{versionStatus.branch}</Text>
               </Box>
             </Box>
-          </Box>
-
-          <Box className="pz-version-section">
-            <HStack align="center" gap="2" wrap="wrap">
-              <Text color="gray.800" fontSize="sm" fontWeight="700">保存版本</Text>
-              <HintDot
-                label="保存版本说明"
-                text={"「完整保存」把当前文件全部复制一份，占空间但最稳；「保存变化」只记录和上次不同的文件，省空间。都在后台进行，进度见下方。\n\n装了 PZ Optimization 时，还原前会自动卸载、完成后重新安装；想保留原版状态请先到「支持库」卸载。"}
-              />
-            </HStack>
-            <HStack align="center" gap="2" mt="2" wrap="wrap">
-              <Input
-                aria-label="版本备注"
-                maxW="240px"
-                onChange={(event) => setVersionLabelDraft(event.currentTarget.value)}
-                placeholder="给这个版本起个名字（可选）"
-                size="sm"
-                value={versionLabelDraft}
-              />
+            {/* 保存版本入口收进右下角下拉：日常只点菜单，页面留白给信息本身。
+                中断入口仍在下面的进度面板里，跟着进度条走，历史页也有。 */}
+            <HStack justify="flex-end" gap="2" mt="2" wrap="wrap">
               <Button
-                colorPalette="blue"
                 disabled={!versionStatus.gamePath || versionBusy}
-                onClick={() => void createVersionSnapshot()}
-                size="sm"
-              >
-                {versionStatus.versions.length > 0 ? "再完整保存一份" : "完整保存"}
-              </Button>
-              <Button
-                disabled={!versionStatus.gamePath || versionStatus.versions.length === 0 || versionBusy}
-                onClick={captureVersion}
-                size="sm"
-                variant="outline"
-              >
-                保存变化
-              </Button>
-              <Button
-                disabled={!versionStatus.gamePath || versionStatus.versions.length === 0 || versionBusy}
                 onClick={verifyVersion}
                 size="sm"
                 variant="outline"
               >
                 检查当前版本
               </Button>
-              {/* 中断入口在下面的进度面板里，跟着进度条走，历史页也有。 */}
+              <HintDot
+                label="保存版本说明"
+                text={"「完整保存」把当前文件全部复制一份，占空间但最稳；「保存变化」只记录和上次不同的文件，省空间。都在后台进行，进度见下方。\n\n装了 PZ Optimization 时，还原前会自动卸载、完成后重新安装；想保留原版状态请先到「支持库」卸载。"}
+              />
+              <Menu.Root positioning={{ placement: "bottom-end" }}>
+                <Menu.Trigger asChild>
+                  <Button
+                    colorPalette="blue"
+                    disabled={!versionStatus.gamePath || versionBusy}
+                    size="sm"
+                  >
+                    <HStack gap="1.5">
+                      <Text>保存版本</Text>
+                      <Text aria-hidden="true" className="pz-workshop-tag-menu-chevron">▾</Text>
+                    </HStack>
+                  </Button>
+                </Menu.Trigger>
+                <Portal>
+                  <Menu.Positioner className="pz-menu-positioner">
+                    <Menu.Content className="pz-version-save-menu">
+                      {versionChainDepth >= 5 ? (
+                        <>
+                          <Box color="orange.700" fontSize="xs" px="3" py="1">
+                            已经连续保存了 {versionChainDepth} 次变化，建议再做一次「完整保存」，还原会更快。
+                          </Box>
+                          <Menu.Separator />
+                        </>
+                      ) : null}
+                      <Menu.Item
+                        disabled={!versionStatus.gamePath || versionStatus.versions.length === 0 || versionBusy}
+                        onSelect={captureVersion}
+                        value="capture"
+                      >
+                        保存变化
+                      </Menu.Item>
+                      <Menu.Item
+                        disabled={!versionStatus.gamePath || versionBusy}
+                        onSelect={openVersionSaveNameDialog}
+                        value="snapshot"
+                      >
+                        完整保存
+                      </Menu.Item>
+                    </Menu.Content>
+                  </Menu.Positioner>
+                </Portal>
+              </Menu.Root>
             </HStack>
-            {versionChainDepth >= 5 ? (
-              <Text color="orange.700" fontSize="xs" mt="1">
-                已经连续保存了 {versionChainDepth} 次变化，建议再做一次「完整保存」，还原会更快。
-              </Text>
-            ) : null}
           </Box>
 
           <Box className="pz-version-section">
@@ -9271,7 +9525,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             disabled={modVersionBusy || !modVersionTargets?.length}
             onClick={saveModChanges}
             size="sm"
-            title="只保存有变化的模组：自动跳过没有改动的模组，不创建整合包"
+            title="只保存有变化的模组：自动跳过没有改动的模组，并记成一条可整套还原的变更记录"
           >
             一键保存模组变更
           </Button>
@@ -9311,7 +9565,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         <SkeletonGate loading={!modVersionPacks} skeleton={<SkeletonList rows={2} lines={1} />}>
         {!modVersionPacks || modVersionPacks.length === 0 ? (
           <Text color="gray.500" fontSize="sm" mt="2">
-            还没有整合包。点「一键保存全部模组」把当前所有模组存成一份，之后可以整套还原。
+            还没有整合包。点「一键保存模组变更」或「一键保存全部模组」把当前模组存成一份，之后可以整套还原。
           </Text>
         ) : (
           <Box className="pz-version-mod-list" mt="2">
@@ -9322,6 +9576,13 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                     <HStack align="center" gap="2" justify="space-between" wrap="nowrap">
                       <Text color="gray.900" flex="1" fontSize="sm" fontWeight="700" lineClamp={1} minW="0" title={pack.label}>{pack.label}</Text>
                       <HStack align="center" flexShrink="0" gap="1" justify="flex-end" wrap="wrap">
+                        <Badge
+                          colorPalette={pack.kind === "changes" ? "orange" : "gray"}
+                          size="sm"
+                          variant="outline"
+                        >
+                          {pack.kind === "changes" ? "变更记录" : "整合包"}
+                        </Badge>
                         <Badge size="sm" variant="subtle">{pack.mods.length} 个模组</Badge>
                       </HStack>
                     </HStack>
@@ -9657,6 +9918,195 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     </Box>
   );
 
+  const filteredGameOptions = filterGameOptions(
+    gameOptions?.entries ?? [],
+    gameOptionsQuery,
+    (key) => gameOptionDisplayName(key),
+  );
+  const gameOptionGroups = groupGameOptions(
+    filteredGameOptions,
+    GAME_OPTION_CATEGORIES,
+    (key) => GAME_OPTION_CATEGORY_OF[key],
+    GAME_OPTION_FALLBACK_CATEGORY,
+  );
+
+  /** 单个设置项的控件：布尔 → 开关；数字 → 数字输入；其余 → 文本输入。
+   *  文本/数字在失焦或回车时提交，避免每敲一个字符写一次文件。 */
+  function gameOptionControl(entry: GameOptionEntry) {
+    const kind = classifyGameOptionValue(entry.value);
+    const readOnly = gameOptions?.gameRunning || gameOptionSaving === entry.key;
+    if (kind === "bool") {
+      return (
+        <Switch.Root
+          aria-label={entry.key}
+          checked={gameOptionBoolean(entry.value)}
+          disabled={readOnly}
+          onCheckedChange={(details) => void saveGameOption(entry.key, details.checked ? "true" : "false")}
+        >
+          <Switch.HiddenInput />
+          <Switch.Control>
+            <Switch.Thumb />
+          </Switch.Control>
+        </Switch.Root>
+      );
+    }
+    const draft = gameOptionDrafts[entry.key] ?? entry.value;
+    const commit = () => {
+      const next = (gameOptionDrafts[entry.key] ?? entry.value).trim();
+      if (next === entry.value) {
+        setGameOptionDrafts((current) => {
+          const copy = { ...current };
+          delete copy[entry.key];
+          return copy;
+        });
+        return;
+      }
+      if (kind === "number" && !isValidGameOptionNumber(next)) {
+        showToast(`「${entry.key}」需要一个数字（当前：${next || "空"}）`, "error");
+        return;
+      }
+      void saveGameOption(entry.key, next);
+    };
+    return (
+      <Input
+        aria-label={entry.key}
+        disabled={Boolean(gameOptions?.gameRunning)}
+        inputMode={kind === "number" ? "decimal" : "text"}
+        onBlur={commit}
+        onChange={(event) =>
+          setGameOptionDrafts((current) => ({ ...current, [entry.key]: event.target.value }))
+        }
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.currentTarget.blur();
+          }
+        }}
+        size="sm"
+        value={draft}
+      />
+    );
+  }
+
+  const gameOptionsSettingsContent = (
+    <Box className="pz-panel pz-general-settings-panel">
+      <SettingsSection title="游戏设置（options.ini）">
+        <HStack align="flex-start" gap="3" justify="space-between" p="4" pb="3" wrap="wrap">
+          <Box flex="1" minW="240px">
+            <Text color="gray.700" fontSize="sm" fontWeight="700">
+              Project Zomboid 设置文件
+            </Text>
+            <Text color="gray.500" fontSize="xs" mt="1" overflowWrap="anywhere">
+              {gameOptions?.path ?? "正在定位 options.ini…"}
+            </Text>
+            <Text
+              color={gameOptions?.gameRunning ? "orange.600" : "gray.500"}
+              fontSize="xs"
+              mt="1"
+            >
+              {gameOptions?.gameRunning
+                ? "游戏正在运行：当前只读。请先退出游戏再修改（游戏退出时会重写整个文件）。"
+                : "修改会立即写入 options.ini，部分设置需要重启游戏才生效。"}
+            </Text>
+          </Box>
+          <Button
+            loading={gameOptionsLoading}
+            onClick={() => void loadGameOptions()}
+            size="sm"
+            variant="outline"
+          >
+            刷新
+          </Button>
+        </HStack>
+
+        <Box px="4">
+          <Input
+            mb="3"
+            onChange={(event) => setGameOptionsQuery(event.target.value)}
+            placeholder="搜索设置项（中文名或键名，如 音量 / volume / fullScreen）"
+            size="sm"
+            value={gameOptionsQuery}
+          />
+        </Box>
+
+        {gameOptions && !gameOptions.exists ? (
+          <Box px="4" pb="4">
+            <EmptyState text="还没有 options.ini：先启动并退出一次游戏，游戏才会生成这个文件。" />
+          </Box>
+        ) : null}
+
+        {gameOptions && gameOptions.exists ? (
+          <>
+            <Text color="gray.500" fontSize="xs" mb="2" px="4">
+              共 {filteredGameOptions.length} 项
+              {gameOptionsQuery.trim() ? `（已筛选，总计 ${gameOptions.entries.length} 项）` : ""}
+            </Text>
+            <Stack gap="4" pb="4">
+              {gameOptionGroups.map((group) => (
+                <Box key={group.id}>
+                  <Text
+                    borderBottomColor="gray.200"
+                    borderBottomWidth="1px"
+                    color="gray.600"
+                    fontSize="xs"
+                    fontWeight="700"
+                    letterSpacing="0.06em"
+                    mb="1"
+                    mx="4"
+                    pb="1"
+                  >
+                    {group.title}
+                    <Text as="span" color="gray.400" fontWeight="400" ms="1">
+                      {group.entries.length}
+                    </Text>
+                  </Text>
+                  <Stack gap="0">
+                    {group.entries.map((entry) => (
+                      <HStack
+                        align="center"
+                        borderBottomColor="gray.100"
+                        borderBottomWidth="1px"
+                        gap="4"
+                        justify="space-between"
+                        key={entry.key}
+                        px="4"
+                        py="2.5"
+                      >
+                        <Box flex="1" minW="0">
+                          <Text color="gray.800" fontSize="sm" fontWeight="600" overflowWrap="anywhere">
+                            {gameOptionDisplayName(entry.key)}
+                          </Text>
+                          {hasGameOptionLabel(entry.key) ? (
+                            <Text
+                              color="gray.400"
+                              fontFamily="mono"
+                              fontSize="xs"
+                              mt="1"
+                              overflowWrap="anywhere"
+                            >
+                              {entry.key}
+                            </Text>
+                          ) : null}
+                        </Box>
+                        <Box flexShrink={0} w="260px">
+                          {gameOptionControl(entry)}
+                        </Box>
+                      </HStack>
+                    ))}
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+            {filteredGameOptions.length === 0 ? (
+              <Box px="4">
+                <EmptyState text="没有匹配的设置项。" />
+              </Box>
+            ) : null}
+          </>
+        ) : null}
+      </SettingsSection>
+    </Box>
+  );
+
   const settingsContent = (
     <Box className="pz-resource-center pz-settings-center">
       <Box as="nav" aria-label="设置分类" className="pz-resource-center-sidebar">
@@ -9671,6 +10121,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faCircleInfo} />
             关于
           </Button>
           <Button
@@ -9682,7 +10133,20 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faSliders} />
             通用
+          </Button>
+          <Button
+            aria-current={settingsPage === "gameOptions" ? "page" : undefined}
+            className={`pz-resource-center-sidebar-item ${
+              settingsPage === "gameOptions" ? "pz-resource-center-sidebar-item-active" : ""
+            }`}
+            onClick={() => switchSettingsPage("gameOptions")}
+            size="sm"
+            variant="ghost"
+          >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faGamepad} />
+            游戏设置
           </Button>
           <Button
             aria-current={settingsPage === "toolbox" ? "page" : undefined}
@@ -9693,6 +10157,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faToolbox} />
             百宝箱
           </Button>
           <Button
@@ -9704,6 +10169,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faFileLines} />
             日志
           </Button>
           <Button
@@ -9715,6 +10181,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faPuzzlePiece} />
             模组加载器
           </Button>
           <Button
@@ -9726,7 +10193,20 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             size="sm"
             variant="ghost"
           >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faRocket} />
             启动
+          </Button>
+          <Button
+            aria-current={settingsPage === "experimental" ? "page" : undefined}
+            className={`pz-resource-center-sidebar-item ${
+              settingsPage === "experimental" ? "pz-resource-center-sidebar-item-active" : ""
+            }`}
+            onClick={() => switchSettingsPage("experimental")}
+            size="sm"
+            variant="ghost"
+          >
+            <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faFlask} />
+            实验性功能
           </Button>
           {developerMode && (
             <Button
@@ -9738,6 +10218,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               size="sm"
               variant="ghost"
             >
+              <FontAwesomeIcon aria-hidden="true" className="pz-settings-nav-icon" icon={faCode} />
               开发者选项
             </Button>
           )}
@@ -9754,15 +10235,19 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           ? aboutSettingsContent
           : settingsPage === "general"
             ? generalSettingsContent
+            : settingsPage === "gameOptions"
+              ? gameOptionsSettingsContent
             : settingsPage === "toolbox"
               ? toolboxContent
             : settingsPage === "logs"
               ? launcherLogSettingsContent
               : settingsPage === "modLoader"
                 ? modLoaderSettingsContent
-                : settingsPage === "developer"
-                  ? developerSettingsContent
-                  : startupSettingsContent}
+                : settingsPage === "experimental"
+                  ? experimentalSettingsContent
+                  : settingsPage === "developer"
+                    ? developerSettingsContent
+                    : startupSettingsContent}
       </Box>
     </Box>
   );
@@ -9955,6 +10440,17 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
                     <Box className="pz-jar-mod-summary-content" minW="0">
                       <HStack align="center" className="pz-lua-mod-title-row" gap="2" minW="0">
                         <Text className="pz-lua-mod-name" color="gray.800" fontWeight="700">{mod.name}</Text>
+                        {/* 当前加载顺序：default.txt 里 mods 块的位次（1 起）。
+                            只有启用中的模组才有位次；停用或加载器不显示。 */}
+                        {mod.enabled && mod.loadOrder != null && (
+                          <Text
+                            className="pz-lua-mod-order"
+                            flexShrink={0}
+                            title={`当前加载顺序：第 ${mod.loadOrder} 位（按 default.txt 的 mods 块顺序载入）`}
+                          >
+                            #{mod.loadOrder}
+                          </Text>
+                        )}
                       </HStack>
                       {(mod.description || mod.author || mod.version) && (
                         <Text className="pz-lua-mod-description" color="gray.500" lineClamp="1">
@@ -10595,7 +11091,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       <Box className="pz-resource-center-main">{modManagementPage === "lua" ? luaModsContent : jarModsContent}</Box>
     </Box>
   );
-  return (
+  const shell = (
     <Box
       as="main"
       className={`pz-app-shell ${developerMode ? "pz-developer-mode" : "pz-simple-mode"}${wallpaperSeasonal ? " pz-app-shell-seasonal" : ""}`}
@@ -10756,6 +11252,16 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               void confirmRenameModPack(modPackNameDialog.pack, label);
             }
           }}
+        />
+      ) : null}
+
+      {versionSaveNameDialog ? (
+        <VersionNameDialog
+          busy={versionBusy}
+          bodyText={versionSaveBodyText()}
+          closing={versionSaveNameDialogClosing}
+          onCancel={closeVersionSaveNameDialog}
+          onConfirm={confirmVersionSaveName}
         />
       ) : null}
 
@@ -11058,6 +11564,15 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       ) : null}
       <ToastViewport onClose={dismissToast} toasts={toasts} />
     </Box>
+  );
+  return (
+    <LaunchMusicProvider
+      enabled={wallpaperSeasonal}
+      onMusicStarted={(message) => showToast(message, "notice")}
+      pauseSignal={musicPauseSignal}
+    >
+      {shell}
+    </LaunchMusicProvider>
   );
 }
 

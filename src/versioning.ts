@@ -145,11 +145,13 @@ export type ModVersionOperationUpdate = VersionOperationUpdate & {
   rootPath?: string | null;
 };
 
-/** 一条「整合包」：某个时刻所有模组各自版本的集合。 */
+/** 一条「整合包 / 变更记录」：某个时刻若干模组各自版本的集合。
+ * all = 一键保存全部模组（所有模组），changes = 一键保存模组变更（只含当次有变化的）。 */
 export type ModPackRecord = {
   id: string;
   label: string;
   createdAt: number;
+  kind: "all" | "changes";
   mods: ModVersionRef[];
 };
 

@@ -34,6 +34,9 @@ test("normal exit and non-stop endings stay silent", () => {
   // 用户主动正常退出（会话内或会话后）：不弹。
   assert.equal(shouldReportSessionEnd(sessionEnd("finished", "normalExit")), false);
   assert.equal(shouldReportSessionEnd(sessionEnd("game-exited", "normalExit")), false);
+  // 启动器自己点「停止游戏进程」强杀：用户主动结束，不弹崩溃报告（也不做停止分析）。
+  assert.equal(shouldReportSessionEnd(sessionEnd("finished", "launcherStop")), false);
+  assert.equal(shouldReportSessionEnd(sessionEnd("game-exited", "launcherStop")), false);
   // 覆盖层看门狗/超时收尾：游戏还在跑，后端不给 stopReason，不弹。
   assert.equal(shouldReportSessionEnd(sessionEnd("finished")), false);
   assert.equal(shouldReportSessionEnd(sessionEnd("finished", null)), false);
@@ -76,6 +79,7 @@ test("stop reason labels cover the backend enum", () => {
   assert.equal(stopReasonLabel("javaCrash"), "游戏崩溃（Java 异常）");
   assert.equal(stopReasonLabel("nativeCrash"), "游戏崩溃（原生异常）");
   assert.equal(stopReasonLabel("externalTerminate"), "被外部结束");
+  assert.equal(stopReasonLabel("launcherStop"), "启动器强制结束");
   assert.equal(stopReasonLabel("unknown"), "原因未知");
   assert.equal(stopReasonLabel(null), "");
 });

@@ -32,6 +32,16 @@ test("backend stores the toggle and registers the command", () => {
   assert.match(rustSource, /fn save_version_parallel\(enabled: bool\)/);
   assert.match(rustSource, /save_version_parallel,/);
   assert.match(rustSource, /context\.parallel/);
+  // 全新安装还没有 settings.json 时，derive 的 Default 全是 false；
+  // load_app_settings_at 必须按 serde 默认值把版本保存相关的开关补成开启。
+  assert.match(
+    rustSource,
+    /settings\.version_parallel = crate::default_version_parallel_enabled\(\);/,
+  );
+  assert.match(
+    rustSource,
+    /settings\.version_include_mods = crate::default_version_parallel_enabled\(\);/,
+  );
 });
 
 test("versioning keeps a sequential fallback and supports parallel workers", () => {

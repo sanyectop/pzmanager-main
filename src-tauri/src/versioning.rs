@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -371,7 +371,50 @@ fn mtime_millis(metadata: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+/// Windows 设备级错误：整块卷已经从系统里消失。
+///
+/// 433 = ERROR_NO_SUCH_DEVICE（指定不存在的设备），
+/// 1167 = ERROR_DEVICE_NOT_CONNECTED（设备没有连接）。
+/// 掉线之后同一块盘上的每个路径都会返回它，跟具体文件无关——继续逐个文件
+/// 重试只会刷屏，调用方应当直接中止整次操作。
+const DEVICE_GONE_CODES: [i32; 2] = [433, 1167];
+
+fn is_device_gone(error: &io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| DEVICE_GONE_CODES.contains(&code))
+}
+
+/// 从路径里取盘符（`G:`）；不是 Windows 盘符路径时返回 `None`。
+fn drive_label(path: &Path) -> Option<String> {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => Some(prefix.as_os_str().to_string_lossy().into_owned()),
+        _ => None,
+    }
+}
+
+/// 判断一条已经格式化的错误是不是「设备掉线」。
+///
+/// 错误在 [`io_error`] 里变成字符串后，原始错误码仍以 `(os error N)` 的形式
+/// 留在末尾（`io::Error` 的 Display 实现），按这个后缀识别即可。
+pub(crate) fn is_device_gone_message(message: &str) -> bool {
+    DEVICE_GONE_CODES
+        .iter()
+        .any(|code| message.contains(&format!("(os error {code})")))
+}
+
 fn io_error(action: &str, path: &Path, error: io::Error) -> String {
+    if is_device_gone(&error) {
+        // 掉线时用户最先看到的是这条提示（通知只保留第一行、约 140 字），
+        // 所以把结论放在最前面，别让长路径把关键信息挤掉。
+        let target = drive_label(path)
+            .map(|drive| format!("磁盘 {drive} 已经从系统断开"))
+            .unwrap_or_else(|| "所在磁盘已经从系统断开".to_string());
+        return format!(
+            "{target}（设备级掉线，不是文件损坏；请检查数据线/供电，重启电脑后再试）。{action}失败（{}）：{error}",
+            path.display()
+        );
+    }
     format!("{action}失败（{}）：{error}", path.display())
 }
 
@@ -3132,6 +3175,46 @@ mod tests {
             change_log: None,
             mod_versions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn device_gone_errors_are_classified_and_explained() {
+        let message = io_error(
+            "打开文件",
+            Path::new("G:\\SteamLibrary\\steamapps\\common\\ProjectZomboid\\a.lua"),
+            io::Error::from_raw_os_error(433),
+        );
+        assert!(is_device_gone_message(&message), "{message}");
+        assert!(message.contains("设备级掉线"), "{message}");
+        assert!(message.contains("不是文件损坏"), "{message}");
+
+        // 1167 = ERROR_DEVICE_NOT_CONNECTED，同样是设备级掉线。
+        let message = io_error(
+            "读取文件",
+            Path::new("a.lua"),
+            io::Error::from_raw_os_error(1167),
+        );
+        assert!(is_device_gone_message(&message), "{message}");
+        assert!(message.contains("设备级掉线"), "{message}");
+
+        // 普通文件错误（找不到文件）不能被误判成掉线。
+        let message = io_error(
+            "读取目录",
+            Path::new("a.lua"),
+            io::Error::from_raw_os_error(2),
+        );
+        assert!(!is_device_gone_message(&message), "{message}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn device_gone_message_names_the_drive() {
+        let message = io_error(
+            "打开文件",
+            Path::new("G:\\SteamLibrary\\a.lua"),
+            io::Error::from_raw_os_error(433),
+        );
+        assert!(message.contains("磁盘 G:"), "{message}");
     }
 
     #[test]

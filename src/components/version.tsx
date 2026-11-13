@@ -575,3 +575,93 @@ export function ModPackNameDialog({
     </Portal>
   );
 }
+
+/** 游戏版本「完整保存」命名弹窗：名称可留空（后端自动命名「第一次完整备份 / 完整备份」）。
+    正文说明由调用方按首次保存 / 重复保存算好传进来（bodyText）。 */
+export function VersionNameDialog({
+  closing,
+  busy,
+  bodyText,
+  onCancel,
+  onConfirm,
+}: {
+  closing: boolean;
+  busy: boolean;
+  bodyText: string;
+  onCancel: () => void;
+  onConfirm: (label: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const trimmed = draft.trim();
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onCancel]);
+
+  return (
+    <Portal>
+      <Box
+        className={`pz-resource-file-overlay ${closing ? "is-closing" : ""}`}
+        onClick={onCancel}
+      >
+        <Box
+          aria-label="完整保存游戏版本"
+          aria-modal="true"
+          className="pz-resource-file-dialog pz-version-drive-dialog"
+          onClick={(event) => event.stopPropagation()}
+          role="dialog"
+        >
+          <HStack align="flex-start" gap="3" justify="space-between">
+            <Text color="gray.900" fontSize="lg" fontWeight="700">
+              完整保存
+            </Text>
+            <Button
+              aria-label="关闭完整保存"
+              onClick={onCancel}
+              size="sm"
+              variant="ghost"
+            >
+              ×
+            </Button>
+          </HStack>
+          <Text color="gray.600" fontSize="sm" mt="3" whiteSpace="pre-line">
+            {bodyText}
+          </Text>
+          <Input
+            aria-label="版本名称"
+            autoFocus
+            disabled={busy}
+            maxLength={60}
+            mt="3"
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !busy) {
+                onConfirm(trimmed);
+              }
+            }}
+            placeholder="给这个版本起个名字（可选，留空自动命名）"
+            size="sm"
+            value={draft}
+          />
+          <HStack justify="flex-end" gap="2" mt="4" wrap="wrap">
+            <Button onClick={onCancel} size="sm" variant="ghost">取消</Button>
+            <Button
+              colorPalette="blue"
+              disabled={busy}
+              onClick={() => onConfirm(trimmed)}
+              size="sm"
+            >
+              完整保存
+            </Button>
+          </HStack>
+        </Box>
+      </Box>
+    </Portal>
+  );
+}

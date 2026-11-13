@@ -10,6 +10,7 @@ export type StopReasonLabel =
   | "javaCrash"
   | "nativeCrash"
   | "externalTerminate"
+  | "launcherStop"
   | "unknown";
 
 /** 停止原因的用户可读标签（模态框里的「停止原因：…」行）。 */
@@ -18,6 +19,7 @@ export const stopReasonLabels: Record<StopReasonLabel, string> = {
   javaCrash: "游戏崩溃（Java 异常）",
   nativeCrash: "游戏崩溃（原生异常）",
   externalTerminate: "被外部结束",
+  launcherStop: "启动器强制结束",
   unknown: "原因未知",
 };
 
@@ -38,7 +40,8 @@ export function stopReasonLabel(value: string | null | undefined): string {
  * - `game-exited`：覆盖层收尾**之后**游戏才退出（会话后监视发现，见
  *   `watch_game_after_overlay`）——之前这条路径无人监视，崩溃静默无报。
  *
- * 正常退出（用户主动停止，含任务管理器对窗口的优雅关闭）不弹；覆盖层看门狗/
+ * 正常退出（用户主动停止，含任务管理器对窗口的优雅关闭）不弹；启动器自己点「停止游戏进程」
+ * 强杀的 `launcherStop` 也不弹（用户主动结束，不该再弹崩溃报告）；覆盖层看门狗/
  * 超时收尾时游戏还在跑（stopReason 缺省）也不弹。后端 `error` 阶段（如
  * 「游戏进程在窗口出现前已退出」）由监听器单独弹启动失败模态框，不在这里重复。
  */
@@ -49,7 +52,8 @@ export function shouldReportSessionEnd(update: {
   return (
     (update.phase === "finished" || update.phase === "game-exited") &&
     update.stopReason != null &&
-    update.stopReason !== "normalExit"
+    update.stopReason !== "normalExit" &&
+    update.stopReason !== "launcherStop"
   );
 }
 

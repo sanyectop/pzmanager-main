@@ -4,7 +4,7 @@
 //! 完成标记、空闲判定、进度估算和控制台行规范化。启动器与注入 DLL 共用同一份，
 //! 避免两边的完成条件/阶段名漂移。
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 /// 主菜单/加载完成标记（游戏自身与 ZombieBuddy 的控制台输出）。
@@ -29,6 +29,7 @@ pub const ZB_IDLE_TIMEOUT_ANY_PHASE: Duration = Duration::from_secs(60);
 pub const MAX_CONSOLE_LINES: usize = 6;
 /// 单行控制台输出的最大字符数（超出加省略号）。
 pub const MAX_CONSOLE_LINE_CHARS: usize = 120;
+
 
 /// 从 `[ZB]` 行推导当前加载阶段（用于界面显示）。
 pub fn zb_phase(line: &str) -> &'static str {
@@ -125,6 +126,59 @@ pub fn parse_advice_count(line: &str) -> Option<u64> {
         .take_while(|character| character.is_ascii_digit())
         .collect();
     digits.parse().ok()
+}
+
+/// 从 `LOG  : Mod      f:0> loading <modId>` 里取出模组 id。
+///
+/// 游戏把每个**实际加载**的模组挂进 Lua 时都会打这一行；被版本/依赖检查拒绝的
+/// 模组没有它。用「启用列表 − 该集合」就能得到被拒绝的模组（见
+/// [`rejected_mod_ids`]）。只认 `Mod` 分类，避免把其它含 "loading" 的行算进来。
+pub fn parse_loading_mod_line(line: &str) -> Option<&str> {
+    if !line.contains(": Mod") {
+        return None;
+    }
+    let id = line.split("> loading ").nth(1)?.trim();
+    if id.is_empty() || id.chars().count() > MAX_CONSOLE_LINE_CHARS {
+        return None;
+    }
+    Some(id)
+}
+
+/// 解析 `default.txt` 的 mods 块里启用的模组 id（保持文件顺序）。
+///
+/// 与启动器 lua_mods 的解析同规则：定位 `mods {` 块，按逗号拆分取 `mod = <id>`，
+/// 兼容引号包裹；块外的 `VERSION = 1` 等行不算。
+pub fn parse_enabled_mod_ids(content: &str) -> Vec<String> {
+    let Some(mods_start) = content.find("mods") else {
+        return Vec::new();
+    };
+    let Some(open) = content[mods_start..].find('{') else {
+        return Vec::new();
+    };
+    let remainder = &content[mods_start + open + 1..];
+    let end = remainder.find('}').unwrap_or(remainder.len());
+    remainder[..end]
+        .split(',')
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            key.trim()
+                .eq_ignore_ascii_case("mod")
+                .then(|| value.trim().trim_matches(['"', '\'']).to_string())
+        })
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+/// 启用列表里**没有被实际加载**的模组 id（大小写不敏感，保持 enabled 顺序）。
+///
+/// `loaded` 里应存放小写化的模组 id（游戏按 `loading <id>` 行给出的原样 id，
+/// 由调用方统一转小写）。启动器与覆盖层 DLL 用它生成「被拒绝加载的模组」列表。
+pub fn rejected_mod_ids(enabled: &[String], loaded: &HashSet<String>) -> Vec<String> {
+    enabled
+        .iter()
+        .filter(|id| !loaded.contains(&id.to_lowercase()))
+        .cloned()
+        .collect()
 }
 
 /// 从 `[ZB]     <modId>   <路径>.jar` 行里取出最后的 jar 路径。
@@ -240,6 +294,41 @@ mod tests {
         assert!(idle_completion(true, "注册 Lua 接口", Some(old), now));
         assert!(!idle_completion(true, "校验模组来源", Some(old), now));
         assert!(idle_completion(true, "校验模组来源", Some(ancient), now));
+    }
+
+    #[test]
+    fn parses_loading_lines_enabled_ids_and_rejected_diff() {
+        // 游戏的 `loading <id>` 行：只认 Mod 分类，id 原样取出。
+        assert_eq!(
+            parse_loading_mod_line("LOG  : Mod          f:0> loading TheShortcut"),
+            Some("TheShortcut")
+        );
+        assert_eq!(
+            parse_loading_mod_line("LOG  : Mod          f:0> loading Nettle Township B42 version"),
+            Some("Nettle Township B42 version")
+        );
+        // Lua / General 分类里的 loading 字样不算。
+        assert_eq!(
+            parse_loading_mod_line("LOG  : Lua          f:0> :	loading something"),
+            None
+        );
+        assert_eq!(
+            parse_loading_mod_line("LOG  : General      f:0> loading world"),
+            None
+        );
+
+        let content = "VERSION = 1,\n\nmods\n{\n    mod = ZombieBuddy,\n    mod = \"Damn Lib\",\n    mod = ,\n}\n";
+        let enabled = parse_enabled_mod_ids(content);
+        assert_eq!(enabled, vec!["ZombieBuddy".to_string(), "Damn Lib".to_string()]);
+
+        let loaded: HashSet<String> = ["zombiebuddy".to_string()].into_iter().collect();
+        assert_eq!(
+            rejected_mod_ids(&enabled, &loaded),
+            vec!["Damn Lib".to_string()]
+        );
+        // 全部加载了 → 空列表。
+        let all: HashSet<String> = enabled.iter().map(|id| id.to_lowercase()).collect();
+        assert!(rejected_mod_ids(&enabled, &all).is_empty());
     }
 
     #[test]

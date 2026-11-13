@@ -89,11 +89,23 @@ test("version and mod row badges align to the right of the title", () => {
   assert.match(timelineBlock, /justify="flex-end"/);
 });
 
-test("save controls sit above the backup path setting", () => {
-  // 游戏版本页顺序：游戏信息 → 保存版本 → 备份保存位置 → 其它开关。
-  const saveAt = appSource.indexOf(">保存版本</Text>");
+test("save menu sits in the game info section above the backup path setting", () => {
+  // 游戏版本页顺序：游戏信息（含右下角「保存版本」下拉） → 备份保存位置 → 其它开关。
+  const gameInfoAt = appSource.indexOf(">游戏信息</Text>");
+  const menuAt = appSource.indexOf("pz-version-save-menu");
   const backupAt = appSource.indexOf(">备份保存位置</Text>");
-  assert.ok(saveAt >= 0 && backupAt > saveAt, "保存版本必须排在备份保存位置之前");
+  assert.ok(gameInfoAt >= 0, "游戏信息标题必须存在");
+  assert.ok(menuAt > gameInfoAt && backupAt > menuAt, "保存版本菜单必须排在游戏信息之后、备份保存位置之前");
+  // 菜单两项：保存变化直达，完整保存走命名弹窗。
+  const menuBlock = appSource.slice(menuAt, backupAt);
+  assert.match(menuBlock, /onSelect=\{captureVersion\}/);
+  assert.match(menuBlock, /onSelect=\{openVersionSaveNameDialog\}/);
+  // 命名弹窗挂在 App 末尾，确认后带可选名称调用 start_version_snapshot。
+  assert.match(appSource, /<VersionNameDialog/);
+  assert.match(appSource, /onConfirm=\{confirmVersionSaveName\}/);
+  // 旧的按钮排（备注输入 + 独立保存按钮）已移除。
+  assert.doesNotMatch(appSource, /aria-label="版本备注"/);
+  assert.doesNotMatch(appSource, /versionLabelDraft/);
 });
 
 test("the design rules are written into the style guide", () => {

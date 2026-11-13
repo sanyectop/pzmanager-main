@@ -8,24 +8,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use crate::*;
 pub(crate) fn parse_default_mod_ids(content: &str) -> Vec<String> {
-    let Some(mods_start) = content.find("mods") else {
-        return Vec::new();
-    };
-    let Some(open) = content[mods_start..].find('{') else {
-        return Vec::new();
-    };
-    let remainder = &content[mods_start + open + 1..];
-    let end = remainder.find('}').unwrap_or(remainder.len());
-    remainder[..end]
-        .split(',')
-        .filter_map(|part| {
-            let (key, value) = part.split_once('=')?;
-            key.trim()
-                .eq_ignore_ascii_case("mod")
-                .then(|| value.trim().trim_matches(['"', '\'']).to_string())
-        })
-        .filter(|value| !value.is_empty())
-        .collect()
+    // 解析规则与覆盖层 DLL 共用（overlay-core）：DLL 也要读这份文件来算
+    // 「被拒绝加载的模组」，两套实现会漂移。
+    overlay_core::parse_enabled_mod_ids(content)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -326,10 +311,13 @@ pub(crate) fn lua_mod_entries() -> Result<Vec<LuaModEntry>, String> {
     };
     let local_mods = zomboid.join("mods");
     if let Ok(items) = fs::read_dir(&local_mods) {
-        for entry in items
-            .flatten()
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        {
+        for entry in items.flatten().filter(|entry| {
+            // 跳过联接（symlink）：离线启动会把创意工坊模组联接进 Zomboid\mods，
+            // 不跳过的话它们会以「本地模组」的身份再出现一次（与工坊来源重复）。
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+        }) {
             add_entry(entry.path(), "local", None);
         }
     }

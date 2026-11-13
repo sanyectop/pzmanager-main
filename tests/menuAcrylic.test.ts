@@ -30,10 +30,10 @@ test("every menu surface carries the shared acrylic class", () => {
     .filter((line) => line.includes("<Menu.Content"));
   assert.ok(menuLines.length >= 10, "菜单数量异常，检查 App.tsx 是否改动过大");
   for (const line of menuLines) {
-    // 右键菜单不带滚动限制那一套，只挂自己的类；两者都在亚克力规则的选择器列表里。
+    // 右键菜单不带滚动限制那一套，只挂自己的类；四者都在亚克力规则的选择器列表里。
     assert.match(
       line,
-      /pz-workshop-tag-menu-content|pz-workshop-context-menu|pz-mod-context-menu/,
+      /pz-workshop-tag-menu-content|pz-workshop-context-menu|pz-mod-context-menu|pz-version-save-menu/,
       line.trim(),
     );
   }
@@ -56,7 +56,7 @@ test("menu acrylic is blur + tint + grain", () => {
   assert.match(cssCode, /--pz-menu-noise-image:\s*url\("data:image\/svg\+xml[^"]*opacity='0\.3'/);
 
   const menu = rule(
-    ".pz-workshop-tag-menu-content,\n.pz-workshop-context-menu,\n.pz-mod-context-menu",
+    ".pz-workshop-tag-menu-content,\n.pz-workshop-context-menu,\n.pz-mod-context-menu,\n.pz-version-save-menu",
   );
   assert.notEqual(menu, "");
   assert.match(menu, /background-color:\s*var\(--pz-menu-tint\);/);

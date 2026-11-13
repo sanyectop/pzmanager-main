@@ -24,6 +24,8 @@ pub enum StopReason {
     NativeCrash,
     /// 被外部终止（任务管理器结束进程 / Steam 强退 / 关机，退出码 1 且无崩溃证据）。
     ExternalTerminate,
+    /// 启动器自己点了「停止游戏进程」强杀：不做停止分析、不弹报错框。
+    LauncherStop,
     /// 证据不足，无法归类。
     Unknown,
 }
@@ -36,6 +38,7 @@ impl StopReason {
             StopReason::JavaCrash => "javaCrash",
             StopReason::NativeCrash => "nativeCrash",
             StopReason::ExternalTerminate => "externalTerminate",
+            StopReason::LauncherStop => "launcherStop",
             StopReason::Unknown => "unknown",
         }
     }
@@ -82,6 +85,10 @@ pub struct StartupTiming {
 
 /// 启动时长事件：每次移除覆盖层（发停止事件）时发一次。
 pub const STARTUP_EVENT: &str = "startup-timing";
+
+/// 「有模组被拒绝加载」事件：载荷是被拒模组 id 列表（见
+/// `collect_rejected_mods`），前端弹确认框列出清单。
+pub const REJECT_WARNING_EVENT: &str = "overlay-reject-warning";
 
 /// 启动时长记录文件。
 fn startup_timing_path() -> Option<std::path::PathBuf> {
@@ -253,6 +260,8 @@ fn exit_reason_diagnosis(
                 "诊断：游戏以异常码 {code_text} 结束（原生崩溃），建议提交反馈排查。"
             ),
         },
+        // 用户自己点的「停止游戏进程」，不需要任何诊断。
+        StopReason::LauncherStop => String::new(),
         StopReason::ExternalTerminate => {
             "诊断：游戏被外部结束（退出码 1，无崩溃证据）——可能是任务管理器「结束进程」、\
 Steam 强制更新或系统关机；如非本人操作请留意。"
@@ -417,6 +426,7 @@ mod exit_classification_tests {
 
 #[cfg(windows)]
 mod imp {
+    use std::collections::HashSet;
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::Path;
@@ -434,14 +444,14 @@ mod imp {
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
         IsWindowVisible,
     };
 
     use super::{
         classify_game_exit, exit_reason_diagnosis, find_hs_err_log, hs_err_search_directories,
         record_startup_timing, OverlaySessionUpdate, OverlayZbProgress, StopReason,
-        PROGRESS_EVENT, SESSION_EVENT, STARTUP_EVENT,
+        PROGRESS_EVENT, REJECT_WARNING_EVENT, SESSION_EVENT, STARTUP_EVENT,
     };
     use crate::overlay::imp as overlay_imp;
 
@@ -506,6 +516,9 @@ mod imp {
         stop_reason: Option<super::StopReason>,
         /// 退出码；句柄失效等拿不到时为 `None`。
         exit_code: Option<u32>,
+        /// 被游戏（版本/依赖检查）拒绝加载的模组 id；仅「成功完成」收尾给值，
+        /// 前端据此弹确认框。
+        rejected_mods: Vec<String>,
     }
 
     /// 游戏进程退出监视：注入成功后开一把常驻句柄，退出瞬间取退出码。
@@ -792,6 +805,13 @@ mod imp {
                 emit_session(&app, "error", &message, None, None, 0, started.elapsed(), None, None);
             }
         }
+        // 有模组被游戏（版本/依赖检查）拒绝加载：单独发事件，前端弹确认框。
+        // 覆盖层不在主菜单阶段停留（该阶段游戏不合成覆盖层内容，压上去只会黑屏）。
+        if let Ok(outcome) = &result {
+            if !outcome.rejected_mods.is_empty() {
+                let _ = app.emit(REJECT_WARNING_EVENT, &outcome.rejected_mods);
+            }
+        }
         // 覆盖层已收尾但游戏还在跑：继续监视到游戏退出，之后的崩溃也有崩溃报告。
         // （会话内游戏退出的 outcome 自带 stop_reason，不在这里重复监视。）
         if let Ok(outcome) = &result {
@@ -808,6 +828,10 @@ mod imp {
         console_path: Option<&Path>,
         session_start: SystemTime,
     ) -> (StopReason, String) {
+        // 启动器强杀的进程：直接归类为 LauncherStop，不做任何 console / hs_err 分析。
+        if take_launcher_stop(pid) {
+            return (StopReason::LauncherStop, String::new());
+        }
         let console_diagnosis =
             console_path.and_then(|path| diagnose_game_exit_from_console(path));
         let hs_err = find_hs_err_log(&hs_err_search_directories(), pid, session_start);
@@ -1228,6 +1252,9 @@ mod imp {
         let mut pending = String::new();
         let mut zb_lines = 0u64;
         let mut applied_advices = 0u64;
+        // 游戏把每个实际加载的模组挂进 Lua 时打 `LOG : Mod ... loading <id>`；
+        // 收齐后与 default.txt 的启用列表相减，就是被拒绝加载的模组。
+        let mut loaded_mod_ids: HashSet<String> = HashSet::new();
         let mut last_zb_line = String::new();
         let mut phase = "等待 ZombieBuddy 输出".to_string();
         let mut last_zb_at: Option<Instant> = None;
@@ -1337,6 +1364,11 @@ mod imp {
                     // 左下角展示的控制台内容：所有输出都进队列，只保留最新 6 行。
                     status.push_line(&line);
 
+                    // 收集实际加载的模组 id（覆盖层收尾面板 / 日志用）。
+                    if let Some(id) = overlay_core::parse_loading_mod_line(&line) {
+                        loaded_mod_ids.insert(id.to_lowercase());
+                    }
+
                     // 收集本次真正要加载的 Java 模组 jar 列表，用于精确进度的分母。
                     if line.contains("java mod list to load") {
                         collecting_jars = true;
@@ -1365,12 +1397,19 @@ mod imp {
                         last_zb_line = line.clone();
                         phase = zb_phase(&line).to_string();
                         if on_game_init_complete(&line) {
-                            return Ok(outcome(
+                            let mut value = outcome(
                                 "ZombieBuddy 初始化完成回调结束，覆盖结束。",
                                 zb_lines,
                                 pid,
                                 String::new(),
-                            ));
+                            );
+                            value.rejected_mods = collect_rejected_mods(
+                                &mut file,
+                                &mut offset,
+                                &mut pending,
+                                &mut loaded_mod_ids,
+                            );
+                            return Ok(value);
                         }
                         if let Some(count) = parse_advice_count(&line) {
                             applied_advices += count;
@@ -1394,14 +1433,21 @@ mod imp {
                                 // 注入接近完成即可结束：主菜单马上就要出现，
                                 // 否则最后一帧红色会在菜单出现后才停（表现为"闪一下"）。
                                 if applied_advices.saturating_mul(100) >= (total as u64) * 97 {
-                                    return Ok(outcome(
+                                    let mut value = outcome(
                                         &format!(
                                             "已注入 {applied_advices}/{total} 条 advice（≥97%），覆盖结束。"
                                         ),
                                         zb_lines,
                                         pid,
                                         String::new(),
-                                    ));
+                                    );
+                                    value.rejected_mods = collect_rejected_mods(
+                                        &mut file,
+                                        &mut offset,
+                                        &mut pending,
+                                        &mut loaded_mod_ids,
+                                    );
+                                    return Ok(value);
                                 }
                             }
                             // 分母还没算出来（jar 列表尚未出现在日志里）时的兜底估算。
@@ -1414,12 +1460,19 @@ mod imp {
                             last_zb_at = Some(Instant::now());
                         }
                     } else if let Some(marker) = completion_marker(&line) {
-                        return Ok(outcome(
+                        let mut value = outcome(
                             &format!("检测到主菜单标记（{marker}），覆盖结束。"),
                             zb_lines,
                             pid,
                             format!(" [ZB] 共 {zb_lines} 条"),
-                        ));
+                        );
+                        value.rejected_mods = collect_rejected_mods(
+                            &mut file,
+                            &mut offset,
+                            &mut pending,
+                            &mut loaded_mod_ids,
+                        );
+                        return Ok(value);
                     }
                 }
 
@@ -1449,7 +1502,7 @@ mod imp {
                 // 把它当成功会提前移除覆盖层并把兜底时长记成启动用时。
                 let milestone =
                     overlay_core::SILENCE_COMPLETION_PHASES.contains(&phase.as_str());
-                return Ok(outcome(
+                let mut value = outcome(
                     &if milestone {
                         format!(
                             "[ZB] 输出静默（阶段：{phase}，共 {zb_lines} 条），判定 ZombieBuddy 加载完成。"
@@ -1463,7 +1516,17 @@ mod imp {
                     zb_lines,
                     pid,
                     String::new(),
-                ));
+                );
+                // 只有里程碑静默算「加载完成」：其它兜底收尾不弹被拒模组确认框。
+                if milestone {
+                    value.rejected_mods = collect_rejected_mods(
+                        &mut file,
+                        &mut offset,
+                        &mut pending,
+                        &mut loaded_mod_ids,
+                    );
+                }
+                return Ok(value);
             }
 
             thread::sleep(POLL_INTERVAL);
@@ -1478,7 +1541,41 @@ mod imp {
             process_name: String::new(),
             stop_reason: None,
             exit_code: None,
+            rejected_mods: Vec::new(),
         }
+    }
+
+    /// 启动器「停止游戏进程」强杀的 PID（0 = 没有）。用它跳过停止分析：
+    /// 用户主动结束的游戏不该再弹崩溃报告（2026-11-12 用户要求）。
+    static LAUNCHER_KILLED_PID: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    /// 记录「这个进程是启动器强杀的」；taskkill 之前调用。
+    pub(super) fn mark_launcher_stop(pid: u32) {
+        LAUNCHER_KILLED_PID.store(pid, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// taskkill 失败时撤销标记，避免后续真正崩溃被误当成"用户主动结束"。
+    pub(super) fn clear_launcher_stop(pid: u32) {
+        let _ = LAUNCHER_KILLED_PID.compare_exchange(
+            pid,
+            0,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    /// 取走标记：命中说明这次退出是启动器强杀（一次性，取走即清）。
+    pub(super) fn take_launcher_stop(pid: u32) -> bool {
+        pid != 0
+            && LAUNCHER_KILLED_PID
+                .compare_exchange(
+                    pid,
+                    0,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
     }
 
     /// 「游戏进程已退出」收尾：带上 `ExitWatch` 抓到的退出码；
@@ -1489,11 +1586,260 @@ mod imp {
         value
     }
 
+    /// 加载完成时的收尾摘要：把 console 里新落盘的 `loading <id>` 行收进来，
+    /// 算出「default.txt 启用 − 实际加载」的差集（被游戏版本/依赖检查拒绝的模组），
+    /// 记 launcher.log 并随会话结果交给前端弹确认框。
+    ///
+    /// **没有观察到任何 `loading` 行时不判定**：收尾可能发生在 ≥97% advice
+    /// 那一刻，游戏的 mod 加载行还没出现（2026-11-11 实测：118 个启用模组全被
+    /// 误报成被拒）。宁可这次不提示，也不能把整份 default.txt 当差集。
+    ///
+    /// 覆盖层本身**不**为它停留：完成回调之后游戏进入 Bink 过场/主菜单阶段，
+    /// 该阶段游戏不合成覆盖层绘制的内容（实测压在过场上只会黑屏），旧设计本就
+    /// 在完成点立即退场。确认交互由前端弹窗承担。
+    fn collect_rejected_mods(
+        file: &mut std::fs::File,
+        offset: &mut u64,
+        pending: &mut String,
+        loaded_mod_ids: &mut HashSet<String>,
+    ) -> Vec<String> {
+        drain_console_lines(file, offset, pending, loaded_mod_ids);
+        if loaded_mod_ids.is_empty() {
+            crate::launcher_log::info(
+                "被拒模组判断跳过：本次 console 尚未出现任何 loading 行（收尾早于模组加载阶段）。",
+            );
+            return Vec::new();
+        }
+
+        let enabled = crate::user_zomboid_directory()
+            .ok()
+            .and_then(|directory| {
+                std::fs::read_to_string(directory.join("mods").join("default.txt")).ok()
+            })
+            .map(|content| overlay_core::parse_enabled_mod_ids(&content))
+            .unwrap_or_default();
+        let rejected = overlay_core::rejected_mod_ids(&enabled, loaded_mod_ids);
+        if rejected.is_empty() {
+            return Vec::new();
+        }
+        let shown: Vec<String> = rejected.iter().take(15).cloned().collect();
+        let suffix = if rejected.len() > 15 {
+            format!(" 等 {} 个", rejected.len())
+        } else {
+            String::new()
+        };
+        crate::launcher_log::warn(&format!(
+            "被拒绝加载的模组（{} 个）：{}{suffix}。常见原因是模组的 versionMin 高于当前游戏版本，\
+             或 require 链上指向了这类模组。",
+            rejected.len(),
+            shown.join("、")
+        ));
+        rejected
+    }
+
+    /// 继续把 console.txt 里新落盘的行读完，收集其中的 `loading <id>`。
+    ///
+    /// `linger_and_report_rejected_mods` 专用：file/offset/pending 由调用方
+    /// （track_console 的主循环）持有，这里只推进读取位置。
+    fn drain_console_lines(
+        file: &mut std::fs::File,
+        offset: &mut u64,
+        pending: &mut String,
+        loaded_mod_ids: &mut HashSet<String>,
+    ) {
+        let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        if size < *offset {
+            // 理论上不会在收尾阶段发生（游戏重启才截断）；防御性归零。
+            *offset = 0;
+            pending.clear();
+        }
+        if size <= *offset {
+            return;
+        }
+        if file.seek(SeekFrom::Start(*offset)).is_err() {
+            return;
+        }
+        let mut buffer = [0u8; 8192];
+        match file.read(&mut buffer) {
+            Ok(read) if read > 0 => {
+                *offset += read as u64;
+                pending.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                while let Some(index) = pending.find('\n') {
+                    let line = pending[..index].trim_end_matches('\r').to_string();
+                    pending.drain(..=index);
+                    if let Some(id) = overlay_core::parse_loading_mod_line(&line) {
+                        loaded_mod_ids.insert(id.to_lowercase());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// 游戏中途退出时，从 console.txt 尾部找已知崩溃签名，给用户一句可操作的诊断。
     ///
     /// 只在「游戏进程已退出」的收尾里调用：完成/超时收尾不需要。文件不存在或读不出
     /// 都返回 None（保持原 reason）。扫整个 64KB 尾部——崩溃栈（uncaughtException →
     /// NoClassDefFoundError → GameThread exited）按这个顺序落盘，签名在退出标记之前。
+    /// 游戏安装目录（轻量版：只解析 Steam 库与 appmanifest，不做支持库/覆盖层的状态检测，
+    /// 退出分析路径上不能跑 `detect_project_zomboid()` 那一整套）。
+    fn project_zomboid_install_path() -> Option<std::path::PathBuf> {
+        let libraries = crate::all_libraries_from_roots(&crate::steam_roots());
+        libraries
+            .iter()
+            .find_map(|library| crate::game_path_from_library(library).map(std::path::PathBuf::from))
+    }
+
+    /// 统计游戏本体 `media/scripts` 下有几个文件声明了 `entity <脚本名>`。
+    ///
+    /// 用来区分两种完全不同的 Tile duplicate：
+    /// · ≥2 → 游戏本体自己重复定义（更新打包事故），与模组无关；
+    /// · ≤1 → 某个模组覆盖/重定义了本体脚本，按模组冲突处理。
+    fn count_entity_script_definitions(scripts_root: &Path, script: &str) -> usize {
+        let mut count = 0usize;
+        let mut stack = vec![scripts_root.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("txt") {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                // 只要有一行是 `entity <脚本名>`（允许前导空白/大小写不敏感）就算一次定义。
+                let declares = content.lines().any(|line| {
+                    let trimmed = line.trim_start();
+                    let Some(prefix) = trimmed.get(.."entity".len()) else {
+                        return false;
+                    };
+                    if !prefix.eq_ignore_ascii_case("entity") {
+                        return false;
+                    }
+                    let rest = trimmed["entity".len()..].trim_start();
+                    let Some(head) = rest.get(..script.len()) else {
+                        return false;
+                    };
+                    // 大小写不敏感 + 词边界：`entity metalSmallPoleFence` 也算，
+                    // 但 `entity MetalSmallPoleFenceX` 不算。
+                    head.eq_ignore_ascii_case(script)
+                        && rest[script.len()..]
+                            .chars()
+                            .next()
+                            .map_or(true, |ch| !ch.is_ascii_alphanumeric() && ch != '_')
+                });
+                if declares {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// 本机真实 console 体检（默认忽略）：打印最近一次游戏退出的诊断文本。
+    #[test]
+    #[ignore]
+    fn real_world_diagnosis_from_local_console() {
+        let Some(profile) = std::env::var_os("USERPROFILE") else {
+            return;
+        };
+        let console = std::path::PathBuf::from(profile).join("Zomboid").join("console.txt");
+        if !console.is_file() {
+            return;
+        }
+        println!("diagnosis: {:?}", diagnose_game_exit_from_console(&console));
+    }
+
+    /// 统计本体脚本声明次数：两个文件都声明同一个 `entity` 时返回 2（游戏打包重复的判据）。
+    #[test]
+    fn counts_duplicate_entity_declarations_in_game_scripts() {
+        let directory = tempfile::tempdir().unwrap();
+        let scripts = directory.path().join("scripts");
+        std::fs::create_dir_all(scripts.join("generated/entities/walls")).unwrap();
+        std::fs::create_dir_all(scripts.join("entities/walls")).unwrap();
+        std::fs::write(
+            scripts.join("generated/entities/walls/a.txt"),
+            "module Base
+{
+entity MetalSmallPoleFence
+{
+}
+}
+",
+        )
+        .unwrap();
+        std::fs::write(
+            scripts.join("generated/entities/walls/b.txt"),
+            "module Base
+{
+  entity metalSmallPoleFence
+{
+}
+}
+",
+        )
+        .unwrap();
+        // 只提到名字但没声明（注释 / 别的脚本引用）不算
+        std::fs::write(
+            scripts.join("entities/walls/c.txt"),
+            "module Base
+{
+  xuiSkin default
+  {
+    entity ES_MetalSmallPoleFence
+    {
+    }
+  }
+}
+",
+        )
+        .unwrap();
+
+        assert_eq!(
+            count_entity_script_definitions(&scripts, "MetalSmallPoleFence"),
+            2
+        );
+        assert_eq!(count_entity_script_definitions(&scripts, "NotThere"), 0);
+    }
+
+    /// 从 console 里找 `Tile duplicate: <贴图格>` 冲突，返回 (脚本名, 贴图格)。
+    ///
+    /// 游戏打印形如：
+    /// ```text
+    /// 	java.lang.RuntimeException: [MetalSmallPoleFence] Tile duplicate: constructedobjects_01_61 at SpriteConfigScript.warnOrError(...)
+    /// ```
+    /// 脚本名是 `Tile duplicate:` 之前最近的一对方括号；个别版本没有脚本名时返回空串。
+    fn find_tile_duplicate_conflict(text: &str) -> Option<(String, String)> {
+        for line in text.lines() {
+            let Some((head, rest)) = line.split_once("Tile duplicate:") else {
+                continue;
+            };
+            let tile = rest
+                .trim_start()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|ch: char| ch == ',' || ch == '.' || ch == ';');
+            if tile.is_empty() {
+                continue;
+            }
+            let script = head
+                .rfind('[')
+                .and_then(|start| head[start..].find(']').map(|end| (start, end)))
+                .map(|(start, end)| head[start + 1..start + end].trim().to_string())
+                .unwrap_or_default();
+            return Some((script, tile.to_string()));
+        }
+        None
+    }
+
     fn diagnose_game_exit_from_console(console_path: &Path) -> Option<String> {
         let mut file = std::fs::File::open(console_path).ok()?;
         let length = file.metadata().ok()?.len();
@@ -1501,9 +1847,87 @@ mod imp {
         file.seek(SeekFrom::Start(start)).ok()?;
         let mut text = String::new();
         file.read_to_string(&mut text).ok()?;
+        let install = project_zomboid_install_path();
+        diagnose_console_text(&text, install.as_deref())
+    }
 
+    /// 纯文本版的诊断（`install` 传游戏安装目录用于判断"本体重复"；None = 未知）。
+    /// 单独拆出来是为了测试能控制安装目录，不被本机实际游戏文件左右。
+    /// 按优先级匹配的报错规则：先给最具体、最可操作的结论，匹配不上再退回通用兜底。
+    pub(super) fn diagnose_console_text(text: &str, install: Option<&Path>) -> Option<String> {
+        // 是否出现过「未捕获异常」签名。`<方法>> Exception thrown` 是游戏**捕获后**打印异常的
+        // 通用格式（TileDepthTextures 每张失败深度图都会打一行），不能当崩溃证据——
+        // 2026-11-11 实测：离线启动里几十行被捕获的深度图异常把正常退出误判成 javaCrash。
+        const UNCAUGHT_SIGNATURES: [&str; 5] = [
+            "uncaughtException",
+            "Exception in thread ",
+            "FATAL EXCEPTION",
+            "ExceptionInInitializerError",
+            "StackOverflowError",
+        ];
+        let uncaught = UNCAUGHT_SIGNATURES.iter().any(|signature| text.contains(signature));
+
+        // 1) 进服务器时 WorldDictionary 校验失败：客户端缺少服务器注册的脚本。
+        //    `[SpriteConfigs] Missing dictionary script on client: Base.SMB_steps_FirePole at ...`
+        //    不是启动器问题——服务器与客户端模组必须一致。
+        if let Some((_, rest)) = text
+            .lines()
+            .rev()
+            .find_map(|line| line.split_once("Missing dictionary script on client:"))
+        {
+            let script = rest
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('.');
+            let script = if script.is_empty() {
+                "（未解析出脚本名）".to_string()
+            } else {
+                script.to_string()
+            };
+            return Some(format!(
+                "诊断：客户端缺少服务器使用的模组脚本 {script}（WorldDictionary 校验失败）。服务器与客户端的模组必须一致：请在创意工坊订阅并启用服务器同款模组（含其前置与对应版本），只启用「卸载/替代」类模组并不等于装上原模组；确认后重新连接。"
+            ));
+        }
+
+        // 2) 脚本加载冲突（最具体）：Tile duplicate 会点名脚本与贴图格。
+        if let Some((script, tile)) = find_tile_duplicate_conflict(text) {
+            let script_text = if script.is_empty() {
+                "（未识别脚本名）".to_string()
+            } else {
+                script
+            };
+            // 数一下游戏本体里有几个文件声明了这个实体：≥2 说明是游戏更新自带的重复脚本，
+            // 与模组无关（2026-11-12 实测：42.22 的 MetalSmallPoleFence 在 generated 下有两份）。
+            let definitions = install
+                .map(|install| {
+                    count_entity_script_definitions(&install.join("media").join("scripts"), &script_text)
+                })
+                .unwrap_or(0);
+            if definitions >= 2 {
+                return Some(format!(
+                    "诊断：游戏本体脚本重复——实体脚本 {script_text} 在游戏自己的 media/scripts 里被 {definitions} 个文件重复声明，并占用了同一个贴图格 {tile}（Tile duplicate），游戏在加载脚本阶段直接退出。这不是模组问题：请用 Steam › 右键游戏 › 属性 › 已安装文件 › 验证游戏文件完整性；仍不行就回滚到上一版本或等官方修复。"
+                ));
+            }
+            if definitions == 1 {
+                return Some(format!(
+                    "诊断：模组覆盖了游戏本体脚本——实体脚本 {script_text}（贴图格 {tile}）在游戏本体里已有定义，又被某个模组重复声明，游戏在脚本加载阶段报 Tile duplicate 退出。禁用最近新增或改过建筑的模组再试。"
+                ));
+            }
+            return Some(format!(
+                "诊断：模组脚本冲突——实体脚本 {script_text} 的贴图格 {tile} 与其它脚本重复（Tile duplicate），游戏在脚本加载阶段直接报错退出。通常是两个模组用了同一个建筑/贴图定义；禁用最近新增或改过建筑的模组，或让冲突的两个只保留一个，再试。"
+            ));
+        }
+        if text.contains("Script load errors") {
+            return Some(
+                "诊断：脚本加载错误（Script load errors）——某个模组的 scripts 定义没通过游戏校验，游戏在加载脚本阶段退出。禁用最近新增或改过 scripts / 建筑的模组后再试。"
+                    .to_string(),
+            );
+        }
+
+        // 3) 缺失类 / 类签名对不上：都是「游戏版本与模组不匹配」家族。
         for line in text.lines().rev() {
-            let line = line.trim();
             let missing_class = line
                 .split_once("NoClassDefFoundError")
                 .or_else(|| line.split_once("ClassNotFoundException"))
@@ -1520,14 +1944,179 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
 把游戏和模组更新/回滚到同一时期即可。"
                 ));
             }
-            if line.contains("OutOfMemoryError") {
-                return Some(
-                    "诊断：游戏内存不足（OutOfMemoryError）。请在设置里调高「游戏内存」上限后重试。"
-                        .to_string(),
-                );
+        }
+        if let Some(line) = find_matching_line(
+            text,
+            &[
+                "NoSuchMethodError",
+                "NoSuchFieldError",
+                "AbstractMethodError",
+                "IncompatibleClassChangeError",
+                "IllegalAccessError",
+                "VerifyError",
+            ],
+        ) {
+            return Some(format!(
+                "诊断：模组与游戏版本不匹配（{}）。游戏里某个类的签名/入口变了，依赖它的模组无法链接——\
+常见于游戏刚更新、模组还没跟进；把游戏与模组更新到同一时期，或回滚到更新前的版本快照再试。",
+                summarize_line(line)
+            ));
+        }
+
+        // 4) 内存不足（堆 / GC / Metaspace / 线程数）。
+        if let Some(line) = find_matching_line(
+            text,
+            &[
+                "OutOfMemoryError",
+                "GC overhead limit exceeded",
+                "OutOfMemoryError: Metaspace",
+                "unable to create new native thread",
+            ],
+        ) {
+            return Some(format!(
+                "诊断：游戏内存不足（{}）。请在「启动设置」里调高内存上限；\
+若已是高值仍报错，多半是模组大量生成对象或一次性加载过多资源，可减少模组后重试。",
+                summarize_line(line)
+            ));
+        }
+
+        // 5) 本地库加载失败：模组自带的 .dll 缺失、位数/架构不符或被拦截。
+        if let Some(line) = find_matching_line(
+            text,
+            &["UnsatisfiedLinkError", "java.library.path", "Native Library"],
+        ) {
+            return Some(format!(
+                "诊断：本地库加载失败（{}）。通常是模组自带的 DLL 缺失/被杀软拦截，或与当前系统位数不符；\
+检查最近新增的模组是否带原生库，或在杀软里放行游戏目录后重试。",
+                summarize_line(line)
+            ));
+        }
+
+        // 6) Steam 初始化失败：Steam 未运行 / 被拦截 / 离线启动但模组依赖 Steam。
+        if let Some(line) = find_matching_line(
+            text,
+            &[
+                "SteamAPI_Init",
+                "steam_api64",
+                "steam_api.dll",
+                "Could not initialize Steam",
+                "Steam is not running",
+            ],
+        ) {
+            return Some(format!(
+                "诊断：Steam 初始化失败（{}）。请确认 Steam 已启动并登录；\
+若用的是「从游戏文件启动（离线）」，部分依赖 Steam 的模组在离线模式下可能无法工作。",
+                summarize_line(line)
+            ));
+        }
+
+        // 7) 窗口 / OpenGL 初始化失败：显卡驱动、远程桌面、多显示器切换。
+        if let Some(line) = find_matching_line(
+            text,
+            &[
+                "Failed to create window",
+                "Could not create OpenGL context",
+                "OpenGL context",
+                "GLFW error",
+                "Pixel format not accelerated",
+            ],
+        ) {
+            return Some(format!(
+                "诊断：创建窗口 / OpenGL 上下文失败（{}）。通常是显卡驱动过旧、远程桌面或无 GPU 环境；\
+更新显卡驱动、改用本地显示器运行，或先用窗口化模式重试。",
+                summarize_line(line)
+            ));
+        }
+
+        // 8) 存档加载失败 / 损坏。
+        if let Some(line) = find_matching_line(
+            text,
+            &[
+                "Error loading save",
+                "save file is corrupted",
+                "Save file corrupted",
+                "Failed to load world",
+                "Could not load world",
+                "World load failed",
+            ],
+        ) {
+            return Some(format!(
+                "诊断：存档加载失败（{}）。可能是存档损坏或模组改动导致存档不兼容；\
+先用「版本」页还原到存档对应的版本/模组组合，或从备份恢复存档后再试。",
+                summarize_line(line)
+            ));
+        }
+
+        // 以下规则只在确实出现「未捕获异常」时才当作崩溃原因——正常游戏流程里
+        // 模组脚本报错、贴图缺失都可能只是警告，游戏照常运行。
+        if uncaught {
+            // 9) Lua 运行时错误（模组脚本最常见）。
+            if let Some(line) = find_matching_line(
+                text,
+                &[
+                    "attempted to call nil value",
+                    "attempt to call nil value",
+                    "stack traceback:",
+                    "LuaManager",
+                ],
+            ) {
+                return Some(format!(
+                    "诊断：Lua 运行时错误（{}）。通常来自某个模组的 Lua 脚本（函数不存在、返回 nil、事件签名不符）；\
+禁用最近新增或更新过的模组后再试，完整调用栈见 console.txt。",
+                    summarize_line(line)
+                ));
+            }
+
+            // 10) 模组加载失败。
+            if let Some(line) = find_matching_line(
+                text,
+                &[
+                    "failed to load mod",
+                    "Failed to load mod",
+                    "Error loading mod",
+                    "Exception loading mod",
+                    "Mod load failed",
+                ],
+            ) {
+                return Some(format!(
+                    "诊断：模组加载失败（{}）。检查该模组是否与当前游戏版本兼容、依赖是否装齐，禁用后重试。",
+                    summarize_line(line)
+                ));
+            }
+
+            // 11) 着色器编译失败（光影 / 材质模组）。
+            if let Some(line) = find_matching_line(
+                text,
+                &[
+                    "shader compile error",
+                    "Shader compile error",
+                    "error compiling shader",
+                    "Failed to compile shader",
+                    "Shader compilation failed",
+                ],
+            ) {
+                return Some(format!(
+                    "诊断：着色器编译失败（{}）。多与光影包 / 材质模组或显卡驱动有关；\
+试试关闭光影包（或换一个）、更新显卡驱动后再启动。",
+                    summarize_line(line)
+                ));
+            }
+
+            // 12) 贴图 / 精灵缺失把游戏压垮（少见，但崩溃时值得点名）。
+            if let Some(line) = find_matching_line(
+                text,
+                &["TEXTURE NOT FOUND", "Couldn't find texture", "Couldn't find sprite"],
+            ) {
+                return Some(format!(
+                    "诊断：游戏崩溃时伴随贴图/精灵缺失（{}）。常见于资源包或材质模组未适配当前版本；\
+禁用最近新增的资源包/材质模组后再试。",
+                    summarize_line(line)
+                ));
             }
         }
-        if text.contains("uncaughtException") || text.contains("Exception thrown") {
+
+        // 13) 兜底：出现过未捕获异常，但没有命中上面任何具体规则。
+        if uncaught {
             return Some(
                 "诊断：游戏在加载中抛出未处理异常后退出。常见原因是模组与当前游戏版本不匹配；\
 可先禁用最近新增的模组再试。"
@@ -1535,6 +2124,47 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
             );
         }
         None
+    }
+
+    /// 找到第一条包含任一关键字的行（从后往前 = 优先最近的报错）。
+    fn find_matching_line<'a>(text: &'a str, needles: &[&str]) -> Option<&'a str> {
+        text.lines()
+            .rev()
+            .find(|line| needles.iter().any(|needle| line.contains(needle)))
+    }
+
+    /// 把一条报错行压成可读摘要：去掉前缀噪声、折叠空白、截断到 140 字符。
+    fn summarize_line(line: &str) -> String {
+        let trimmed = line.trim();
+        // 去掉 `ERROR: General f:0 at Xxx.yyy          > ` 这类前缀，只留正文。
+        let body = trimmed
+            .rsplit_once('>')
+            .map(|(_, rest)| rest.trim())
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(trimmed);
+        let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.chars().count() > 140 {
+            let mut out: String = collapsed.chars().take(140).collect();
+            out.push('…');
+            out
+        } else {
+            collapsed
+        }
+    }
+
+    #[test]
+    fn skips_rejected_mods_when_no_loading_lines_were_seen() {
+        // 收尾可能早于游戏的模组加载阶段（≥97% advice 就退场）：此时一行
+        // `LOG : Mod ... loading` 都没有，不能把整份 default.txt 当成"被拒"。
+        let directory = tempfile::tempdir().unwrap();
+        let console = directory.path().join("console.txt");
+        std::fs::write(&console, "").unwrap();
+        let mut file = std::fs::File::open(&console).unwrap();
+        let mut offset = 0u64;
+        let mut pending = String::new();
+        let mut loaded: HashSet<String> = HashSet::new();
+        let rejected = collect_rejected_mods(&mut file, &mut offset, &mut pending, &mut loaded);
+        assert!(rejected.is_empty());
     }
 
     #[test]
@@ -1567,11 +2197,164 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
         let diagnosis = diagnose_game_exit_from_console(&console).unwrap();
         assert!(diagnosis.contains("内存不足"));
 
+        // 脚本加载冲突：点出脚本名与贴图格，并给出可操作建议（2026-11-12 实测崩溃）。
+        std::fs::write(
+            &console,
+            "ERROR: General      f:0> ScriptBucket.LoadScripts> Exception thrown\r\n\
+             \tjava.lang.RuntimeException: [MetalSmallPoleFence] Tile duplicate: constructedobjects_01_61 at SpriteConfigScript.warnOrError(SpriteConfigScript.java:458).\r\n\
+             Caused by: java.io.IOException: Script load errors.\r\n\
+             LOG  : GameThread exited.\r\n",
+        )
+        .unwrap();
+        let diagnosis = diagnose_game_exit_from_console(&console).unwrap();
+        // 不论本机是否检测到游戏目录，脚本名与贴图格都必须出现在诊断里。
+        assert!(diagnosis.contains("MetalSmallPoleFence"), "{diagnosis}");
+        assert!(diagnosis.contains("constructedobjects_01_61"), "{diagnosis}");
+
+        // 注入一个"本体重复定义"的假安装目录：应判定为游戏本体问题，而不是模组冲突。
+        let install = directory.path().join("game");
+        let scripts = install.join("media").join("scripts").join("generated");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("entity_metal_smallpolefence.txt"),
+            "module Base
+{
+entity MetalSmallPoleFence
+{
+}
+}
+",
+        )
+        .unwrap();
+        std::fs::write(
+            scripts.join("entity_metal_smallpolelfence.txt"),
+            "module Base
+{
+entity MetalSmallPoleFence
+{
+}
+}
+",
+        )
+        .unwrap();
+        let console_text = std::fs::read_to_string(&console).unwrap();
+        let duplicated = diagnose_console_text(&console_text, Some(&install)).unwrap();
+        assert!(duplicated.contains("游戏本体脚本重复"), "{duplicated}");
+        assert!(duplicated.contains("验证游戏文件完整性"), "{duplicated}");
+
+        // 只有一份本体定义 → 判定为模组覆盖了本体脚本。
+        std::fs::remove_file(scripts.join("entity_metal_smallpolelfence.txt")).unwrap();
+        let overridden = diagnose_console_text(&console_text, Some(&install)).unwrap();
+        assert!(overridden.contains("模组覆盖了游戏本体脚本"), "{overridden}");
+
+        // 安装目录未知 → 保持通用的模组冲突提示。
+        let unknown = diagnose_console_text(&console_text, None).unwrap();
+        assert!(unknown.contains("模组脚本冲突"), "{unknown}");
+
+        // 只有 Script load errors、没有 Tile duplicate：给通用脚本加载错误提示。
+        std::fs::write(
+            &console,
+            "Caused by: java.io.IOException: Script load errors.\r\nGameThread exited.\r\n",
+        )
+        .unwrap();
+        let diagnosis = diagnose_game_exit_from_console(&console).unwrap();
+        assert!(diagnosis.contains("脚本加载错误"), "{diagnosis}");
+
         // 没有崩溃签名（正常完成）返回 None，不影响正常收尾。
         std::fs::write(&console, "LOG  : all good\r\n").unwrap();
         assert!(diagnose_game_exit_from_console(&console).is_none());
         // 文件不存在也返回 None。
         assert!(diagnose_game_exit_from_console(&directory.path().join("missing.txt")).is_none());
+
+        // 「被捕获」的异常打印不是崩溃证据：离线启动时 TileDepthTextures 会对每张
+        // 失败的深度图打一行 `> Exception thrown`（2026-11-11 把正常退出误判成 javaCrash）。
+        std::fs::write(
+            &console,
+            "ERROR: General      f:0> TileDepthTextures.createTileset> Exception thrown\r\n\
+             \tjava.lang.IllegalArgumentException: Invalid prefix found for: H:\\x.png at Zomboid\r\n\
+             LOG  : GameThread exited.\r\n",
+        )
+        .unwrap();
+        assert!(diagnose_game_exit_from_console(&console).is_none());
+
+        // 服务器/客户端模组不一致：WorldDictionary 报客户端缺少服务器注册的脚本。
+        // 这是进服务器失败最常见的原因，诊断必须点出脚本名并给出"装同款模组"的方向。
+        std::fs::write(
+            &console,
+            "ERROR: General      f:0 st:0> WorldDictionary.init> Exception thrown\r\n\tzombie.world.WorldDictionaryException: [SpriteConfigs] Missing dictionary script on client: Base.SMB_steps_FirePole at ScriptsDictionary$ScriptRegister.parseLoadListClient(ScriptsDictionary.java:253).\r\n",
+        )
+        .unwrap();
+        let diagnosis = diagnose_game_exit_from_console(&console).unwrap();
+        assert!(diagnosis.contains("Base.SMB_steps_FirePole"), "{diagnosis}");
+        assert!(diagnosis.contains("服务器同款模组"), "{diagnosis}");
+    }
+
+    #[test]
+    fn launcher_stop_marker_is_consumed_once() {
+        crate::overlay_session::imp::mark_launcher_stop(4242);
+        assert!(crate::overlay_session::imp::take_launcher_stop(4242));
+        // 取走即清：同 pid 再来一次就不会再被当成"用户主动结束"。
+        assert!(!crate::overlay_session::imp::take_launcher_stop(4242));
+        // 别的 pid 不受影响
+        assert!(!crate::overlay_session::imp::take_launcher_stop(999));
+    }
+
+    /// 报错目录：每类签名都要给出对应的可操作诊断。
+    #[test]
+    fn diagnosis_covers_common_error_families() {
+        let install = tempfile::tempdir().unwrap();
+        let diagnose = |text: &str| {
+            crate::overlay_session::imp::diagnose_console_text(text, Some(install.path()))
+        };
+
+        // 版本不匹配：NoSuchMethodError
+        let d = diagnose("ERROR: General f:0> Exception thrown
+	java.lang.NoSuchMethodError: zombie.Foo.bar()V
+").unwrap();
+        assert!(d.contains("版本不匹配"), "{d}");
+
+        // 内存在 GC / Metaspace 上耗尽
+        let d = diagnose("ERROR: java.lang.OutOfMemoryError: GC overhead limit exceeded
+").unwrap();
+        assert!(d.contains("内存不足"), "{d}");
+
+        // 本地库
+        let d = diagnose("java.lang.UnsatisfiedLinkError: no lwjgl in java.library.path
+").unwrap();
+        assert!(d.contains("本地库"), "{d}");
+
+        // Steam
+        let d = diagnose("ERROR: SteamAPI_Init failed
+").unwrap();
+        assert!(d.contains("Steam"), "{d}");
+
+        // 窗口 / OpenGL
+        let d = diagnose("ERROR: Could not create OpenGL context
+").unwrap();
+        assert!(d.contains("OpenGL"), "{d}");
+
+        // 存档
+        let d = diagnose("ERROR: Error loading save 'survivor'
+").unwrap();
+        assert!(d.contains("存档"), "{d}");
+
+        // Lua（需要未捕获异常签名才认）
+        let lua = "ERROR: uncaughtException
+ERROR: attempt to call nil value 'OnTick'
+";
+        let d = diagnose(lua).unwrap();
+        assert!(d.contains("Lua 运行时错误"), "{d}");
+        // 没有崩溃签名时，孤立的 Lua 报错不算崩溃原因
+        assert!(diagnose("ERROR: attempt to call nil value 'OnTick'
+").is_none());
+
+        // 贴图缺失同理：正常流程里的警告不算
+        assert!(diagnose("WARN: Couldn't find texture 'x'
+").is_none());
+        let d = diagnose("ERROR: uncaughtException
+WARN: Couldn't find texture 'x'
+").unwrap();
+        assert!(d.contains("贴图"), "{d}");
     }
 
     /// 是否可以因为 `[ZB]` 静默而判定加载完成。
@@ -1689,6 +2472,13 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
     }
 
     /// 目标进程是否已经有可见的顶层窗口（游戏窗口出现）。
+    ///
+    /// 类名以 `#` 开头的系统窗口类不算——`#32770` 是标准对话框（MessageBox /
+    /// 启动器 fatal error 弹窗都是它）。游戏没起来而弹 fatal error 时，那个弹窗
+    /// 是游戏进程的**第一个可见窗口**：不排除的话，会话会把它当成"游戏窗口出现"，
+    /// 立刻注入并把覆盖层压在弹窗上面，用户连错误内容都看不到（2026-11-10 用户
+    /// 实测）。排除后会话继续等真正的游戏窗口（GLFW 主窗口，类名不以 # 开头）；
+    /// 用户点掉弹窗、进程退出，会话按"游戏进程已退出"正常收场。
     pub(super) fn has_visible_window(pid: u32) -> bool {
         struct Search {
             pid: u32,
@@ -1699,10 +2489,18 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
             let search = unsafe { &mut *(lparam.0 as *mut Search) };
             let mut window_pid = 0u32;
             unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
-            if window_pid == search.pid
-                && unsafe { IsWindowVisible(hwnd).as_bool() }
-                && unsafe { GetWindowTextLengthW(hwnd) } > 0
-            {
+            if window_pid != search.pid || !unsafe { IsWindowVisible(hwnd).as_bool() } {
+                return TRUE;
+            }
+            // 类名以 '#' 开头的基本都是系统窗口类（#32770 对话框 / #32770 变体），
+            // 游戏主窗口（GLFW / AWT）的类名不会以 # 开头，先做这一道便宜的排除。
+            let mut class_buffer = [0u16; 16];
+            let class_length =
+                unsafe { GetClassNameW(hwnd, &mut class_buffer) } as usize;
+            if class_length > 0 && class_buffer[0] == b'#' as u16 {
+                return TRUE;
+            }
+            if unsafe { GetWindowTextLengthW(hwnd) } > 0 {
                 search.found = true;
                 return FALSE;
             }
@@ -1808,12 +2606,13 @@ Steam 刚更新过游戏或模组、或刚用「版本还原」回滚过其中�
     #[cfg(test)]
     mod tests {
         use super::{
-            completion_marker, extract_jar_path, idle_completion, idle_completion_with_console,
-            is_game_window_title, on_game_init_complete, parse_advice_count, zb_phase, ExitWatch,
-            RenderWatch, StatusFile, COMPLETION_HOLD, CONSOLE_QUIET_GUARD, RENDER_READY_HOLD,
-            RENDER_READY_RATE,
+            collect_rejected_mods, completion_marker, extract_jar_path, idle_completion,
+            idle_completion_with_console, is_game_window_title, on_game_init_complete,
+            parse_advice_count, zb_phase, ExitWatch, RenderWatch, StatusFile, COMPLETION_HOLD,
+            CONSOLE_QUIET_GUARD, RENDER_READY_HOLD, RENDER_READY_RATE,
         };
         use overlay_core::{ZB_IDLE_TIMEOUT, ZB_IDLE_TIMEOUT_ANY_PHASE};
+        use std::collections::HashSet;
         use std::time::{Duration, Instant};
 
         #[test]
@@ -2222,11 +3021,17 @@ pub fn stop_game_process() -> Result<String, String> {
     let Some((pid, name)) = imp::find_game_candidate() else {
         return Err("没有找到正在运行的游戏进程。".to_string());
     };
+    // 先标记：这个进程是启动器主动强杀的，退出后不做停止分析、不弹崩溃报告。
+    imp::mark_launcher_stop(pid);
     let output = std::process::Command::new("taskkill")
         .args(["/F", "/PID", &pid.to_string()])
         .output()
-        .map_err(|error| format!("结束游戏进程失败: {error}"))?;
+        .map_err(|error| {
+            imp::clear_launcher_stop(pid);
+            format!("结束游戏进程失败: {error}")
+        })?;
     if !output.status.success() {
+        imp::clear_launcher_stop(pid);
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!("结束游戏进程失败: {detail}"));
     }
