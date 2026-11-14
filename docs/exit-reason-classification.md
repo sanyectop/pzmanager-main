@@ -15,9 +15,12 @@
 
 当前实现（`overlay_session.rs`）：
 
-- 主循环每 40ms（`POLL_INTERVAL`）调 `process_alive(pid)`；内部
-  `OpenProcess` → `GetExitCodeProcess` → 与 `STILL_ACTIVE` 比对后**把退出码丢弃**，
-  然后立刻 `CloseHandle`。
+- 注入成功后即用 `ExitWatch` 持有**常驻句柄**
+  （`OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, pid)`），主循环每轮
+  `ExitWatch::check()`：`WaitForSingleObject` 返回 `WAIT_OBJECT_0` 即已退出，
+  **在退出瞬间**用句柄 `GetExitCodeProcess` 取退出码（常驻句柄顺带防 PID 复用）。
+  旧设计「每 40ms 轮询 `process_alive` 且丢弃退出码」已废弃；`process_alive` 只是
+  常驻句柄打开失败（权限/时序）时的回退，此时拿不到退出码。
 - 退出后 `diagnose_game_exit_from_console` 扫 console.txt 尾部 64KB 已知签名
   （NoClassDefFoundError / OutOfMemoryError / 笼统 uncaughtException）。
 - 12:54 那次会话（ZB 行数=8、阶段=转换游戏类）没有任何签名命中，用户只能看到
@@ -39,16 +42,13 @@
 
 ## 信号采集
 
-### 1. 退出码（消灭竞态）
-
-现状是「轮询发现已死 → 才去开句柄」，进程对象可能已经消亡，`OpenProcess` 失败，
-退出码永久丢失。改法：
+### 1. 退出码（已实现，`ExitWatch`）
 
 - 注入成功后**一次性持有常驻句柄**：`OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, pid)`。
-- 主循环用 `WaitForSingleObject(handle, POLL_INTERVAL)` 代替「纯 sleep + 查存活」，
-  返回 `WAIT_OBJECT_0` 即已退出，**立刻** `GetExitCodeProcess`——此时进程对象必然还在。
-- 永远不把 `STILL_ACTIVE`（259）当退出码；`GetExitCodeProcess` 失败则记 `unknown` 并降级。
-- 句柄持有失败（权限/时序）时退回现有轮询路径，退出码记 `None`，不阻断会话收尾。
+- 主循环每轮 `WaitForSingleObject(handle, 0)`（非阻塞）检测退出，返回 `WAIT_OBJECT_0`
+  即已退出，**立刻** `GetExitCodeProcess`——此时进程对象必然还在（常驻句柄顺带防 PID 复用）。
+- 永远不把 `STILL_ACTIVE`（259）当退出码；`GetExitCodeProcess` 失败则退出码记 `None`。
+- 句柄持有失败（权限/时序）时退回 `process_alive` 轮询路径，退出码记 `None`，不阻断会话收尾。
 
 ### 2. hs_err_pid<pid>.log（JVM 原生崩溃，最强信号）
 
@@ -58,8 +58,9 @@ JVM 原生崩溃（访问违例、栈溢出等）会写 `hs_err_pid<pid>.log`，
 - 搜索位置：游戏工作目录、`%USERPROFILE%\Zomboid\`、`%TEMP%`。
 - 匹配条件（防误报，见「边界」）：**文件名 pid == 本会话 pid** 且文件 mtime 落在
   会话窗口内。
-- 解析字段：`Exception Code`（0xC0000005 等）、`Internal Exception`、崩溃线程栈头部
-  一两行——足够生成一句可操作的诊断。
+- 解析（`parse_hs_err_summary`）：只取 dump 头部 `# ` 开头、同时含 `EXCEPTION` 与 `0x`
+  的那一行异常摘要（如 `#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=…`）——
+  不解析 `Internal Exception` 与线程栈；这一行已足够生成一句可操作的诊断。
 
 ### 3. Windows 事件日志（崩溃的第三方公证）
 
@@ -142,15 +143,18 @@ console.txt 崩溃签名          → java_crash（签名自带具体诊断）
   **事后取证**。被杀瞬间无法保存现场，能依赖的只有被杀前游戏自己落盘的三类证据
   （console.txt、hs_err、覆盖层心跳）。
 - **覆盖层 DLL 心跳的用途**：心跳文件最后时间戳只能证明「被杀前进程还活着」，
-  对分类贡献有限；不参与裁决，仅在 launcher.log 里留 `最后心跳=…秒前` 供排查。
+  对分类贡献有限；不参与裁决。launcher.log 的会话详情行
+  （`覆盖层会话详情：ZB 行数=…，阶段=…，advice 分母=…，渲染≈…，耗时=…，结果=…`）
+  会带上渲染采样供排查（读不到采样时写 `渲染≈无采样`）。
 
 ## 数据落点
 
 - `SessionOutcome` 增加 `exit_code: Option<u32>` 与 `stop_reason: StopReason` 字段。
-- launcher.log 会话详情行追加：
-  `… 结果=游戏进程已退出。 退出码=3221225477(0xC0000005) 停止原因=native_crash。 诊断：…`
+- launcher.log 会话详情行追加（诊断拼在结果后、逗号分隔；停止原因是 camelCase 标识）：
+  `… 结果=游戏进程已退出。 诊断：游戏以异常码 3221225477(0xC0000005) 结束（原生崩溃），建议提交反馈排查。，停止原因=nativeCrash，退出码=3221225477(0xC0000005)`
 - 任务中心（`task_store.rs`）持久化同一枚举，前端按枚举展示文案与图标；
-  `unknown` 不展示诊断建议，避免误导。
+  `unknown` 也返回诊断文案（「游戏退出原因未知（退出码 …），可提交反馈附启动器日志排查」），
+  前端 `sessionEnd.ts` 原样展示（把「结果 / 停止原因与退出码 / 诊断」分成三段）。
 
 ## 会话收尾后继续监视（game-exited）
 

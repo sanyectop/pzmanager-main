@@ -47,6 +47,8 @@ Rules:
   by invoking `cargo build` / `tauri dev` directly.
 - Build product (dev 注入取它，workspace 优先): `overlay-dll/target/x86_64-pc-windows-msvc/release/pz_overlay.dll`.
   `src-tauri/target/debug/` 里那份是 dev 启动时的资源复制，**只在 dev 启动时刷新一次**，不随重新编译更新。
-- Verification: launcher.log 会话详情行（`覆盖层会话详情：… 渲染≈…`）——`渲染≈无采样` = 注入的是旧 DLL
-  （新 DLL 每 500ms 回写渲染速率）。DLL 自报版本看 `%TEMP%\overlay.log` 首行 `pz_overlay vX.Y.Z 已加载`。
+- Verification: launcher.log 会话详情行（`覆盖层会话详情：… 渲染≈…`）——`渲染≈无采样` 通常意味着注入的是旧 DLL
+  （新 DLL 每 500ms 回写渲染速率），但非充要：UI 线程 panic、渲染文件写失败或采样过期（>2 秒）时，
+  新 DLL 也会显示无采样。DLL 自报版本看 `%TEMP%\overlay.log` 各会话块开头的
+  `pz_overlay vX.Y.Z 已加载` 行（log 为 append 模式、跨会话不清空，需按 pid 检索）。
 - 相应地：改完 DLL 源码后，"改动没生效"的排查第一步永远是确认注入的 DLL 时间戳 / 版本行，再谈代码。

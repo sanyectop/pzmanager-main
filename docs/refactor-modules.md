@@ -19,6 +19,14 @@
 | `src/components/version.tsx` | 版本时间线、版本记录弹窗、换盘弹窗 |
 | `src/components/fastLaunch.tsx` | 极速启动缓存状态行与开启警告 |
 | `src/components/shell.tsx` | 自绘标题栏与 `useDialogAutoHeight` |
+| `src/components/confirm.tsx` | 应用内确认对话框（替代原生 `window.confirm`） |
+| `src/components/crashReport.tsx` | 游戏异常停止报告：原因 + 诊断 + 底部可疑 JAR 模组列表 |
+| `src/components/icons.tsx` | 通用小图标（外链箭头 ↗ 等） |
+| `src/components/launchMusic.tsx` | 内置壁纸背景音乐播放器（`LaunchMusicProvider` + 启动页胶囊控件） |
+| `src/components/pagination.tsx` | 统一翻页条 `Pagination`（页码规则在 `src/paginationUi.ts`） |
+| `src/components/settingsCards.tsx` | 设置页分区卡片（标题在卡片外、行放白卡片里） |
+| `src/components/shaderpackConfig.tsx` | Viewpoint 光影包配置弹窗（解析 `shaders.properties`，Iris 同款分页配置） |
+| `src/components/snapSlider.tsx` | 拖动时视觉连续、松开后就近吸附的滑动条 `SnapSlider` |
 
 规则：
 
@@ -29,8 +37,8 @@
 
 ## Rust
 
-`lib.rs` 现在只保留命令注册、启动流程、工坊/资源命令和应用初始化（约 2.7k 行）；
-内联测试已移到 `tests.rs`（约 2.4k 行）。拆出的领域模块通过 `pub(crate) use module::*;`
+`lib.rs` 现在只保留命令注册、启动流程、工坊/资源命令和应用初始化（约 3.7k 行）；
+内联测试已移到 `tests.rs`（约 4.3k 行）。拆出的领域模块通过 `pub(crate) use module::*;`
 回到 crate 根，因此：
 
 - `tauri::generate_handler!` 里的命令名不用改；
@@ -60,7 +68,7 @@
 
 ## 下一步
 
-`App.tsx` 的 `App()` 仍有约 8.2k 行，主要是 100+ 个 state、effects 和页面 JSX。
+`App.tsx` 的 `App()` 仍有约 1.1 万行（11,645 行），主要是 257 个 `useState`（另有 62 处 `useRef`）、effects 和页面 JSX。
 继续拆分时建议按功能抽 hook，而不是继续搬 JSX：
 
 1. `useTaskCenter`：toasts / notifications / tasks。

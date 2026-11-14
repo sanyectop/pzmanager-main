@@ -26,7 +26,7 @@
 4. **过渡期间模糊丢失**：整页 opacity/transform 动画会让 Chromium 丢掉面板的 backdrop-filter，
    代码里已经为此关掉启动页入场动画（`App.tsx` `navigateToPage`），属于"绕着 bug 写功能"。
 5. **`position: fixed` 包含块**：每个 backdrop-filter 都成为固定定位的包含块，弹层必须走 Portal
-   （`App.css:2101`、`App.tsx:1613/6049` 都留了补丁注释）。
+   （`App.css` 的 `.pz-resource-file-overlay` 规则、`App.tsx` 里工坊详情弹窗 / 工坊行右键菜单的 `Portal` 处都留了补丁注释）。
 6. **遮罩 / 滤镜祖先会截断采样（根因）**：`.pz-app-content` 上有滚动渐隐的 `mask-image`。
    带 `mask`（或 `filter` / `opacity` < 1 / `clip-path` / `backdrop-filter`）的祖先会成为
    **backdrop root**，它内部元素的 `backdrop-filter` 只能采到自己子树里的内容——背后的壁纸
@@ -155,7 +155,7 @@ Chromium 在带 `filter` 的元素上做 fixed 附件时长期有 off-by-pixel �
 ```
 .pz-acrylic-glass                 position:absolute; inset:0; z-index:0; pointer-events:none;
   │                               clip-path 兜底 inset(100% 0 0 100%)（= 什么都不画）
-  └─ .pz-acrylic-glass-copy       inset:-32px; background-size:cover; background-position:center;
+  └─ .pz-acrylic-glass-copy       inset: calc(var(--pz-acrylic-blur) * -1.6); background-size:cover; background-position:center;
                                  filter: blur(var(--pz-acrylic-blur)) saturate(var(--pz-acrylic-saturate))
        └─ <SeasonalWallpaper idSuffix="-glass">   四季模式下壁纸的完整副本（静态图则走 background-image）
 ```
@@ -176,8 +176,8 @@ Chromium 在带 `filter` 的元素上做 fixed 附件时长期有 off-by-pixel �
 
 数值：
 
-- `--pz-acrylic-blur: 20px`、`--pz-acrylic-saturate: 1.45`（原实现是 28px/160%、14–18px 不等，这里统一一档）；
-- 副本 `inset: -32px`：blur 在元素边缘会向透明区采样，不放大就会让贴近窗口边缘的面板发暗；
+- `--pz-acrylic-blur: calc(20px * var(--pz-blur-scale, 1))`（基准 20px，接入「设置 › 通用 › 模糊度」的全局缩放）、`--pz-acrylic-saturate: 1.45`（原实现是 28px/160%、14–18px 不等，这里统一一档）；
+- 副本 `inset: calc(var(--pz-acrylic-blur) * -1.6)`（blur 基准 20px 时等效 `-32px`）：blur 在元素边缘会向透明区采样，不放大就会让贴近窗口边缘的面板发暗；
   副本内容本身是模糊的，这点缩放（约 3%）看不出来；
 - 面板底色保持 0.6 / 0.5 不变。想更"透"可以只调这两个令牌（0.42 左右就能明显看出背景结构），
   代价是深色面板上的白字对比度下降。
@@ -199,7 +199,7 @@ Chromium 在带 `filter` 的元素上做 fixed 附件时长期有 off-by-pixel �
 ## 6. 结论与后续
 
 1. **已落地**：启动页 0 处 `backdrop-filter`，亚克力由"克隆壁纸层 + 面板形状裁剪"实现（方案 C）。
-   所有壁纸模式（自定义图 / 创意工坊图 / 默认四季动态壁纸 / 纯色画布）都成立。
+   所有壁纸模式（自定义图 / 创意工坊图 / 默认四季动态壁纸）都成立（应用不提供"纯色画布"选项：`backgroundPath` 为空时回落内置背景）。
 2. **成本**：四季模式下壁纸会被渲染两份（真壁纸 + 亚克力副本），模糊是整层一次性栅格化，
    壁纸每秒更新时随之一秒一次。低端机器如果掉帧，先降 `--pz-acrylic-blur`，再考虑
    "只在静态壁纸下启用亚克力"。

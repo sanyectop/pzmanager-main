@@ -48,14 +48,17 @@
 ```
 pzm/
 ├─ src/                        前端（React/TS）
-│  ├─ App.tsx                  ⚠️ ~5.3k 行，单文件承载全部页面
-│  ├─ App.css                  ⚠️ ~2.7k 行，手写样式，类名统一 pz- 前缀
+│  ├─ App.tsx                  ⚠️ ~1.1 万行（11,645），App() 状态、effects、IPC 与页面编排
+│  ├─ App.css                  ⚠️ ~5,700 行，手写样式，类名统一 pz- 前缀
 │  ├─ main.tsx                 React 挂载 + Chakra Provider
+│  ├─ app/                     types.ts / constants.ts / utils.ts（DTO、常量、纯函数）
+│  ├─ components/              ⚠️ 16 个独立组件文件（见 docs/refactor-modules.md）
 │  └─ <功能>.ts                抽取出来的纯函数模块（见 5.3）
 ├─ src-tauri/                  启动器（Rust）
-│  ├─ src/lib.rs               ⚠️ ~6.6k 行，主后端 + 内联 Rust 测试
-│  ├─ src/main.rs              仅调用 pzmanager_lib::run()
-│  ├─ src/{workshop,resource,downloader,news,news_translation}.rs
+│  ├─ src/lib.rs               ⚠️ ~3,700 行，命令注册、启动流程、工坊/资源命令、应用初始化
+│  ├─ src/main.rs              仅调用 pzmanager_lib::run()（6 行）
+│  ├─ src/tests.rs             ⚠️ ~4,300 行（4,270），原 lib.rs 内联测试（lib.rs 末尾 #[cfg(test)] mod tests）
+│  ├─ src/{workshop,resource,downloader,news,news_translation}.rs 等 30+ 个领域模块
 │  ├─ src/overlay*.rs          注入 + 会话 + 两套注入后端
 │  ├─ capabilities/default.json  Tauri 权限白名单
 │  ├─ tauri.conf.json          正式构建；tauri.dev.conf.json 开发覆盖
@@ -64,9 +67,10 @@ pzm/
 │  ├─ src/lib.rs               DllMain / 等模块与导出 / MinHook / GL 绘制 / 停止事件
 │  ├─ src/ui.rs                窗口内加载界面：GDI DIB → (换帧后) GL 纹理
 │  └─ target-verify/           一次性验证构建产物（非正式产物路径）
-├─ tests/                      前端侧 node:test 断言（17 个文件，见 10.2）
+├─ overlay-core/               覆盖层共享解析 crate（src-tauri/Cargo.toml 以 path = "../overlay-core" 引用；
+│                              启动器与 DLL 双路共用的阶段/完成规则与模组行解析）
+├─ tests/                      前端侧 node:test 断言（75 个 *.test.ts，见 10.2）
 ├─ docs/                       本文 + 覆盖层文档 + superpowers 历史文档
-├─ backup/<时间戳>-<slug>/      人工快照，当前唯一的"版本历史"（见 12.7）
 ├─ pzmodsample/                参考源码：ZombieBuddy / Viewpoint / PCL2-Language / SJMCL
 ├─ python/                     早期 Flask 工坊浏览器原型（已被 Rust 版取代）
 ├─ public/                     字体、图标、默认背景
@@ -110,14 +114,12 @@ pzm/
 
 ### 5.1 页面结构
 
-一级页面枚举 `ActivePage = launch | overview | shots | shaderpacks | workshop | mods | settings`，其中两个是"容器页"：
+一级页面枚举 `ActivePage = launch | overview | shots | shaderpacks | versions | workshop | mods | settings`（[src/app/types.ts](../src/app/types.ts)），但一级导航只有 5 项（`navigationItems`，[src/app/constants.ts](../src/app/constants.ts)）：启动、游戏管理（`versions`）、资源中心、模组管理、设置。旧的 `overview` / `shots` / `shaderpacks` 一级页已重定向进 `versions` 页（`App.tsx` 的 `navigateToPage`），变成版本页内的 `VersionTab` 分段（`game` 概览 / `mods` 模组版本 / `history` 历史版本 / `support` 支持库 / `shaderpacks` 光影包 / `shots` 截图）：
 
-| 一级页 | 子页 | 内容 |
+| 一级页 | 子页 / 分段 | 内容 |
 | --- | --- | --- |
 | 启动 `launch` | — | 账户/内存上限/启动参数、启动与停止游戏、覆盖层会话进度面板 |
-| 支持库 `overview` | — | 探测到的本机路径、ZombieBuddy Viewpoint/PZ_Optimization 状态与一键配置；三项安装内容收在同一个「支持组件」面板里，每行沿用模组行的卡片外观（`.pz-mod-row`），默认折叠（折叠态：名称 + 一句话说明 + 状态标签 + ⋯ 详情按钮）。加载器那行只报状态并指路「设置 › 模组加载器」，不在本页做安装 |
-| 截图管理 `shots` | — | Viewpoint 截图列表、预览、复制到剪贴板 |
-| 光影管理 `shaderpacks` | — | 光影包导入（zip）/删除、图标与搜索词推导；每包「配置」弹窗解析 shaders.properties 并保存参数覆写（启动时写入 viewpoint-live.properties，游戏退出后整文件还原） |
+| 游戏管理 `versions` | `game \| mods \| history \| support \| shaderpacks \| shots` | 概览（游戏版本隔离的保存/还原/校验）、模组版本（每个模组一条独立版本链）、历史版本时间线、支持库（探测到的本机路径、ZombieBuddy / PZ Optimization / Viewpoint 3D 状态与一键配置；三项安装内容收在同一个「支持组件」面板里，每行沿用模组行的卡片外观 `.pz-mod-row`，默认折叠，加载器那行只报状态并指路「设置 › 模组加载器」）、光影包（导入/删除、图标与搜索词、每包「配置」弹窗解析 shaders.properties 并保存参数覆写）、截图（Viewpoint/Steam 截图列表、预览、复制到剪贴板） |
 | 资源中心 `workshop` | `workshop \| shaderDownload \| developerNews` | 工坊筛选浏览 / Modrinth·CurseForge 光影下载 / Steam 新闻 + 翻译 |
 | 模组管理 `mods` | `lua \| jar` | Lua 加载顺序与启停（启用行标题旁显示当前位次 `#N`，即 `default.txt` 的 mods 块顺序）、JAR 审批决策与冲突分析 |
 | 设置 `settings` | `about \| general \| gameOptions \| toolbox \| logs \| modLoader \| startup \| experimental \| developer` | 关于、通用、游戏设置（`options.ini` 行级编辑）、百宝箱、日志、模组加载器（加载器方案 + 该方案加载器的状态与安装）、启动、实验性、开发者选项 |
@@ -126,9 +128,9 @@ pzm/
 
 ### 5.2 `App.tsx` 的组织方式
 
-* 全部状态集中在单个 `App()` 组件里的 ~110 个 `useState`/`useRef`（游戏进程、覆盖层、内存、模组列表与多选集合、工坊筛选与请求序号、新闻翻译进度、背景图、扫描进度……）。
+* 全部状态集中在单个 `App()` 组件里的 ~257 个 `useState` / 62 个 `useRef`（游戏进程、覆盖层、内存、模组列表与多选集合、工坊筛选与请求序号、新闻翻译进度、背景图、扫描进度……）。
 * 大块 UI 先在各分支里构造为变量（`launchContent`、`overviewContent`、`shotsContent`、`shaderpacksContent`、`resourceCenterContent`、`modsContent`、`settingsContent`），最后按 `activePage` 条件渲染。
-* 组件内定义了一批局部子组件：`ToastViewport`、`MediaPanel`、`ShotThumbnail`、`WorkshopTagPicker`、`WorkshopDropdown`、`ResourceDownloadBrowser`、`BackgroundThumbnail`、`JarModPoster`、`LuaModPoster`、`ModBatchBar`、`ZombieBuddyLoaderPanel`、`BackgroundMenu`、`WindowTitlebar`。
+* 原先组件内定义的局部子组件大多已迁出到 `src/components/`（`App.tsx` 只 import：`WindowTitlebar`、`MediaPanel`、`ShotThumbnail`、`WorkshopTagPicker`、`BackgroundThumbnail`、`JarModPoster`、`LuaModPoster` 等），边界见 [refactor-modules.md](refactor-modules.md)。
 * 竞态处理习惯：长请求用 `useRef` 存**请求序号**（`workshopRequestId`、`developerNewsRequestId`）或扫描 id（`jarScanIdRef`、`workshopBackgroundScanIdRef`），回包时比对后丢弃过期结果；后端扫描通过事件流式推进度。
 * 过渡/动画：`pageTransitionPhase` 控制页面进出，`launchCooldown`/`gameWindowReady` 驱动启动按钮左滑与停止按钮划入。
 
@@ -145,10 +147,22 @@ pzm/
 | [launchArgs.ts](../src/launchArgs.ts) | 默认启动参数 `["-agentlib:zbNative", "--"]` 与拼接 |
 | [externalLinks.ts](../src/externalLinks.ts) | 工坊链接：优先 `steam://openurl/…`，回退 https |
 | [overlayInjection.ts](../src/overlayInjection.ts) | `inject_overlay` 的封装 + 开发期默认 DLL 路径 `../overlay-dll/target/x86_64-pc-windows-msvc/release/pz_overlay.dll` |
+| [gameOptionsUi.ts](../src/gameOptionsUi.ts) | 游戏设置页纯逻辑：值类型分类（开关/数字/文本）、搜索过滤、布尔解析 |
+| [memoryClean.ts](../src/memoryClean.ts) | 「立即清理一次」任务的采样与完成判定（按物理内存先降后升的走势判断，不用后端瞬时返回值） |
+| [memorySettings.ts](../src/memorySettings.ts) | 内存默认值（物理内存一半、取整 GB）与滑杆上下限常量 |
+| [sessionEnd.ts](../src/sessionEnd.ts) | 游戏停止事件的展示判定与模态框文案（正常退出 / Java 崩溃 / 原生崩溃 / 外部终止） |
+| [steamRelay.ts](../src/steamRelay.ts) | Steam 网络加速（中转）的前端纯逻辑：中转地址归一化、图片 CDN 主机白名单、模式选项 |
+| [taskHistory.ts](../src/taskHistory.ts) | 任务中心落盘模型：历史条数上限、tasks.json 条目清洗（`sanitizeSavedTasks`） |
+| [launchMusicUi.ts](../src/launchMusicUi.ts) | 启动音乐播放器纯逻辑：状态规整、音量换算、`m:ss` 格式化、进度百分比 |
+| [shaderpackConfigUi.ts](../src/shaderpackConfigUi.ts) | 光影包配置弹窗纯逻辑：控件类型推断、初始值/预设预填、覆写 diff、MC `§` 格式码解析 |
+| [modWorkshop.ts](../src/modWorkshop.ts) | 模组的创意工坊链接拼装（`steam://openurl` → https 回退） |
+| [paginationUi.ts](../src/paginationUi.ts) | 分页条页码计算（首末页 + 当前页及前后各一页） |
+| [versioning.ts](../src/versioning.ts) | 与后端 `versioning.rs` 对应的类型和纯展示函数（进度/阶段/ETA/版本标签） |
+| [shaderpackSearch.ts](../src/shaderpackSearch.ts) | 已安装光影包的封面搜索词生成（文件名拆候选词，供资源中心搜封面图标） |
 
 ### 5.4 前端调用后端的方式
 
-统一 `invoke<T>("命令名", { camelCase 参数 })`，事件用 `listen`。前端一共用到 ~45 个命令（与注册清单一致）。约定：
+统一 `invoke<T>("命令名", { camelCase 参数 })`，事件用 `listen`。后端注册了 141 条命令（清单见 6.7，以 `generate_handler!` 实际为准）。约定：
 
 * 后端 `Err(String)` 会被 Tauri 原样抛出，前端统一转成 `Error` 后交给 Toast；Toast 全部自动退场（普通 3 秒、错误 8 秒，底部进度条即倒计时），历史进通知中心可回看；`success` / `info` 只在开发者模式显示，`error` 与 `notice`（如背景音乐自动播放提示）两种始终显示；
 * 二进制媒体（海报/截图/背景）走 `invoke<ArrayBuffer>` 拿字节，再在组件里转 Blob URL；
@@ -160,18 +174,27 @@ pzm/
 
 | 模块 | 职责 | 备注 |
 | --- | --- | --- |
-| [lib.rs](../src-tauri/src/lib.rs) | Steam 发现、配置改写与备份事务、模组管理、背景/截图/光影、class 注解扫描、全部命令注册 | 单一巨石文件，~90 个内联测试 |
+| [lib.rs](../src-tauri/src/lib.rs) | Steam 发现、配置改写与备份事务、模组管理、背景/截图/光影、class 注解扫描、全部命令注册 | 内联测试已拆到 `tests.rs`（142 个；各领域模块另有自带测试，src-tauri 合计 299 个 `#[test]`） |
 | [workshop.rs](../src-tauri/src/workshop.rs) | Steam 创意工坊爬虫（`APP_ID=108600`，无 API Key，HTML/JSON 解析，**300s 内存缓存**） | 与 `python/app.py` 原型同源 |
 | [resource.rs](../src-tauri/src/resource.rs) | Modrinth + CurseForge 光影资源检索 | 注释明确对齐 PCL2 的 `DlSourceModGet` |
 | [downloader.rs](../src-tauri/src/downloader.rs) | 多线程分块 HTTP 下载（`RANGE`/`CONTENT-RANGE`）+ 进度事件 | 供光影下载器使用 |
 | [news.rs](../src-tauri/src/news.rs) | Steam 新闻 API + 正文清洗，切分成可翻译片段 | 夹具 `tests/fixtures/news_split_cases.json` |
-| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（命令上限与前端均为 **20 句/批**，`TRANSLATION_BATCH_SIZE` = `BATCH_SIZE` = `JOIN_BATCH` = 20，三处必须同步；单条 ≤2000 字；超 2000 字的批次会先按 20 句 / 2000 字重切再拼），默认引擎链：Google `translate_a/single` → 必应（手机版 `cn.bing.com` 页取 IG/IID/token，再 POST `ttranslatev3`，单段 ≤1000 字自动切分）→ MyMemory（按文字系统猜源语言）；**每 20 句拼成一段发一次引擎请求**，拼接译文按 `\n` 拆回，**行数对不上（必应 LLM 后端偶尔合并换行）或引擎全败时整组作废，退回逐句并发（4 句一波）补翻**——曾因"15 句拼接失败后逐句串行重试"慢到像"没在翻译"；「通用 › 翻译引擎」可手动指定优先引擎（`translationEngine`：auto/bing/google/mymemory/relay，默认 google），指定引擎排链首、失败后按默认链回退；relay（`steam-relay` 的 `/translate` → 本机 Argos，只接 zh/en/ru）仅在手动指定时在批级先试。必应走**独立的 no-proxy 客户端**（系统代理/境外出口会被必应判成机房 IP 直接 401，参考实现也是直连），失败只静默 60 秒（切换引擎会立即解除）；Google / relay 失败熔断 10 分钟。译文缓存键 = (原文, 语言, 引擎偏好)，条目 **10 分钟过期**：切换引擎后会重新翻译，不会拿旧引擎结果冒充；故障期间回退引擎的结果也不会永久顶替已恢复的引擎（否则必应恢复后仍永远命中 MyMemory 的旧缓存）。`engine == "none"`（引擎全败）的结果不进缓存。任一引擎从可用转入熔断时向 launcher.log 写一条带原因的日志（如「必应」：引导失败 / HTTP 401 / 429 / 响应异常），熔断期内的重复失败不重复记录；网络链路另有手动冒烟测试 `cargo test bing_live -- --ignored --nocapture`（必应 bootstrap → ttranslatev3）与 `cargo test translate_batch_live -- --ignored --nocapture`（整条命令管线）
+| [news_translation.rs](../src-tauri/src/news_translation.rs) | 批量翻译（命令上限与前端均为 **20 句/批**，`TRANSLATION_BATCH_SIZE` = `BATCH_SIZE` = `JOIN_BATCH` = 20，三处必须同步；单条 ≤2000 字；超 2000 字的批次会先按 20 句 / 2000 字重切再拼），默认引擎链：Google `translate_a/single` → 必应（手机版 `cn.bing.com` 页取 IG/IID/token，再 POST `ttranslatev3`，单段 ≤1000 字自动切分）→ MyMemory（按文字系统猜源语言）；**每 20 句拼成一段发一次引擎请求**，拼接译文按 `\n` 拆回，**行数对不上（必应 LLM 后端偶尔合并换行）或引擎全败时整组作废，退回逐句并发（4 句一波）补翻**——曾因"15 句拼接失败后逐句串行重试"慢到像"没在翻译"；「通用 › 翻译引擎」可手动指定优先引擎（`translationEngine`：auto/bing/google/mymemory，默认 google），指定引擎排链首、失败后按默认链回退；relay（`steam-relay` 的 `/translate` → 本机 Argos，只接 zh/en/ru）已从可选引擎下线，不是可保存的选项，管线里保留的批级代码不再被选中。必应走**独立的 no-proxy 客户端**（系统代理/境外出口会被必应判成机房 IP 直接 401，参考实现也是直连），失败只静默 60 秒（切换引擎会立即解除）；Google / relay 失败熔断 10 分钟。译文缓存键 = (原文, 语言, 引擎偏好)，条目 **10 分钟过期**：切换引擎后会重新翻译，不会拿旧引擎结果冒充；故障期间回退引擎的结果也不会永久顶替已恢复的引擎（否则必应恢复后仍永远命中 MyMemory 的旧缓存）。`engine == "none"`（引擎全败）的结果不进缓存。任一引擎从可用转入熔断时向 launcher.log 写一条带原因的日志（如「必应」：引导失败 / HTTP 401 / 429 / 响应异常），熔断期内的重复失败不重复记录；网络链路另有手动冒烟测试 `cargo test bing_live -- --ignored --nocapture`（必应 bootstrap → ttranslatev3）与 `cargo test translate_batch_live -- --ignored --nocapture`（整条命令管线）
 | [overlay.rs](../src-tauri/src/overlay.rs) | 注入入口：路径校验、进程轮询（优先 `ProjectZomboid64.exe`，其次 `javaw.exe`，都找不到时按窗口标题 `Project Zomboid` **精确匹配**兜底——无 Xbox 服务的机器上游戏进程显示为 wsappx，按进程名找不到）、重复注入检测 | 编译期二选一注入后端 |
 | `overlay_inject_win32.rs` / `overlay_inject_dll_syringe.rs` | 两套等价后端，对外都是 `inject_dll(pid, dll_path)` | 后者需 nightly |
 | [overlay_session.rs](../src-tauri/src/overlay_session.rs) | 会话编排：等窗口 → 注入 → 解析控制台 → 写状态文件 → 判定完成 → 发停止事件；并提供游戏进程查询/停止命令；顺带记录「检测到窗口 → 移除覆盖层」的启动时长（落盘 `startup-timing.json`，发 `startup-timing` 事件，`startup_timing` 命令读回） | ⚠️ 正在大改 |
 | [memclean.rs](../src-tauri/src/memclean.rs) | 系统内存状态（`GlobalMemoryStatusEx`）与工作集清理（`SetProcessWorkingSetSizeEx(-1,-1)`，等价 `EmptyWorkingSet`）；激进模式追加系统级四步（`MemoryEmptyWorkingSets` / `SetSystemFileCacheSize(-1,-1,0)` / `MemoryFlushModifiedList` / `MemoryPurgeStandbyList`）；静默清理后台线程；`is_elevated` / `restart_as_admin` 管提权 | 形态对齐 PCL2 的「内存优化」；清理**跳过游戏进程与自身** |
 | [task_store.rs](../src-tauri/src/task_store.rs) | 任务中心落盘：tasks.json 的 `load_saved_tasks` / `save_tasks`（不透明 JSON 文档，模型由前端持有）；非对象条目丢弃、裁剪到 200 条、临时文件 + 改名原子写；读失败按无历史处理并写 WARN | 前端清洗在 `src/taskHistory.ts` 的 `sanitizeSavedTasks` |
-| `main.rs` | 仅 `pzmanager_lib::run()` | 5 行 |
+| `game_options.rs` | 游戏设置 `options.ini` 的行级读取与修改（每项粗略中文名、按小标题分组） | 写前备份到 `.pzmanager\game-options-backups\`，游戏运行中只读 |
+| `steam_relay.rs` | Steam 请求的中转（镜像）源管理：工坊浏览/详情/新闻三端点按设置模式给出「直连/中转」候选并顺序尝试；Steam 图片 CDN 主机白名单 | 设置 › 通用 › Steam 网络加速 |
+| `offline_workshop.rs` | 离线启动的创意工坊模组映射：目录联接（junction）把工坊模组映射进 `Zomboid\mods`，游戏退出即清理 | 见 6.3 的离线启动说明 |
+| `mod_compat.rs` | 启动前模组兼容性预检：比对 Java 模组字节码类引用与游戏 jar 类表，提前报告引用已消失类的模组 | 缓存 `.pzmanager/mod-compat-cache.json`；`check_mod_compatibility` / `disable_mods_for_launch` |
+| `launcher_log.rs` | 启动器日志：追加写入 `.pzmanager/logs/launcher.log`（分级、默认只记启动器关键事件） | `read_launcher_log` 等命令 |
+| `feedback.rs` | 「设置 › 关于 › 反馈信息」：收集启动器/覆盖层日志与用户描述上传中转服务器（`POST /feedback`） | `submit_feedback` / `list_submitted_feedback` |
+| `update.rs` | 启动器更新检查：读静态更新源 `https://pzmapi.sanyec.top/api/latest.json`（`UPDATE_FEED_URL`） | `check_launcher_update` |
+| `versioning.rs` | 游戏版本隔离引擎（方案 D：母文件 + 增量链）：扫描 / CDC 增量 / 清单 / 还原 / 校验 | 见 [version-isolation.md](version-isolation.md) |
+| `mod_versioning.rs` | 模组版本隔离：把 `versioning.rs` 引擎按「每个模组一条独立版本链」复用；含整合包（modpacks）记录 | — |
+| `main.rs` | 仅 `pzmanager_lib::run()` | 6 行 |
 
 ### 6.2 Steam 发现链
 
@@ -386,7 +409,7 @@ javaCrash（被捕获的 "Exception thrown" 行触发），已改为只认未捕
 * 工坊浏览：`browse_workshop`（排序/必需与排除标签/分页/搜索词），`workshop_options` 返回可选项（含标签表），结果 5 分钟内存缓存。
 * 工坊详情（列表项右键 →「在窗口内打开」）：`fetch_workshop_item_detail` 调 `ISteamRemoteStorage/GetPublishedFileDetails`，取 `description`（新版接口叫 `file_description`，两个都认）里的 BBCode 原文走 `bbcode_to_html` + `add_translation_spans` 切段，前端再复用 `translate_developer_news_batch` 分批翻译、按 `sid` 回填 HTML（`replaceNewsTranslation`）。标题和正文共用一套 sid 方案（`w<id>_title` / `w<id>_t<node>_s<idx>`），所以标题会跟着一起翻译；工坊标题是纯文本，**不做** BBCode 剥离，否则 `[B42]` 这类后缀会被吃掉。
 * 光影下载：`fetch_shader_resources` / `fetch_shader_resource_files` 走 Modrinth 优先、CurseForge 兜底；`download_shader_file` 多线程下载到 `%USERPROFILE%\Zomboid\viewpoint-shaderpacks`，进度用事件推送。
-* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。翻译引擎可在「通用 › 翻译引擎」（`settings.json` 的 `translationEngine`）手动指定，没写过 / 坏值按 `google` 处理；默认链是**Google → 必应 → MyMemory**：Google 不可用（被墙 / 超时，熔断 10 分钟）时落到必应，必应走手机版 `cn.bing.com` 的 `ttranslatev3`（国内直连、质量好于 MyMemory；单次文本按 900 字切段，令牌过期/401 自动刷新重试一次，失败熔断 60 秒），再不行落到 MyMemory。手动指定某个引擎时它排链首，失败后按默认链回退其余引擎；「中转翻译」（relay，`{relay}/translate` → 本机 Argos）已从可选引擎下线：设置页不再提供该选项，旧配置里的 `relay` 在读设置时按坏值回落 `google`；管线里的 relay 代码保留但不再被选中，缓存里旧的中转译文仍显示为「中转翻译」。翻译来源在新闻卡片上按占比显示（`relay` 标为「中转翻译」，`bing` 标为「必应」）。
+* 新闻：`fetch_developer_news` 取 Steam 新闻并切成片段，`translate_developer_news_batch` 按批翻译，前端按 `sid` 回填 HTML（`replaceNewsTranslation`）。目标语言来自设置里的全局项「通用 › 翻译语言」（`settings.json` 的 `translationLanguage`，取值只认 `zh-CN`/`zh-TW`/`en`/`ja`/`ko`/`ru`，读设置时会归一化并回落默认），开发者新闻与创意工坊详情共用这一份，页面内不再各自放语言下拉。翻译引擎可在「通用 › 翻译引擎」（`settings.json` 的 `translationEngine`）手动指定，没写过 / 坏值按 `google` 处理；默认链是**Google → 必应 → MyMemory**：Google 不可用（被墙 / 超时，熔断 10 分钟）时落到必应，必应走手机版 `cn.bing.com` 的 `ttranslatev3`（国内直连、质量好于 MyMemory；单次文本按 1000 字切段，令牌过期/401 自动刷新重试一次，失败熔断 60 秒），再不行落到 MyMemory。手动指定某个引擎时它排链首，失败后按默认链回退其余引擎；「中转翻译」（relay，`{relay}/translate` → 本机 Argos）已从可选引擎下线：设置页不再提供该选项，旧配置里的 `relay` 在读设置时按坏值回落 `google`；管线里的 relay 代码保留但不再被选中，缓存里旧的中转译文仍显示为「中转翻译」。翻译来源在新闻卡片上按占比显示（`relay` 标为「中转翻译」，`bing` 标为「必应」）。
 
 ### 6.6 背景图与截图/光影
 
@@ -399,25 +422,34 @@ javaCrash（被捕获的 "Exception thrown" 行触发），已改为只认未捕
 * 光影包配置覆写（`shaderpack_config.rs`，**默认关闭**）：`settings.json` 的 `shaderpackOverrideEnabled` 为开时才会在启动前写 `viewpoint-live.properties`；默认关闭状态下光影包页点「配置」会先弹确认框说明「接管期间游戏内修改不会保存」，同意后才把开关置真并打开配置面板。「设置 › 通用 › 启动器接管光影管理」可随时关闭，关闭后启动不再覆写任何光影配置文件（若还留着上次未还原的备份，启动时会先恢复原文件）。
 光影包配置覆写（`shaderpack_config.rs`）：光影包页每包「配置」弹窗的选项检测**照搬 Viewpoint `IrisOptions` 的方法**——扫描 zip 内源码（.vsh/.fsh/.gsh/.csh/.tcs/.tes/.glsl；`shaders/` 根与子目录都算，包根支持一层顶层目录包裹 `Wrapper/shaders/…`）里的三类声明：`#define NAME // 注释` / `//#define NAME`（注释掉 = 默认关）为开关、`#define NAME 值 // 注释 [允许值...]` 为取值、`const int|float|bool NAME = 值; // [允许值]` 为常量，再合并 `shaders.properties` 的 `profile.*` 预设 / `sliders` 滑块 / 顶层默认值声明（`read_pack_shader_meta`，源码声明的注释作为说明兜底）。`shaders.properties` 的解析语义照 Iris 1.7.6 逆向结果：`OrderBackedProperties extends java.util.Properties`，即完整 Java `Properties.load` 规则（`\` 续行折叠——BSL/Bliss 的 screen 布局全靠它、`#`/`!` 注释、空白/`=`/`:` 分隔符、`\uXXXX` 等转义）。`shaders/lang/*.lang` 把参数名 / 取值 / 预设替换成用户能看懂的描述。弹窗内可**切换描述语言**（`read_shaderpack_config` 的 `lang` 参数，切换只换标签不动已改的值）：默认中文（`zh_CN` → `zh_TW`），没有中文回退 `en_US` → 包里第一个 .lang；键大小写不敏感兜底，数值匹配自动去尾零，`option.*`/`option.*.comment`/`value.*.*`/`profile.*`；取值标签兼容**按值**（BSL：`value.shadowMapResolution.512=…`）与**按序号**（Bliss：`value.RESOURCEPACK_SKY.0=…`，序号 = 允许值列表下标）两种键形态，缺失的键按 MC 语义用 `en_US.lang` 键级回退。lang 标签里可能带 MC `§` 彩字/格式码：前端 `parseMinecraftFormatting`（`shaderpackConfigUi.ts`）按 Java 版语义解析渲染（颜色码 §0-§f 会禁用既有格式、§r 全重置、格式码叠加保留颜色、未知码字面保留），`McText` 组件渲染彩色 span；原生 `<option>` / title 等渲染不了样式的场合用 `stripMinecraftFormatting` 剥码留文字；纯格式码标签按"没有标签"回退原值。**界面为 Iris 同款分页配置**：解析 `screen=` 主页与 `screen.<name>=` 子屏布局（token 解析照 Iris `OptionMenuElement.create`：参数名 / `[子屏]` / `<empty>` / `<profile>`，`screen.<name>.columns` 列数，没写 screen 时单页铺开全部参数），弹窗内网格分页（每页 5 行 × 列数，**分页条常驻**——分页设计强制适用于所有光影包）、子屏进栈导航 + 返回、`‹ x/y ›` 翻页；token 解析不了（引用未检测到的参数、`<profile>` 但无预设）时按 Iris `OptionMenuContainer` 的**逐元素 try/catch 跳过该元素**（记 launcher.log 警告），菜单照常构建；布局里没列出的参数（MC_NORMAL_MAP / FSH / VSH 等内部 define）保持隐藏——Iris 的 GUI 只渲染布局里列出的元素；**分页形态强制**：没有 `shaders.properties` 的纯源码包（EclipseShaders 类）或过滤后所有页为空时，强制合成截图同款的按钮分页——参数 ≤10（2 列 × 5 行）直接单页铺开，超过则主页变成"第 N 页"按钮页（`auto_page_N` + label），点进去才是该页参数网格；`profile.*` 预设支持**继承**（`profile.Medium=profile.Low …` 展开被继承预设的参数值）。覆写值存 `.pzmanager/shaderpack-overrides.json`。`launch_project_zomboid` 在 `apply_launch_loader` 之后、拉起 Steam 之前调 `apply_shaderpack_overrides_for_launch()`：游戏运行中跳过（Viewpoint 退出时会重写整个文件）、先还原上次遗留备份，再对 `viewpoint-live.properties` 做**行级覆写**——只碰 `minecraft.<packId>.*` / `minecraftProfile.<packId>`，保留注释、顺序与换行风格，`camera.*`/`pack.*`/`graphics.*` 等 Viewpoint 自身键一字不动（键分类与拆分规则见模块注释，packId 优先用 live 文件已观测键反查、按文件名 sanitize 兜底）。写入走 备份（`.pzmanager/viewpoint-live-backups/`，整文件 + manifest，保留 5 份）→ `apply_file_transaction` 原子替换 → 回读校验，失败用备份还原。覆写成功后启动 `pz-shaderpack-restore` 监听线程（`overlay_session.rs`）：等游戏进程出现 → 等退出（24h 兜底）→ 整文件还原；启动器中途退出则由下次启动的覆写流程先还原遗留备份。
 
-### 6.7 命令参考（⚠️ 快照自 `lib.rs` 的 `generate_handler!`；实际条数以代码为准）
+### 6.7 命令参考（⚠️ 快照自 `lib.rs` 的 `generate_handler!`，共 141 条；实际条数以代码为准）
 
 | 域 | 命令 |
 | --- | --- |
-| 环境/设置/启动（18） | `detect_project_zomboid`、`get_system_memory_mb`、`get_app_settings`、`save_memory_limit`、`save_developer_mode`、`save_steam_account_hidden`、`save_translation_language`、`save_font_contrast`、`save_mod_loader_scheme`、`save_fast_launch`、`set_background_path`、`save_shader_download_settings`、`launch_project_zomboid`、`save_native_titlebar` |
-| 内存清理（7） | `save_silent_memory_cleanup`、`save_clean_memory_on_launch`、`save_aggressive_memory_clean`、`get_memory_status`、`clean_memory_now`、`is_launcher_elevated`、`restart_as_admin` |
-| 一键安装/配置（3） | `install_zombie_buddy`、`install_pz_optimization`、`configure_viewpoint_three_d` |
-| 模组管理（8） | `start_zombie_buddy_jar_scan`、`list_lua_mods`、`set_lua_mod_enabled`、`set_lua_mods_enabled`、`save_lua_mod_order`、`set_zombie_buddy_mod_decision`、`set_zombie_buddy_mods_decisions`、`apply_jar_mod_file_state` |
-| 媒体读取（4） | `read_background`、`read_jar_mod_poster`、`read_lua_mod_poster`、`read_viewpoint_shot` |
-| 背景图（4） | `list_custom_backgrounds`、`scan_workshop_backgrounds`、`start_workshop_background_scan`、`import_custom_background` |
-| 截图/光影（8） | `list_viewpoint_shots`、`list_viewpoint_shaderpacks`、`import_viewpoint_shaderpack`、`delete_viewpoint_shaderpack`、`read_shaderpack_config`、`get_shaderpack_overrides`、`save_shaderpack_override`、`clear_shaderpack_override` |
-| 资源中心（7） | `workshop_options`、`browse_workshop`、`fetch_workshop_item_detail`、`resource_options`、`fetch_shader_resources`、`fetch_shader_resource_files`、`fetch_minecraft_versions` |
-| 下载器（1） | `download_shader_file` |
-| 新闻（2） | `fetch_developer_news`、`translate_developer_news_batch` |
-| 覆盖层（4） | `overlay::inject_overlay`、`overlay_session::start_overlay_session`、`overlay_session::check_game_process`、`overlay_session::stop_game_process` |
-| 版本隔离（12） | `get_version_status`、`save_version_store_path`、`save_version_parallel`、`start_version_snapshot`、`start_version_capture`、`start_version_restore`、`start_version_verify`、`start_version_rebase`、`cancel_version_operation`、`delete_version`、`delete_version_through`、`is_project_zomboid_running` |
 | 启动器日志（4） | `read_launcher_log`、`clear_launcher_log`、`open_launcher_log_folder`、`log_frontend_message` |
-| 启动时长（1） | `startup_timing`（最近一次「窗口 → 主菜单」时长 + 上一次，供右下角对比显示） |
+| 环境/进程（6） | `detect_project_zomboid`、`get_system_memory_mb`、`is_launcher_elevated`、`is_project_zomboid_running`、`restart_as_admin`、`steam_process_running` |
 | 任务中心持久化（2） | `load_saved_tasks`、`save_tasks`——tasks.json（`%USERPROFILE%\Zomboid\.pzmanager\`）的不透明 JSON 文档读写：模型由前端持有，后端只裁剪到 200 条并原子写（临时文件 + 改名）；读失败按无历史任务处理并写 WARN 日志。启动时前端经 `sanitizeSavedTasks`（`src/taskHistory.ts`）清洗条目，退出时还在 `running` 的任务标成「失败：应用退出时任务被中断」（光影下载保留 `request`，重启后重试按钮仍可用）；前端在任务变化后 0.6s 防抖落盘，首次装载完成前不写，装载后把任务 id 计数器拨到历史最大号之后避免撞 id |
+| 设置（26） | `get_app_settings`、`save_memory_limit`、`save_developer_mode`、`save_steam_account_hidden`、`save_pause_music_on_launch`、`save_launch_from_game_files`、`save_translation_language`、`save_translation_engine`、`save_font_contrast`、`save_blur_strength`、`save_font_scale`、`save_font_family`、`save_overlay_background_color`、`save_window_size`、`restore_default_window_size`、`save_native_titlebar`、`save_launch_arguments`、`save_auto_join_settings`、`save_mod_loader_scheme`、`save_jar_mod_use_disk_state_on_startup`、`save_fast_launch`、`set_wallpaper_effect`、`set_launch_music_state`、`save_privacy_consent`、`clear_privacy_consent`、`clear_launcher_user_data` |
+| 游戏设置（2） | `read_game_options`、`save_game_option`（`options.ini` 行级读写） |
+| 内存清理（5） | `save_silent_memory_cleanup`、`save_clean_memory_on_launch`、`save_aggressive_memory_clean`、`get_memory_status`、`clean_memory_now` |
+| Steam 中转/代理（4） | `save_steam_relay_settings`、`save_steam_proxy`、`detect_steam_proxy`、`ping_steam_relay` |
+| 极速启动/启动时长（2） | `fast_launch_cache_status`、`startup_timing`（最近一次「窗口 → 主菜单」时长 + 上一次，供右下角对比显示） |
+| 游戏版本（16） | `get_version_status`、`get_active_version_label`、`get_version_store_path`、`save_version_system_drive_notice_dismissed`、`save_version_store_path`、`save_version_parallel`、`start_version_snapshot`、`start_version_capture`、`start_version_restore`、`start_version_verify`、`start_version_rebase`、`cancel_version_operation`、`delete_version`、`delete_version_through`、`rename_version`、`save_version_include_mods` |
+| 模组版本（15） | `list_mod_version_targets`、`get_mod_version_status`、`start_mod_version_snapshot`、`start_mod_version_capture`、`start_mod_version_restore`、`start_mod_version_verify`、`start_mod_version_rebase`、`delete_mod_version`、`delete_mod_version_through`、`list_mod_version_packs`、`delete_mod_version_pack`、`rename_mod_version_pack`、`start_mod_version_save_all`、`start_mod_version_save_changes`、`start_mod_version_restore_pack` |
+| 反馈/启动器更新（3） | `submit_feedback`、`list_submitted_feedback`、`check_launcher_update` |
+| 背景图（6） | `set_background_path`、`list_custom_backgrounds`、`scan_workshop_backgrounds`、`start_workshop_background_scan`、`import_custom_background`、`read_background` |
+| 海报（2） | `read_jar_mod_poster`、`read_lua_mod_poster` |
+| JAR 扫描/模组兼容预检（4） | `start_zombie_buddy_jar_scan`、`find_jar_mods_with_injection_item`、`check_mod_compatibility`、`disable_mods_for_launch` |
+| Lua 模组（5） | `list_lua_mods`、`set_lua_mod_enabled`、`set_lua_mods_enabled`、`save_lua_mod_order`、`auto_sort_lua_mods` |
+| JAR 决策（3） | `set_zombie_buddy_mod_decision`、`set_zombie_buddy_mods_decisions`、`apply_jar_mod_file_state` |
+| 模组预设（4） | `list_mod_presets`、`save_mod_preset`、`apply_mod_preset`、`delete_mod_preset` |
+| 一键安装/配置（4） | `install_zombie_buddy`、`install_pz_optimization`、`uninstall_pz_optimization`、`configure_viewpoint_three_d` |
+| 启动（1） | `launch_project_zomboid` |
+| 覆盖层（4） | `overlay::inject_overlay`、`overlay_session::start_overlay_session`、`overlay_session::check_game_process`、`overlay_session::stop_game_process` |
+| 截图（4） | `list_viewpoint_shots`、`read_viewpoint_shot`、`list_steam_screenshots`、`read_steam_screenshot` |
+| 光影/覆写（8） | `save_shaderpack_override_enabled`、`list_viewpoint_shaderpacks`、`import_viewpoint_shaderpack`、`delete_viewpoint_shaderpack`、`read_shaderpack_config`、`get_shaderpack_overrides`、`save_shaderpack_override`、`clear_shaderpack_override` |
+| 资源中心（9） | `workshop_options`、`browse_workshop`、`fetch_workshop_item_detail`、`resource_options`、`fetch_shader_resources`、`fetch_shader_resource_files`、`save_shader_download_settings`、`download_shader_file`、`fetch_minecraft_versions` |
+| 新闻（2） | `fetch_developer_news`、`translate_developer_news_batch` |
 
 版本隔离的存储模型、增量格式与还原流程见 [version-isolation.md](version-isolation.md)。
 
@@ -481,7 +513,7 @@ javaCrash（被捕获的 "Exception thrown" 行触发），已改为只认未捕
 | `steamcommunity.com/workshop/browse/` | 工坊浏览（HTML 解析，5 分钟缓存） | [workshop.rs](../src-tauri/src/workshop.rs) |
 | `api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1` | 工坊项目详情（正文 BBCode 与标签） | [workshop.rs](../src-tauri/src/workshop.rs) |
 | `api.steampowered.com/ISteamNews/GetNewsForApp/v2` + `store.steampowered.com` | 开发者新闻 | [news.rs](../src-tauri/src/news.rs) |
-| `translate.googleapis.com`、`cn.bing.com`（手机版翻译页 + `/ttranslatev3`）、`translate.yandex.net` | 新闻 / 创意工坊 / 翻译器翻译（中转不可用 / 语种不支持时的回退） | [news_translation.rs](../src-tauri/src/news_translation.rs) |
+| `translate.googleapis.com`、`cn.bing.com`（手机版翻译页 + `/ttranslatev3`）、`api.mymemory.translated.net` | 新闻 / 创意工坊 / 翻译器翻译（默认链 Google → 必应 → MyMemory） | [news_translation.rs](../src-tauri/src/news_translation.rs) |
 | 中转地址的 `/translate`（relay → 本机 Argos） | 中 / 英 / 俄离线翻译 | [news_translation.rs](../src-tauri/src/news_translation.rs)、[steam_relay.rs](../src-tauri/src/steam_relay.rs)、`steam-relay/translate/` |
 | `api.modrinth.com/v2`、`api.curseforge.com/v1` | 光影资源检索 | [resource.rs](../src-tauri/src/resource.rs) |
 
@@ -489,7 +521,7 @@ javaCrash（被捕获的 "Exception thrown" 行触发），已改为只认未捕
 
 ### 10.1 Rust（`src-tauri`）
 
-`lib.rs` 末尾的 `#[cfg(test)] mod tests`（~90 个测试）覆盖：VDF/转义路径解析、`Mod.info` 大小写不敏感解析、JSON/BAT/Steam 启动项改写与内存替换、agent 归并、写入事务回滚、工坊背景流式回调、class 注解识别、JAR 扫描、`default.txt` 块替换与依赖排序、JAR 状态持久化等。夹具在 `src-tauri/tests/fixtures/`（由 `news_translation.rs` 以 `include_str!` 引入）。
+`lib.rs` 末尾的 `#[cfg(test)] mod tests` 把内联测试拆到了 `tests.rs`（142 个测试）；加上各领域模块自带的测试，src-tauri 合计 299 个 `#[test]`，覆盖：VDF/转义路径解析、`Mod.info` 大小写不敏感解析、JSON/BAT/Steam 启动项改写与内存替换、agent 归并、写入事务回滚、工坊背景流式回调、class 注解识别、JAR 扫描、`default.txt` 块替换与依赖排序、JAR 状态持久化、版本隔离、模组兼容预检等。夹具在 `src-tauri/tests/fixtures/`（由 `news_translation.rs` 以 `include_str!` 引入）。
 
 ```powershell
 cd src-tauri; cargo test
@@ -497,15 +529,15 @@ cd src-tauri; cargo test
 
 ### 10.2 前端（`tests/`）
 
-17 个 `*.test.ts`，**全是"源码文本断言"**：把 [App.tsx](../src/App.tsx)、[App.css](../src/App.css)、`tauri.conf.json`、`capabilities/default.json` 读成字符串，再用正则断言实现细节（例如 `.pz-mod-row.is-selected` 的 border-color、`role="checkbox"` 出现 2 次、Vite 端口 10002、窗口尺寸等）。
+75 个 `*.test.ts`（348 条用例），**全是"源码文本断言"**：把 [App.tsx](../src/App.tsx)、[App.css](../src/App.css)、`tauri.conf.json`、`capabilities/default.json` 读成字符串，再用正则断言实现细节（例如 `.pz-mod-row.is-selected` 的 border-color、`role="checkbox"` 出现 2 次、Vite 端口 10002、窗口尺寸等）。另有 [sourceText.ts](../tests/sourceText.ts) 统一拼接源码文本。
 
 * 优点：零依赖、能锁死样式/配置契约，不需要 DOM 环境。
 * 代价：**重构 CSS 或改 JSX 就会碎**，而且它们验证不了运行时行为；写这类断言时优先锁定"语义契约"（ARIA 角色、必需属性、配置项），少锁具体色值与选择器组合。
 
-运行方式（`package.json` 里**没有 test 脚本**，Node ≥22 自带 TS 类型剥离）：
+运行方式（`package.json` 已有 `"test": "node --test \"tests/*.test.ts\""` 脚本，Node ≥22 自带 TS 类型剥离）：
 
 ```powershell
-node --test tests/          # 或 node --test tests/*.test.ts
+npm test                    # 或 node --test tests/*.test.ts
 ```
 
 ## 11. 构建与运行
@@ -521,19 +553,19 @@ node --test tests/          # 或 node --test tests/*.test.ts
 
 前置条件：Windows + MSVC 工具链（覆盖层 DLL 必须有 `cl.exe`）；Rust stable 即可（默认注入后端）；`npm install`。
 
-⚠️ 打包缺口：`tauri.conf.json` 的 `bundle` 没有配置 `resources`，覆盖层 DLL 不会被打进安装包，前端默认路径也是指向开发产物的相对路径。若要发布"开箱即用"的版本，需要把 DLL 作为资源打包并改 `overlayInjection.ts` 的默认路径解析。
+打包现状：`tauri.conf.json` 的 `bundle.resources` 已把 `pz_overlay.dll` 打进安装包（与 exe 同目录）；前端默认路径仍指向开发产物的相对路径，但后端解析 DLL 路径时会按「exe 目录 + 文件名」兜底（`overlay.rs` 的 `exe_dir_candidate`），命中即可覆盖安装包场景。
 
 ## 12. 已知问题与技术债
 
-1. **巨石文件**：`App.tsx`（~5.3k 行 / 单组件 ~110 个 state）与 `lib.rs`（~6.6k 行）都是单人可维护性的上限区。抽取方向已存在（`src/*.ts` 纯函数模块、`src-tauri/src/*.rs` 子模块），继续沿着它拆即可：UI 按页面拆组件、`lib.rs` 按域拆模块（Steam 发现 / 配置改写 / 模组 / 背景 / 命令层）。
+1. **巨石文件**：`App.tsx`（~1.1 万行 / 单组件 ~257 个 state）与 `lib.rs`（~3.7k 行）都是单人可维护性的上限区。抽取方向已存在（`src/*.ts` 纯函数模块、`src-tauri/src/*.rs` 子模块），继续沿着它拆即可：UI 按页面拆组件、`lib.rs` 按域拆模块（Steam 发现 / 配置改写 / 模组 / 背景 / 命令层）。
 2. **源码文本断言**：见 10.2，重构成本被放大。
-3. **没有 test 脚本、没有 CI**：`npm test` 不存在，Rust 与 TS 测试都要手敲命令；也没有任何自动化门禁。
-4. **文档漂移**：[overlay-injection.md](overlay-injection.md) 的 6.1 节仍描述已删除的 `src-tauri/src/overlay_ui.rs`；[superpowers/](superpowers) 的 plan/spec 停留在"只做路径探测"阶段。本文第 7 节已标注现状。
-5. **窗口尺寸自相矛盾**：`tauri.conf.json` 里 `width: 808 < minWidth: 970`，首开窗口会被立刻撑到 970。
+3. **没有 CI**：前端测试有 `npm test`（`node --test "tests/*.test.ts"`），Rust 测试要手敲 `cd src-tauri; cargo test`；没有任何自动化门禁。
+4. **文档漂移**：[overlay-injection.md](overlay-injection.md) 的 6.1 节已重写为「游戏窗口内部绘制」现状（旧 `src-tauri/src/overlay_ui.rs` 独立窗口方案已废弃，文中仅作历史标注）；[superpowers/](superpowers) 的 plan/spec 停留在"只做路径探测"阶段。本文第 7 节已标注现状。
+5. **窗口尺寸矛盾（已修复）**：早期版本 `tauri.conf.json` 里 `width: 808 < minWidth: 970` 会让首开窗口被立刻撑大；当前 `width`/`minWidth` 均为 840、`height`/`minHeight` 均为 560，不再矛盾。
 6. **磁盘占用**：`src-tauri/target` ~75.8 GB、`backup/` ~2.3 GB、`overlay-dll/target-verify` ~92 MB，都在工作区内且未提交。
-7. **版本控制薄弱**：分支 `master`，历史只有 `1 / 2 / 3 / 4` 四条无信息提交，其余全部未提交；`backup/<时间戳>-<slug>/` 实际上承担了版本历史。另外仓库因 ACL 归属问题需要 `git -c safe.directory=F:/pzmanager …` 才能执行 git 命令。
+7. **版本控制**：当前在 `main` 分支，已有真实的提交历史（不再依赖 `backup/<时间戳>-<slug>/` 人工快照承担版本历史，该目录已移除；`backup/*` 系列 git 分支保留作历史归档）。
 8. **`policy=allow-all` 的既定取舍**：见 6.3 的警告，属于"有意为之但必须知情"的行为。
-9. **命令注册是单点**：`run()` 里 49 条命令集中在一个 `generate_handler!`，新增命令必须同时改这里和前端类型，容易漏。
+9. **命令注册是单点**：`run()` 里 141 条命令集中在一个 `generate_handler!`，新增命令必须同时改这里和前端类型，容易漏。
 10. **覆盖层依赖前端相对路径与 `%TEMP%` 文件**：调试方便（可以直接看/改状态文件），但状态文件协议由两边各自实现，改一边必须同步另一边（第 8 节是当前契约清单）。
 
 ## 13. 常见改动入口（速查）

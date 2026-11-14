@@ -25,7 +25,7 @@
 | 缓存一致性状态（提示用，不再自动删） | ✅ 完成 | `fast_launch_cache_matches()` / `fast_launch_cache_status()`；设置页状态行在不一致时提示重建 |
 | 短路点定位 | ✅ 已确认 | `PatchEngine.collectPatches`（22 处 classgraph 引用；`Loader`/`Agent`/`Patch` 均为 0） |
 | 字节码工具链（读 class、包装式改写） | ✅ 完成并在真实类上验证 | 对真实 `PatchEngine.class` 逐字节断言"原实现不变、方法数 +1、包装体正确" |
-| 辅助类 `FastLaunchBridge`（含真原生回退） | ✅ 完成 | Java 源码在仓库、已编译 7.4 KB、`include_bytes!` 嵌入 DLL |
+| 辅助类 `FastLaunchBridge`（含真原生回退） | ✅ 完成 | Java 源码在仓库、已编译 12103 字节、`include_bytes!` 嵌入 DLL |
 | **把改写后的字节码送进 JVM** | ✅ **已打通** | `GetEnv` 卡点根因 = 函数表指针层级写错；修好后 `-agentpath` 全链路跑通，harness 实测 `collectPatches$pzm` 存在、缓存命中直接返回、未命中回退原生实现 |
 | **游戏里真的生效** | ⚠️ **两轮实测都没加速，两个不同的根因都已修；最后一次复验被中断，尚未证明生效** | 第一轮：`PatchEngine` 在 hook 生效前就被 ZB 定义了（§6.2）；第二轮：hook 生效且 `PatchEngine` 确实被改写，但**缓存路径对每个模组都落空**（类名格式 bug，§6.3） |
 | 启动器接线（`-agentpath:` 写进游戏启动文件，且必须最前） | ✅ 完成 | `launch_project_zomboid` → `apply_launch_loader(..., fast_launch_agent)`；关开关/换方案/DLL 不存在时自动摘掉；`-agentpath:` 排在 `vmArgs[0]`（有单测） |
@@ -40,19 +40,25 @@
 
 ## 3. 实现结构（代码在哪）
 
-### 3.1 启动器侧（`src-tauri/src/lib.rs`）
+### 3.1 启动器侧
 
-* `FAST_LAUNCH_CACHE_FORMAT = 1`、`FAST_LAUNCH_CACHE_FILE = "zb-prescan-cache.json"`；
-* `FastLaunchCache` / `FastLaunchCacheMod`（serde，`camelCase`：`format` / `generatedAt` / `modSetHash` / `mods[]`，每个模组含 `modName` / `jarPath` / `basePackage` / `jarHash` / `patchClasses` / `luaClasses`）；
-* `build_fast_launch_cache(mods, generated_at)`：**只收 `!disabled && decision == Some(true)`**，按 jar 路径排序后算指纹；类名经 `binary_class_name()` 落成**二进制名（点号）**——扫描给的是内部名（斜杠），注入器要用 `Class.forName`，见 §6.3；
-* `fast_launch_fingerprint()`：FNV-1a（不引哈希依赖）；
-* `write_fast_launch_cache_at()` / `read_fast_launch_cache_at()` / `fast_launch_cache_matches()`；
-* `fast_launch_enabled()`（读设置）、`fast_launch_cache_path()`、`should_write_fast_launch_cache(refresh_cache, cache_exists)`（**缓存持久化策略**：显式刷新才重建）、`invalidate_fast_launch_cache()`（保留给测试/将来"清空缓存"入口，**不再自动调用**）；
-* 命令：`save_fast_launch(enabled)`、`fast_launch_cache_status()`、`start_zombie_buddy_jar_scan(refresh_cache)`；
-* 扫描流程（`start_zombie_buddy_jar_scan`）在收集完结果后，**只有 `should_write_cache && fast_launch_enabled()` 才写缓存**（写失败只记日志、不打断扫描）；
-* **`-agentpath:` 接线**：
+启动器侧实现已从 `lib.rs` 拆分到多个模块（`lib.rs` 仍以 `pub(crate) use fast_launch::*;` 转发，调用路径不变）：
+
+* **`src-tauri/src/fast_launch.rs`**（缓存构造/读/写/一致性 + 备份恢复）：
+  * `FAST_LAUNCH_CACHE_FORMAT = 1`、`FAST_LAUNCH_CACHE_FILE = "zb-prescan-cache.json"`；
+  * `FastLaunchCache` / `FastLaunchCacheMod`（serde，`camelCase`：`format` / `generatedAt` / `modSetHash` / `mods[]`，每个模组含 `modName` / `jarPath` / `basePackage` / `jarHash` / `patchClasses` / `luaClasses`）；
+  * `build_fast_launch_cache(mods, generated_at)`：**只收 `!disabled && decision == Some(true)`**，按 jar 路径排序后算指纹；类名经 `binary_class_name()` 落成**二进制名（点号）**——扫描给的是内部名（斜杠），注入器要用 `Class.forName`，见 §6.3；
+  * `fast_launch_fingerprint()`：FNV-1a（不引哈希依赖）；
+  * `write_fast_launch_cache_at()` / `read_fast_launch_cache_at()` / `fast_launch_cache_matches()`；
+  * `fast_launch_enabled()`（读设置）、`fast_launch_cache_path()`、`should_write_fast_launch_cache(refresh_cache, cache_exists)`（**缓存持久化策略**：显式刷新才重建）、`invalidate_fast_launch_cache()`（保留给测试/将来"清空缓存"入口，**不再自动调用**）；
+  * 命令：`save_fast_launch(enabled)`、`fast_launch_cache_status()`；
+  * 备份恢复：`write_fast_launch_backup_at()` / `create_fast_launch_backup_at()` / `restore_fast_launch_backup_at()`（见下文"打开开关先备份、关掉开关先恢复"）；
+* **`src-tauri/src/jar_mods.rs`**（扫描写缓存接线）：
+  * `start_zombie_buddy_jar_scan(refresh_cache)`：收集完结果后，**只有 `should_write_cache && fast_launch_enabled()` 才写缓存**（写失败只记日志、不打断扫描）；
+* **`src-tauri/src/launch_options.rs`**（`-agentpath:` 参数归一化）：
   * `FAST_LAUNCH_AGENT_PREFIX = "-agentpath:"`、`is_fast_launch_agent_token()`、`normalize_fast_launch_agent_tokens()`（保证"有且只有一条、且必须排在最前"，`None` = 全摘掉）、`fast_launch_agent_for_batch()`（路径含空格时不写 `.bat`）；
-  * `launch_project_zomboid(memory_mb, launch_args, fast_launch_dll_path)`：只有 `fastLaunch == true` **且** 方案是 `zombieBuddy` **且** `resolve_fast_launch_agent_path()` 确认 DLL 存在时才写；否则传 `None` 摘干净（`-agentpath` 指向的文件不存在会让 **JVM 直接启动失败**，绝不能留）；
+* **`src-tauri/src/lib.rs`**（启动接线）：
+  * `launch_project_zomboid(memory_mb, launch_args, fast_launch_dll_path, launch_source)`：只有 `fastLaunch == true` **且** 方案是 `zombieBuddy` **且** `resolve_fast_launch_agent_path()` 确认 DLL 存在时才写；否则传 `None` 摘干净（`-agentpath` 指向的文件不存在会让 **JVM 直接启动失败**，绝不能留）；第 4 参 `launch_source: Option<String>` 支持区分启动来源（`None` / `"steam"` = Steam 协议启动，`"files"` = 从游戏文件启动）；
   * `resolve_fast_launch_agent_path()` 复用 `overlay::imp::normalize_dll_path()`（绝对化 + 存在性 + 扩展名校验）；
   * 写入位置：`ProjectZomboid64.json` 的 `vmArgs[0]`（**必须在最前**，否则 hook 赶不上 ZB 载入 PatchEngine，见 §6.2），必要时也写 `ProjectZomboid64.bat` 的 `SET _JAVA_OPTIONS`；**不写 Steam LaunchOptions**（那是空白分隔的字符串，路径带空格会坏）；
   * 写入仍走原有备份 + 事务（`game_path/.pzmanager-backups/<时间戳>/`、`apply_file_transaction`）；
@@ -99,10 +105,12 @@ Agent_OnLoad：
   → GetVersionNumber(87) 自检 → 布局自检日志
   → AddCapabilities(141)：bit26(can_generate_all_class_hook_events) + bit37(can_retransform_classes)
   → SetEventCallbacks(121)：槽 0 = VMInit、槽 4 = ClassFileLoadHook
+  → SetEventNotificationMode(1, ENABLE, CLASS_FILE_LOAD_HOOK=54)
+    （**类加载 hook 在 Agent_OnLoad 里就打开**，不等 VMInit——它晚于所有 agent 的 onload）
   → SetEventNotificationMode(1, ENABLE, VM_INIT=50)
 VMInit 回调（本线程已是 Java 线程，直接给 JNIEnv）：
   → DefineClass(5) 送进 pzm/fastlaunch/FastLaunchBridge（定义到 bootstrap 加载器）
-  → SetEventNotificationMode(1, ENABLE, CLASS_FILE_LOAD_HOOK=54)
+    （VMInit 只负责 DefineClass，不再负责打开类加载 hook）
 ZombieBuddy 自己加载 PatchEngine 时：
   → ClassFileLoadHook 回调按类名命中 → wrap_collect_patches() 就地包装
   → Allocate(45) 分配输出缓冲 → 交回改写后的字节（失败即放行原字节）
@@ -342,7 +350,7 @@ DebugLog 里也能直接看到 `[ZB] Scanned 1079 classes in package viewpoint` 
 
 **当前状态（交接时的准确口径）**：
 * 代码改动与单测都已完成（`overlay-dll` 14 passed；`src-tauri` 109 passed / 2 ignored；前端 32 通过 / 4 既有基线失败）；
-* DLL 三个变体（debug / release / release+x86_64-pc-windows-msvc）都已重新构建（`FastLaunchBridge.class` 7935 字节已 `include_bytes!` 进 DLL）；
+* DLL 三个变体（debug / release / release+x86_64-pc-windows-msvc）都已重新构建（`FastLaunchBridge.class` 12103 字节已 `include_bytes!` 进 DLL）；
 * **但"真实形状缓存 → 命中"这条端到端复验没有跑完**（最后一次 harness 命令被用户中断）。
   下一次必须补跑：harness（缓存用真实形状）或直接进游戏看
   `[bridge] 命中缓存：…` 与 `[ZB] Scanned` 是否消失。
@@ -427,7 +435,10 @@ DebugLog 里也能直接看到 `[ZB] Scanned 1079 classes in package viewpoint` 
 
 * `scan_java_mod_jar`：收声明包**及其子包**的类（ClassGraph 的 `acceptPackages` 本来就是递归的）；
 * 新增 `zombie_buddy_loader_cache_mod_at` / `fast_launch_cache_mods_at`：把加载器本体并进缓存；
-  **「刷新 JAR 列表」写缓存与设置页校验指纹走同一个函数**，否则指纹永远对不上（"一直显示建议重建"）；
+  设置页校验指纹走 `fast_launch_cache_status` → `fast_launch_cache_mods_at`；「刷新 JAR 列表」写缓存
+  （`start_zombie_buddy_jar_scan`，`jar_mods.rs`）目前是**内联重做**（扫描回调收集结果 + 手工追加
+  `zombie_buddy_loader_cache_mod_at`），并未调用 `fast_launch_cache_mods_at`。当前两条路径输入等价，
+  指纹不会错；但"同一函数"的防漂移保证已不存在——改扫描口径时两边必须一起改，否则会出现"一直显示建议重建"。
   界面上的 JAR 模组列表仍然排除它（`excludes_zombie_buddy_loader_from_jar_mod_candidates` 不变）；
 * 桥接类 `loadCache`：按**类自己的包**建索引（不再用 `basePackage`）；
   `lookup(pkg)`：返回 `pkg` **及其子包**里的类（对齐 ClassGraph 语义）。
@@ -574,14 +585,17 @@ java.lang.LinkageError: loader 'app' attempted duplicate class definition for
 ## 9. 文件清单（本功能相关）
 
 ```
-src-tauri/src/lib.rs                     缓存构造/读/写/一致性/失效、save_fast_launch、fast_launch_cache_status、
-                                         -agentpath 归一化 + launch_project_zomboid 接线 + resolve_fast_launch_agent_path
+src-tauri/src/fast_launch.rs             缓存构造/读/写/一致性/失效、save_fast_launch、fast_launch_cache_status、备份恢复
+src-tauri/src/launch_options.rs          -agentpath 归一化（FAST_LAUNCH_AGENT_PREFIX / normalize_fast_launch_agent_tokens /
+                                         is_fast_launch_agent_token / fast_launch_agent_for_batch）
+src-tauri/src/jar_mods.rs                扫描写缓存接线（start_zombie_buddy_jar_scan）
+src-tauri/src/lib.rs                     launch_project_zomboid 接线 + resolve_fast_launch_agent_path
 src/App.tsx                              设置 › 实验性功能 分类、极速启动开关、缓存状态行、启动时把 DLL 路径透传给后端
 overlay-dll/Cargo.toml                   新增 jni = "0.21"（不开 invocation feature）
 overlay-dll/src/fastlaunch.rs            table_fn（三种环境的函数表）、agent 链路、VMInit 回调、类加载回调、远程调试链路
 overlay-dll/src/classfile.rs             字节码工具链 + 包装式装配（10 个单测）
 overlay-dll/java/pzm/fastlaunch/FastLaunchBridge.java   辅助类（`binaryName()` 内部名→二进制名、命中/未命中都记日志、**默认强制模式不回退** + `PZM_FAST_LAUNCH_ALLOW_FALLBACK` 逃生开关）
-overlay-dll/java/classes/pzm/fastlaunch/FastLaunchBridge.class   编译产物（7935 字节，`include_bytes!` 用；改了 .java 必须重跑 javac）
+overlay-dll/java/classes/pzm/fastlaunch/FastLaunchBridge.class   编译产物（12103 字节，`include_bytes!` 用；改了 .java 必须重跑 javac）
 docs/architecture.md §6.3                规格、短路点、下标表、环境指针层级结论、缓存生命周期
 docs/fast-launch-status.md               本文档
 ```

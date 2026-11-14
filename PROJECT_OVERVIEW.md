@@ -18,12 +18,12 @@ Lua/JAR 模组、订阅与浏览创意工坊、下载光影包、翻译开发者
 
 | 维度 | 内容 |
 | --- | --- |
-| 形态 | Tauri 2 桌面应用（WebView2 + Rust），无边框自绘标题栏，单窗口 970×600 |
+| 形态 | Tauri 2 桌面应用（WebView2 + Rust），无边框自绘标题栏，单窗口 840×560 |
 | 前端 | React 19 + TypeScript ~6 + Chakra UI 3 + Emotion + FontAwesome 7，Vite 8 |
-| 后端 | Rust 2021（`src-tauri`），61 个 Tauri 命令、7 类事件 |
+| 后端 | Rust 2021（`src-tauri`），141 个 Tauri 命令、13 类事件 |
 | 注入器 | 独立 cdylib `pz_overlay`（`overlay-dll`），MinHook + OpenGL + GDI + JVMTI |
 | 平台 | 仅 Windows x64（游戏、启动器、DLL 必须同为 64 位） |
-| 规模 | 主要手写文件约 **2.8 万行**（见 §4.3），Rust 测试 **131 条**，前端契约测试 **36 条** |
+| 规模 | 主要手写文件约 **7 万行**（见 §4.3），Rust 测试 **330 条**（src-tauri 299 + overlay-dll 24 + overlay-core 7），前端契约测试 **348 条**（75 个文件） |
 | 界面语言 | 简体中文（代码注释、错误文案、UI 文案一致） |
 
 ---
@@ -69,15 +69,18 @@ Lua/JAR 模组、订阅与浏览创意工坊、下载光影包、翻译开发者
 ```text
 pzmanager
 ├─ 启动          账户 / 内存 / 启动参数 / 背景 / 启动·停止 / 覆盖层会话 / 启动时长
-├─ 支持库        路径探测 / ZombieBuddy / PZ Optimization / Viewpoint 3D
-├─ 截图管理      Viewpoint 截图列表、预览、复制到剪贴板
-├─ 光影管理      ZIP 导入（拖拽/选择）、删除、图标与搜索词
-├─ 版本          游戏版本 / 模组版本 / 历史版本 / 备份位置
+├─ 游戏管理      版本页（versions）六个分段：概览（game）/ 模组版本（mods）/ 历史版本（history）/
+│                支持库（support：路径探测 / ZombieBuddy / PZ Optimization / Viewpoint 3D）/
+│                光影包（shaderpacks：ZIP 导入、删除、图标与搜索词）/ 截图（shots：预览与复制）
 ├─ 资源中心      创意工坊 / 光影下载 / 开发者新闻
 ├─ 模组管理      Lua 模组 / JAR 模组 / 模组预设
 ├─ 设置          关于 / 通用 / 百宝箱 / 日志 / 模组加载器 / 启动
 └─ 任务中心      标题栏右侧，光影下载 + 版本保存/还原等后台任务；任务落盘 tasks.json，启动恢复历史（退出时在跑的标为中断）
 ```
+
+一级导航共 5 项（`src/app/constants.ts` 的 `navigationItems`；`ActivePage` 见 `src/app/types.ts`）。
+旧的 `overview` / `shots` / `shaderpacks` 一级页已重定向进版本页（`App.tsx` 的 `navigateToPage`），
+作为版本页内的 `VersionTab` 分段。
 
 ### 2.2 功能清单与成熟度
 
@@ -90,7 +93,7 @@ pzmanager
 | 启动时长对比 | 启动页、设置 › 百宝箱 › 控制台 | 稳定 | 落盘 `startup-timing.json`，显示与上次的差值 |
 | ZombieBuddy 安装 | 支持库 / 设置 › 模组加载器 | 稳定 | 复制 DLL/JAR + 三处启动配置 |
 | PZ Optimization 安装/更新/卸载 | 支持库 | 稳定（依赖第三方安装器） | 调 `install.ps1`，按 revision 比对 |
-| Viewpoint 3D 一键配置 | 支持库 | 稳定 | 三个工坊模组齐备才可点 |
+| Viewpoint 3D 一键配置 | 支持库 | 稳定 | Viewpoint 与 ZombieBuddy 两个工坊模组齐备才可点 |
 | Viewpoint 截图 | 截图管理 | 稳定 | 复制走 Canvas → RGBA → 剪贴板 |
 | 光影包导入/删除 | 光影管理 | 稳定 | 拖拽或文件选择，不覆盖同名 |
 | 创意工坊浏览 | 资源中心 › 创意工坊 | 稳定 | 排序/时间/标签/搜索/分页，300 s 缓存 |
@@ -152,7 +155,7 @@ pzmanager
 | --- | --- | --- |
 | ZombieBuddy 模组加载器 | 已安装 / 待安装 / 模组未下载（缺哪个文件会列出） | 只报状态并指路「设置 › 模组加载器」，不在本页安装 |
 | PZ Optimization | 已安装 / 可更新 / 可安装 / 未下载 | 一键安装、更新、卸载；显示来源与前后 revision |
-| Viewpoint 3D 模组配置 | 三个模组是否都订阅：Project Viewpoint、ZombieBuddy、Temporary 42.21 Fix | 一键配置 3D 模组（复制 libs、写入启动文件） |
+| Viewpoint 3D 模组配置 | 两个模组是否都订阅：Viewpoint、ZombieBuddy | 一键配置 3D 模组（复制 libs、写入启动文件） |
 
 开发者模式额外显示 Steam 安装路径与创意工坊路径。
 
@@ -339,7 +342,7 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 
 #### 3.8.1 翻译器
 
-- 自定义文本翻译，复用新闻/工坊那条链路（Google 优先、Yandex 兜底）；
+- 自定义文本翻译，复用新闻/工坊那条链路（Google → 必应 → MyMemory）；
 - 上限 20,000 字符，单块 1,800 字符；按行拆分，空行原样保留，纯符号/数字行不送翻译；
 - Ctrl + Enter 触发；显示「正在翻译 x / y 段」与翻译来源徽章；可一键复制译文；
 - 目标语言默认跟随全局设置，在本页改动只影响本页。
@@ -429,26 +432,28 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 
 | 文件 | 行数 | 职责 |
 | --- | ---: | --- |
-| [src/App.tsx](src/App.tsx) | 8,434 | 剩余 `App()`：状态、effects、IPC 与页面编排 |
-| `src/app/` + `src/components/` | 3,358 | 类型、常量、纯函数与独立组件（见 [docs/refactor-modules.md](docs/refactor-modules.md)） |
-| [src/App.css](src/App.css) | 4,535 | 手写样式，类名统一 `pz-` 前缀 |
-| [src-tauri/src/lib.rs](src-tauri/src/lib.rs) | 2,736 | 命令注册、启动流程、工坊/资源命令、应用初始化 |
-| `src-tauri/src/` 领域模块 | 5,642 | launch_options / settings / steam / backgrounds / lua_mods / jar_mods / support / fast_launch / viewpoint_media / fs_utils |
-| [src-tauri/src/tests.rs](src-tauri/src/tests.rs) | 2,438 | 原 `lib.rs` 内联测试 |
-| [src-tauri/src/overlay_session.rs](src-tauri/src/overlay_session.rs) | 1,162 | 会话状态机、控制台解析、进度估算、启动时长 |
-| [overlay-dll/src/classfile.rs](overlay-dll/src/classfile.rs) | 1,478 | class 文件解析与字节码改写 |
-| [overlay-dll/src/fastlaunch.rs](overlay-dll/src/fastlaunch.rs) | 1,502 | JVMTI agent、函数表、类加载 hook |
-| [overlay-dll/src/ui.rs](overlay-dll/src/ui.rs) | 1,000 | GDI DIB 绘制与 GL 纹理上传 |
-| [overlay-dll/src/lib.rs](overlay-dll/src/lib.rs) | 889 | DllMain、MinHook、GL 覆盖、停止事件 |
-| [src-tauri/src/resource.rs](src-tauri/src/resource.rs) | 846 | Modrinth / CurseForge 检索与镜像 |
-| [src-tauri/src/workshop.rs](src-tauri/src/workshop.rs) | 804 | 工坊爬虫、SSR 解析、详情 API |
-| [src-tauri/src/news_translation.rs](src-tauri/src/news_translation.rs) | 549 | 分段、批处理、Google/Yandex、缓存 |
-| [src-tauri/src/news.rs](src-tauri/src/news.rs) | 440 | 新闻 API、HTML 清洗、BBCode |
-| [src-tauri/src/memclean.rs](src-tauri/src/memclean.rs) | 362 | 内存状态、工作集清理、静默线程 |
-| [src-tauri/src/overlay.rs](src-tauri/src/overlay.rs) | 343 | 注入入口、路径校验、进程轮询、重复注入 |
-| [src-tauri/src/downloader.rs](src-tauri/src/downloader.rs) | 183 | Range 分块下载、进度事件、合并 |
+| [src/App.tsx](src/App.tsx) | 11,645 | 剩余 `App()`：状态、effects、IPC 与页面编排 |
+| `src/app/` + `src/components/` | 6,207 | 类型、常量、纯函数与独立组件（见 [docs/refactor-modules.md](docs/refactor-modules.md)） |
+| [src/App.css](src/App.css) | 5,700 | 手写样式，类名统一 `pz-` 前缀 |
+| [src-tauri/src/lib.rs](src-tauri/src/lib.rs) | 3,729 | 命令注册、启动流程、工坊/资源命令、应用初始化 |
+| `src-tauri/src/` 领域模块（32 个） | 24,795 | launch_options / settings / steam / steam_relay / backgrounds / lua_mods / jar_mods / support / fast_launch / viewpoint_media / fs_utils / versioning / mod_versioning / game_options / mod_compat / offline_workshop / launcher_log / feedback / update 等 |
+| [src-tauri/src/tests.rs](src-tauri/src/tests.rs) | 4,270 | 原 `lib.rs` 内联测试（`lib.rs` 末尾 `#[cfg(test)] mod tests;`） |
+| [src-tauri/src/versioning.rs](src-tauri/src/versioning.rs) | 3,947 | 游戏版本隔离引擎（含在领域模块合计内） |
+| [src-tauri/src/overlay_session.rs](src-tauri/src/overlay_session.rs) | 3,129 | 会话状态机、控制台解析、进度估算、启动时长 |
+| [overlay-dll/src/classfile.rs](overlay-dll/src/classfile.rs) | 1,477 | class 文件解析与字节码改写 |
+| [overlay-dll/src/fastlaunch.rs](overlay-dll/src/fastlaunch.rs) | 1,501 | JVMTI agent、函数表、类加载 hook |
+| [overlay-dll/src/ui.rs](overlay-dll/src/ui.rs) | 1,506 | GDI DIB 绘制与 GL 纹理上传 |
+| [overlay-dll/src/lib.rs](overlay-dll/src/lib.rs) | 1,051 | DllMain、MinHook、GL 覆盖、停止事件 |
+| `overlay-core/src/lib.rs` | 355 | 启动器与 DLL 共享的阶段/完成规则与模组行解析 |
+| [src-tauri/src/resource.rs](src-tauri/src/resource.rs) | 953 | Modrinth / CurseForge 检索与镜像 |
+| [src-tauri/src/workshop.rs](src-tauri/src/workshop.rs) | 848 | 工坊爬虫、SSR 解析、详情 API |
+| [src-tauri/src/news_translation.rs](src-tauri/src/news_translation.rs) | 1,497 | 分段、批处理、Google/必应/MyMemory、缓存 |
+| [src-tauri/src/news.rs](src-tauri/src/news.rs) | 456 | 新闻 API、HTML 清洗、BBCode |
+| [src-tauri/src/memclean.rs](src-tauri/src/memclean.rs) | 712 | 内存状态、工作集清理、静默线程 |
+| [src-tauri/src/overlay.rs](src-tauri/src/overlay.rs) | 491 | 注入入口、路径校验、进程轮询、重复注入 |
+| [src-tauri/src/downloader.rs](src-tauri/src/downloader.rs) | 283 | Range 分块下载、进度事件、合并 |
 
-合计约 2.83 万行（不含测试夹具与生成代码）。
+合计约 7.1 万行（不含测试夹具与生成代码）。
 
 ### 4.4 后端模块职责
 
@@ -464,22 +469,32 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 | `support.rs` | ZombieBuddy / PZ Optimization / Viewpoint 3D | — |
 | `fast_launch.rs` | 极速启动预扫描缓存与启动配置备份 | — |
 | `auto_join.rs` | 自动加入服务器：钩子 Lua 安装、一次性配置读写与清理 | 见 [docs/auto-join.md](docs/auto-join.md) |
+| `game_options.rs` | 游戏设置 `options.ini` 的解析与行级修改（写前备份） | 运行中只读 |
+| `task_store.rs` | 任务中心落盘：tasks.json 不透明 JSON 读写（裁剪 200 条、原子写） | 模型由前端持有 |
+| `steam_relay.rs` | Steam 请求的中转（镜像）源管理：工坊/详情/新闻三端点按模式切换直连与中转 | 设置 › Steam 网络加速 |
+| `offline_workshop.rs` | 离线启动的创意工坊模组目录联接（junction）映射与清理 | 见 §6.3 相关说明 |
+| `mod_compat.rs` | 启动前模组兼容性预检：Java 模组引用已消失的游戏类时提前报告 | 缓存 `mod-compat-cache.json` |
+| `launcher_log.rs` | 启动器日志 `logs/launcher.log` 的分级追加写入 | — |
+| `feedback.rs` | 反馈上传：收集启动器/覆盖层日志与用户描述发往中转服务器 `POST /feedback` | — |
+| `update.rs` | 启动器更新检查（`UPDATE_FEED_URL` = `https://pzmapi.sanyec.top/api/latest.json`） | — |
+| `versioning.rs` | 游戏版本隔离引擎：扫描 / CDC 增量 / 清单 / 还原 / 校验 | 见 [docs/version-isolation.md](docs/version-isolation.md) |
+| `mod_versioning.rs` | 模组版本隔离：按「每个模组一条独立版本链」复用 versioning 引擎 | — |
 | `viewpoint_media.rs` | Viewpoint 截图与光影包管理 | — |
 | `fs_utils.rs` | 文件写入、事务式替换、备份 | — |
 | `workshop.rs` | 工坊浏览（HTML/SSR 解析，无 API Key）、详情 API | 300 s 缓存 |
 | `resource.rs` | Modrinth + CurseForge 光影检索 | 对齐 PCL2 的 `DlSourceModGet` |
 | `downloader.rs` | 多线程分块下载 + 进度事件 | 供下载器与资源中心共用 |
 | `news.rs` | Steam 新闻 + 正文清洗 + 可翻译片段 | 夹具 `tests/fixtures` |
-| `news_translation.rs` | 批量翻译、HTML span 回填、缓存 | Google + Yandex |
+| `news_translation.rs` | 批量翻译、HTML span 回填、缓存 | Google + 必应 + MyMemory |
 | `overlay.rs` | 注入入口、路径规范化、进程轮询、重复注入检测 | 后端编译期二选一 |
 | `overlay_inject_win32.rs` / `..._dll_syringe.rs` | 等价注入后端 | 后者需 nightly |
 | `overlay_session.rs` | 等窗口 → 注入 → 解析控制台 → 写状态 → 判定完成 → 发停止事件 | 另有进程查询/停止命令 |
 | `memclean.rs` | 系统内存状态、工作集清理、静默循环 | 跳过游戏与自身 |
-| `main.rs` | 仅调用 `pzmanager_lib::run()` | 7 行 |
+| `main.rs` | 仅调用 `pzmanager_lib::run()` | 6 行 |
 
 ### 4.5 前端组织
 
-- **单组件 + 纯函数/组件模块**：`App()` 仍保留约 138 个 `useState` / 28 个 `useRef`，
+- **单组件 + 纯函数/组件模块**：`App()` 仍保留约 257 个 `useState` / 62 个 `useRef`，
   页面内容先构造成 `launchContent` / `overviewContent` / … 再按 `activePage` 渲染；
   顶层类型、常量、纯函数和独立组件已拆到 `src/app/` 与 `src/components/`，边界见
   [docs/refactor-modules.md](docs/refactor-modules.md)；
@@ -499,8 +514,8 @@ Steam 唤不起来时回退 https；本地模组没有工坊 ID，该项置灰�
 | 错误 | 后端 `Err(String)` 原样抛出；前端统一转 `Error` 后交给 Toast |
 | 二进制 | `tauri::ipc::Response` 返回字节，前端转 Blob |
 | 长任务 | 返回 `scanId` / `downloadId`，进度用事件推送 |
-| 事件 | 7 类：`overlay-session`、`overlay-zb-progress`、`startup-timing`、`jar-mod-scan-update`、`workshop-background-scan-update`、`shader-download-progress`、`memory-cleaned` |
-| 注册 | 61 条命令集中在 `lib.rs` 的 `generate_handler!`，新增命令必须同时改这里与前端调用 |
+| 事件 | 13 类：`overlay-session`（`phase` 会取 `game-exited` 等值）、`overlay-zb-progress`、`overlay-reject-warning`、`startup-timing`、`jar-mod-scan-update`、`workshop-background-scan-update`、`shader-download-progress`、`memory-cleaned`、`version-progress`、`version-restore-pzopt-warning`、`version-verified`、`mod-version-progress`、`mod-version-verified` |
+| 注册 | 141 条命令集中在 `lib.rs` 的 `generate_handler!`，新增命令必须同时改这里与前端调用 |
 
 完整命令清单见附录 B。
 
@@ -736,8 +751,9 @@ ProjectZomboid64.json vmArgs[0] = -agentpath:<pz_overlay.dll>
   `<span data-sid="...">`，译文按 sid 原位替换；
 - **批处理**：前端 20 句/批，后端再按 20 句或 2000 字符切批；超时 8 s、单次翻译 5 s；
 - **引擎**：Google `translate_a/single` →
-  必应（手机版 `cn.bing.com` 的 `ttranslatev3`，单段 ≤900 字切分）→ MyMemory；
-  中转离线翻译（只接 zh/en/ru）仅在「翻译引擎」手动指定时批级先试；
+  必应（手机版 `cn.bing.com` 的 `ttranslatev3`，独立 no-proxy 客户端，单段 ≤1000 字切分）→ MyMemory；
+  中转离线翻译（relay，只接 zh-CN/en/ru）不在默认链里，也不是可保存的引擎选项
+  （`TRANSLATION_ENGINES` 仅 auto/bing/google/mymemory），仅在 Steam 中转模式的批级预留路径中参与；
   失败各自熔断 10 分钟；结果记录引擎到 `engineTally`，前端展示占比；
 - **缓存**：`(语言, 文本) → (译文, 引擎)`，进程内 HashMap，避免重复请求。
 
@@ -802,7 +818,7 @@ ProjectZomboid64.json vmArgs[0] = -agentpath:<pz_overlay.dll>
 | `steamcommunity.com/workshop/browse/` | 工坊浏览（HTML/SSR 解析） | `workshop.rs` |
 | `api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1` | 工坊详情正文与标签 | `workshop.rs` |
 | `api.steampowered.com/ISteamNews/GetNewsForApp/v2` + `store.steampowered.com` | 开发者新闻 | `news.rs` |
-| `translate.googleapis.com`、`translate.yandex.net` | 翻译 | `news_translation.rs` |
+| `translate.googleapis.com`、`cn.bing.com`、`api.mymemory.translated.net` | 翻译 | `news_translation.rs` |
 | `api.modrinth.com/v2`、`api.curseforge.com/v1`、`mod.mcimirror.top`、`cdn.modrinth.com`、`edge.forgecdn.net` | 光影检索与下载 | `resource.rs` |
 | `piston-meta.mojang.com/mc/game/version_manifest_v2.json` | Minecraft 版本下拉 | `resource.rs` |
 
@@ -845,9 +861,10 @@ ProjectZomboid64.json vmArgs[0] = -agentpath:<pz_overlay.dll>
 
 | 层 | 规模 | 命令 | 覆盖 |
 | --- | ---: | --- | --- |
-| Rust（`src-tauri`） | 117 条 `#[test]` | `cd src-tauri; cargo test` | VDF/转义路径、mod.info 大小写、JSON/BAT/Steam 改写、agent 归并、事务回滚、工坊 SSR、class 注解、JAR 扫描、default.txt 块替换与依赖排序、预设、内存阈值 |
-| Rust（`overlay-dll`） | 14 条 | `cd overlay-dll; cargo test` | class 解析、包装式改写逐字节断言、异常表/StackMapTable、辅助类解析、缓存门禁 |
-| 前端 | 19 个文件 / 36 条 | `npm test` | 源码/配置契约：ARIA 角色、选择器、端口、窗口尺寸、能力白名单、预设逻辑等 |
+| Rust（`src-tauri`） | 299 条 `#[test]` | `cd src-tauri; cargo test` | VDF/转义路径、mod.info 大小写、JSON/BAT/Steam 改写、agent 归并、事务回滚、工坊 SSR、class 注解、JAR 扫描、default.txt 块替换与依赖排序、预设、版本隔离、模组兼容预检、内存阈值 |
+| Rust（`overlay-dll`） | 24 条 | `cd overlay-dll; cargo test` | class 解析、包装式改写逐字节断言、异常表/StackMapTable、辅助类解析、缓存门禁 |
+| Rust（`overlay-core`） | 7 条 | `cd overlay-core; cargo test` | 启动器与 DLL 共享的阶段/完成规则、模组行解析 |
+| 前端 | 75 个文件 / 348 条 | `npm test` | 源码/配置契约：ARIA 角色、选择器、端口、窗口尺寸、能力白名单、预设逻辑等 |
 
 **前端测试的性质**：全部是「把 `App.tsx` / `App.css` / 配置文件读成字符串再做正则断言」，
 零依赖、能锁死样式与配置契约，但重构 JSX/CSS 就容易碎，且验证不了运行时行为。写新断言时优先锁语义
@@ -873,25 +890,26 @@ ProjectZomboid64.json vmArgs[0] = -agentpath:<pz_overlay.dll>
 **环境要求**：Windows x64、Rust stable（默认后端）、Node ≥ 22（前端测试用类型剥离）、
 MSVC 工具链（覆盖层 DLL 的 MinHook C 源码需要 `cl.exe`）。
 
-**发布缺口**：`tauri.conf.json` 的 `bundle` 没有配置 `resources`，覆盖层 DLL 不会被打进安装包；
-前端默认 DLL 路径仍是开发期相对路径（`../overlay-dll/target/...`）。发布「开箱即用」版本需要
-把 DLL 作为资源打包，并持久化/解析它的安装路径。
+**覆盖层 DLL 打包**：`tauri.conf.json` 的 `bundle.resources` 已把 `pz_overlay.dll` 打进安装包；
+前端默认 DLL 路径仍是开发期相对路径（`../overlay-dll/target/...`），后端解析路径时会先按
+「exe 目录 + 文件名」兜底（`overlay.rs` 的 `exe_dir_candidate`），命中即可覆盖安装包场景。
 
 ---
 
 ## 11. 已知边界与技术债
 
-1. **剩余巨石**：`App.tsx` 仍有 8,434 行（`App()` 约 8.2k 行）；`lib.rs` 已降到 2,736 行，
-   测试另在 `tests.rs`（2,438 行）。顶层类型/常量/组件和 Rust 领域模块已拆出，目录与规则见
+1. **剩余巨石**：`App.tsx` 仍有 11,645 行（`App()` 约 1.1 万行）；`lib.rs` 3,729 行，
+   测试另在 `tests.rs`（4,270 行）。顶层类型/常量/组件和 Rust 领域模块已拆出，目录与规则见
    [docs/refactor-modules.md](docs/refactor-modules.md)；下一步按功能 hook 继续拆 `App()`，
    不要继续往单文件里堆代码。
 2. **源码文本断言**：重构成本被放大；见 §9。
 3. **极速启动未收敛**：游戏内加速未被证明，且有 duplicate class definition 崩溃；
    默认开关关闭，文档必须保持「实验性」措辞。
-4. **覆盖层 DLL 未打包**：发布包不含 DLL；开发期路径依赖工作目录与 exe 祖先目录探测。
+4. **覆盖层 DLL 已随包发布**：`bundle.resources` 打包 DLL，后端按 exe 目录兜底解析；
+   开发期路径仍依赖工作目录与 exe 祖先目录探测。
 5. **开发期 WebView2 数据目录硬编码**：`ensure_webview2_data_folder` 在 debug 下固定
    `F:\webview2-data\pzmanager`，换机器需要改代码。
-6. **命令注册单点**：61 条命令集中在一个 `generate_handler!`，新增命令容易漏改前端或漏测。
+6. **命令注册单点**：141 条命令集中在一个 `generate_handler!`，新增命令容易漏改前端或漏测。
 7. **平台限定**：非 Windows 目标直接编译失败（有意为之），因此也没有跨平台 CI 的可能。
 8. **文档漂移**：[docs/superpowers/](docs/superpowers/) 是早期「路径探测」阶段的计划，已过时；
    [docs/fast-launch-status.md](docs/fast-launch-status.md) 是过程记录，结论以本文 §5.4 为准。
@@ -920,7 +938,6 @@ MSVC 工具链（覆盖层 DLL 的 MinHook C 源码需要 `cl.exe`）。
 | `ZOMBIE_BUDDY_MOD_ID` / `ZOMBIE_BUDDY_WORKSHOP_ID` | `3619862853` | ZombieBuddy 加载器 |
 | `PZ_OPTIMIZATION_MOD_ID` | `3805285544` | PZ Optimization |
 | `VIEWPOINT_MOD_ID` | `3809306528` | Viewpoint |
-| `TEMPORARY_VIEWPOINT_FIX_MOD_ID` | `3807686870` | Temporary 42.21 Fix |
 | `ZOMBIE_BUDDY_AGENT` | `-agentlib:zbNative` | agent 前缀 |
 | `ZOMBIE_BUDDY_POLICY_AGENT` | `-agentlib:zbNative=policy=allow-all` | 强制策略 |
 | `MOD_LOADER_SCHEMES` | `["zombieBuddy", "none"]` | 加载器方案 |
@@ -932,45 +949,117 @@ MSVC 工具链（覆盖层 DLL 的 MinHook C 源码需要 `cl.exe`）。
 
 ---
 
-## 附录 B：Tauri 命令（61）
+## 附录 B：Tauri 命令（141）
 
-**环境 / 设置 / 启动（17）**
+快照自 `lib.rs` 的 `generate_handler!`，实际清单以代码为准。
 
-`detect_project_zomboid`、`get_system_memory_mb`、`get_app_settings`、`save_memory_limit`、
-`save_developer_mode`、`save_steam_account_hidden`、`save_translation_language`、`save_font_contrast`、
-`save_mod_loader_scheme`、`save_fast_launch`、`save_silent_memory_cleanup`、`save_clean_memory_on_launch`、
-`get_memory_status`、`clean_memory_now`、`fast_launch_cache_status`、`startup_timing`、`launch_project_zomboid`
+**日志（4）**
+
+`read_launcher_log`、`clear_launcher_log`、`open_launcher_log_folder`、`log_frontend_message`
+
+**环境 / 进程（6）**
+
+`detect_project_zomboid`、`get_system_memory_mb`、`is_launcher_elevated`、`is_project_zomboid_running`、
+`restart_as_admin`、`steam_process_running`
+
+**任务中心（2）**
+
+`load_saved_tasks`、`save_tasks`
+
+**设置（26）**
+
+`get_app_settings`、`save_memory_limit`、`save_developer_mode`、`save_steam_account_hidden`、
+`save_pause_music_on_launch`、`save_launch_from_game_files`、`save_translation_language`、
+`save_translation_engine`、`save_font_contrast`、`save_blur_strength`、`save_font_scale`、`save_font_family`、
+`save_overlay_background_color`、`save_window_size`、`restore_default_window_size`、`save_native_titlebar`、
+`save_launch_arguments`、`save_auto_join_settings`、`save_mod_loader_scheme`、
+`save_jar_mod_use_disk_state_on_startup`、`save_fast_launch`、`set_wallpaper_effect`、`set_launch_music_state`、
+`save_privacy_consent`、`clear_privacy_consent`、`clear_launcher_user_data`
+
+**游戏设置（2）**
+
+`read_game_options`、`save_game_option`
+
+**内存清理（5）**
+
+`save_silent_memory_cleanup`、`save_clean_memory_on_launch`、`save_aggressive_memory_clean`、
+`get_memory_status`、`clean_memory_now`
+
+**Steam 中转 / 代理（4）**
+
+`save_steam_relay_settings`、`save_steam_proxy`、`detect_steam_proxy`、`ping_steam_relay`
+
+**极速启动 / 启动时长（2）**
+
+`fast_launch_cache_status`、`startup_timing`
+
+**游戏版本（16）**
+
+`get_version_status`、`get_active_version_label`、`get_version_store_path`、
+`save_version_system_drive_notice_dismissed`、`save_version_store_path`、`save_version_parallel`、
+`start_version_snapshot`、`start_version_capture`、`start_version_restore`、`start_version_verify`、
+`start_version_rebase`、`cancel_version_operation`、`delete_version`、`delete_version_through`、
+`rename_version`、`save_version_include_mods`
+
+**模组版本（15）**
+
+`list_mod_version_targets`、`get_mod_version_status`、`start_mod_version_snapshot`、`start_mod_version_capture`、
+`start_mod_version_restore`、`start_mod_version_verify`、`start_mod_version_rebase`、`delete_mod_version`、
+`delete_mod_version_through`、`list_mod_version_packs`、`delete_mod_version_pack`、`rename_mod_version_pack`、
+`start_mod_version_save_all`、`start_mod_version_save_changes`、`start_mod_version_restore_pack`
+
+**反馈 / 启动器更新（3）**
+
+`submit_feedback`、`list_submitted_feedback`、`check_launcher_update`
 
 **背景（6）**
 
 `set_background_path`、`list_custom_backgrounds`、`scan_workshop_backgrounds`、`start_workshop_background_scan`、
 `import_custom_background`、`read_background`
 
-**模组（8）**
+**海报（2）**
 
-`start_zombie_buddy_jar_scan`、`list_lua_mods`、`set_lua_mod_enabled`、`set_lua_mods_enabled`、
-`save_lua_mod_order`、`set_zombie_buddy_mod_decision`、`set_zombie_buddy_mods_decisions`、`apply_jar_mod_file_state`
+`read_jar_mod_poster`、`read_lua_mod_poster`
+
+**JAR 扫描 / 模组兼容预检（4）**
+
+`start_zombie_buddy_jar_scan`、`find_jar_mods_with_injection_item`、`check_mod_compatibility`、
+`disable_mods_for_launch`
+
+**Lua 模组（5）**
+
+`list_lua_mods`、`set_lua_mod_enabled`、`set_lua_mods_enabled`、`save_lua_mod_order`、`auto_sort_lua_mods`
+
+**JAR 决策（3）**
+
+`set_zombie_buddy_mod_decision`、`set_zombie_buddy_mods_decisions`、`apply_jar_mod_file_state`
 
 **模组预设（4）**
 
 `list_mod_presets`、`save_mod_preset`、`apply_mod_preset`、`delete_mod_preset`
 
-**媒体读取（3）**
-
-`read_jar_mod_poster`、`read_lua_mod_poster`、`read_viewpoint_shot`
-
 **一键安装 / 配置（4）**
 
 `install_zombie_buddy`、`install_pz_optimization`、`uninstall_pz_optimization`、`configure_viewpoint_three_d`
+
+**启动（1）**
+
+`launch_project_zomboid`
 
 **覆盖层（4）**
 
 `overlay::inject_overlay`、`overlay_session::start_overlay_session`、`overlay_session::check_game_process`、
 `overlay_session::stop_game_process`
 
-**截图 / 光影（4）**
+**截图（4）**
 
-`list_viewpoint_shots`、`list_viewpoint_shaderpacks`、`import_viewpoint_shaderpack`、`delete_viewpoint_shaderpack`
+`list_viewpoint_shots`、`read_viewpoint_shot`、`list_steam_screenshots`、`read_steam_screenshot`
+
+**光影包 / 覆写（8）**
+
+`save_shaderpack_override_enabled`、`list_viewpoint_shaderpacks`、`import_viewpoint_shaderpack`、
+`delete_viewpoint_shaderpack`、`read_shaderpack_config`、`get_shaderpack_overrides`、`save_shaderpack_override`、
+`clear_shaderpack_override`
 
 **资源中心（9）**
 
@@ -990,13 +1079,19 @@ MSVC 工具链（覆盖层 DLL 的 MinHook C 源码需要 `cl.exe`）。
 
 | 事件 | 载荷要点 |
 | --- | --- |
-| `overlay-session` | `phase/message/pid/processName/zbLines/elapsedMs` |
+| `overlay-session` | `phase/message/pid/processName/zbLines/elapsedMs`（`phase` 会取 `game-exited` 等） |
 | `overlay-zb-progress` | `zbLines/phase/lastLine/elapsedMs` |
+| `overlay-reject-warning` | `string[]`：被游戏拒绝加载的模组 ID 列表 |
 | `startup-timing` | `lastMs/previousMs` |
 | `jar-mod-scan-update` | `scanId/status/scanned/total/item/error` |
 | `workshop-background-scan-update` | 同上结构 |
 | `shader-download-progress` | `downloadId/fileName/downloadedBytes/totalBytes` |
 | `memory-cleaned` | 清理报告（释放量、进程数、耗时） |
+| `version-progress` | `operationId/operation/status/phase/processedFiles/totalFiles/processedBytes/…` |
+| `version-restore-pzopt-warning` | `{ error }`：还原游戏版本后 PZ Optimization 自动重装失败 |
+| `version-verified` | `matchedVersionId/rootHash/message` |
+| `mod-version-progress` | 同 `version-progress` + `rootKey/rootPath` |
+| `mod-version-verified` | 同 `version-verified` |
 
 **状态文件格式**（`%TEMP%\pz_overlay_status.txt`）
 

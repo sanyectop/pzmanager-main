@@ -1,12 +1,16 @@
 # pzmanager
 
-Project Zomboid（僵尸毁灭工程）Windows 桌面启动器 + 模组管理器。基于 Tauri 2 + Rust + React 19 + TypeScript，负责 Steam 环境探测、启动链改写（内存上限 / ZombieBuddy agent 策略）、Lua 与 JAR 模组管理、Viewpoint 截图与光影包管理、创意工坊浏览与资源下载、开发者新闻翻译，以及游戏内加载覆盖层（注入 DLL + Hook OpenGL）。
+> 本文是旧版归档；最新说明以根目录 [README.md](../README.md) 为准。
+
+Project Zomboid（僵尸毁灭工程）Windows 桌面启动器 + 模组管理器。基于 Tauri 2 + Rust + React 19 + TypeScript，负责 Steam 环境探测、启动链改写（内存上限 / ZombieBuddy agent 策略）、Lua 与 JAR 模组管理、Viewpoint 截图与光影包管理、创意工坊浏览与资源下载、开发者新闻翻译、游戏版本隔离（母文件 + 增量链），以及游戏内加载覆盖层（注入 DLL + Hook OpenGL）。
 
 ## 文档
 
 | 文档 | 内容 |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | **从这里开始**：分层结构、前后端模块职责、Tauri 命令清单、磁盘与跨进程状态、测试与构建、已知技术债 |
+| [docs/version-isolation.md](docs/version-isolation.md) | 游戏版本隔离：母文件/检查点、版本清单与根哈希、CDC 增量格式、还原流程与命令 |
+| [docs/launcher-log.md](docs/launcher-log.md) | 启动器日志：记录范围、轮转、设置页查看/复制/清空、反馈附带规则 |
 | [docs/overlay-injection.md](docs/overlay-injection.md) | 覆盖层注入：注入链路、Hook 原理、GDI/GL 界面、停止条件、实测数据与排错表 |
 | [docs/superpowers/](docs/superpowers) | 最初"路径探测"阶段的计划与设计（历史归档，已过时） |
 
@@ -36,6 +40,28 @@ cd overlay-dll; cargo build --release --target x86_64-pc-windows-msvc
 cd src-tauri; cargo test      # Rust：解析、配置改写、事务回滚、注解扫描等
 node --test tests/            # 前端：源码/配置契约断言（Node ≥ 22）
 ```
+
+## 不随仓库推送的目录
+
+以下目录只保留在本地，`.gitignore` 已按目录名拦截，`git push` 不会包含它们；目录名后缀即标注：
+
+| 目录 | 用途 | 部署去向 |
+| --- | --- | --- |
+| `steam-relay(服务端请勿上传)/` | Steam 网络加速的中转服务器（Node 单文件） | 自有服务器（systemd / Docker，见其 README） |
+| `update-api(服务端请勿上传)/` | 启动器更新源（`api/latest.json` 等） | Cloudflare Pages（Direct Upload，发版时手动更新部署） |
+| `feedback-viewer(开发人员工具请勿上传)/` | 反馈查看器（本地 Flask 页面，从 pytools 启动器启动） | 仅管理员本机运行，不部署 |
+| `pytools(开发人员工具请勿上传)/` | 本地开发辅助脚本（文案编辑器、版本管理、启动器）与源码备份 | 仅管理员本机使用 |
+| `python/` | 早期工坊筛选器等本地原型脚本（功能已用 Rust 重写） | 仅管理员本机使用 |
+
+这些目录的改动不会进入提交历史；若重命名或移动，需同步更新 `.gitignore`。
+
+## 开源协议
+
+本项目以 **GNU General Public License v3.0 or later（GPL-3.0-or-later）** 发布，完整协议见 [LICENSE](../LICENSE)。
+
+- 客户端全部源码（本仓库，含 `overlay-core/` 与 `overlay-dll/`）适用 GPL-3.0-or-later：可以自由使用、修改、分发，但基于它的衍生作品必须以同一协议开源发布。
+- 服务端组件（Steam 中转、更新源、反馈查看器）仅在本机/自有服务器运行、不随本仓库分发，不在开源范围内。
+- PZManager 与 Project Zomboid 的开发/发行方无关；游戏本体、Steam 客户端与各第三方模组（含 ZombieBuddy、Viewpoint 等）仍受其各自协议约束。
 
 ## 环境要求
 
