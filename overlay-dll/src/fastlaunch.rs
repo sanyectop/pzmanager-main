@@ -1276,7 +1276,9 @@ fn start_agent_injection(vm: usize) {
     log("AddCapabilities 成功");
 
     // 回调：39 槽的结构体填 VMInit(0 号槽) + ClassFileLoadHook(4 号槽)。
-    // ClassFileLoadHook 先只登记**不打开**，等 VMInit 里辅助类定义成功后再打开。
+    // ClassFileLoadHook 登记后**立刻在 Agent_OnLoad 里打开**（不等 VMInit——它晚于所有
+    // agent 的 onload，ZB 在自己的 onload 阶段就定义了 PatchEngine）；见下方
+    // SetEventNotificationMode(JVMTI_ENABLE, CLASS_FILE_LOAD_HOOK)。VMInit 只负责 DefineClass。
     type SetEventCallbacks = unsafe extern "system" fn(
         *mut core::ffi::c_void,
         *const *const core::ffi::c_void,

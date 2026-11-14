@@ -369,17 +369,23 @@ fn run(game_pid: u32) {
                 paint_to_window(&mut ui, window, font, logo_big, logo_small);
                 // 游戏最近在持续换帧时，GL 覆盖随每一帧出现，BitBlt 退场；
                 // 换帧停了（呈现间隙，或游戏不走被挂钩的换帧路径）就靠 BitBlt 维持界面。
-                // 全屏窗口例外：DXGI 翻转模型下 GDI BitBlt 写入不可靠，可能只贴上
+                // 真全屏例外：翻转模型下 GDI BitBlt 写入不可靠，可能只贴上
                 // 一部分、剩下的区域发黑（用户反馈的「红屏 + 左边黑一块」）。这种
                 // 窗口只让 GL 画；换帧前宁可显示游戏自己的加载画面。
-                if !swap_recently(500) && !window_is_fullscreen(window) {
+                // 无边框窗口虽然客户区也铺满显示器，但走 DWM 合成路径（与窗口模式
+                // 相同，BitBlt 可靠）——跳过它曾导致无边框下覆盖层完全不显示。
+                let covers = window_covers_monitor(window);
+                if !swap_recently(500) && !blit_skip_for_fullscreen(covers, options_display_mode())
+                {
                     blit_to_window(&ui, window);
-                } else if window_is_fullscreen(window)
+                } else if covers
+                    && blit_skip_for_fullscreen(covers, options_display_mode())
                     && !FULLSCREEN_BLIT_NOTICE.swap(true, Ordering::Relaxed)
                 {
                     crate::log_ui(
-                        "检测到游戏窗口为全屏：GDI BitBlt 在翻转模型下不可靠，\
-                         加载界面改由 GL 覆盖绘制（换帧前显示游戏自己的画面）。",
+                        "检测到真全屏窗口（options.ini fullScreen=true 且未开无边框）：\
+                         GDI BitBlt 在翻转模型下不可靠，加载界面改由 GL 覆盖绘制\
+                         （换帧前显示游戏自己的画面）。",
                     );
                 }
                 // 埋点：界面图是否真的生成（红屏无字时这一行决定排查方向）。
@@ -1287,12 +1293,11 @@ fn dpi_scale(window: HWND) -> f32 {
     }
 }
 
-/// 游戏窗口是否铺满整个显示器（全屏 / 无边框全屏）。
+/// 游戏窗口是否铺满整个显示器（全屏 / 无边框全屏 / 最大化到整屏的窗口）。
 ///
-/// 这类窗口通常走 DXGI 翻转模型，GDI 的 BitBlt 写入不可靠（会被丢弃或只画出
-/// 一部分，表现为红底上出现黑块）。判断方式：客户区尺寸不小于所在显示器的完整
-/// 分辨率。窗口模式（含最大化）的客户区比显示器小，仍走 BitBlt 兜底。
-fn window_is_fullscreen(window: HWND) -> bool {
+/// 只回答"窗口铺不铺满"，**不等于**要跳过 GDI BitBlt——真正的跳过条件见
+/// [`blit_skip_for_fullscreen`]（要区分真全屏与无边框）。
+fn window_covers_monitor(window: HWND) -> bool {
     let mut client = RECT::default();
     if unsafe { GetClientRect(window, &mut client) }.is_err() {
         return false;
@@ -1318,14 +1323,97 @@ fn window_is_fullscreen(window: HWND) -> bool {
     monitor_width > 0 && monitor_height > 0 && width >= monitor_width && height >= monitor_height
 }
 
+/// 游戏显示模式（读 `%USERPROFILE%\Zomboid\options.ini` 的 `fullScreen` / `borderless`）。
+/// 读不到 / 解析不了时为 None —— 调用方按保守旧行为处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayMode {
+    Windowed,
+    Borderless,
+    Fullscreen,
+}
+
+static DISPLAY_MODE: OnceLock<Option<DisplayMode>> = OnceLock::new();
+
+/// 游戏在 options.ini 里声明的显示模式，进程内只读一次。
+///
+/// PZ 的显示模式三态写两个键：`borderless=true`（无边框，无论 fullScreen）、
+/// `fullScreen=true && borderless!=true`（真全屏）、其余为窗口模式。
+fn options_display_mode() -> Option<DisplayMode> {
+    *DISPLAY_MODE.get_or_init(|| {
+        let path = default_console_path().parent()?.join("options.ini");
+        let content = std::fs::read_to_string(path).ok()?;
+        let content = content.trim_start_matches('\u{feff}');
+        let mut fullscreen = false;
+        let mut borderless = false;
+        for line in content.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
+                "fullScreen" => fullscreen = value.trim().eq_ignore_ascii_case("true"),
+                "borderless" => borderless = value.trim().eq_ignore_ascii_case("true"),
+                _ => {}
+            }
+        }
+        if borderless {
+            Some(DisplayMode::Borderless)
+        } else if fullscreen {
+            Some(DisplayMode::Fullscreen)
+        } else {
+            Some(DisplayMode::Windowed)
+        }
+    })
+}
+
+/// GDI BitBlt 兜底是否跳过。
+///
+/// 背景（docs/overlay-injection.md「红屏 + 一侧黑块」）：真全屏窗口跳过 GDI BitBlt，
+/// 只让 GL 覆盖绘制——翻转模型下 GDI 写入不可靠。但无边框窗口虽然客户区也铺满
+/// 显示器，走的仍是 DWM 合成路径（与窗口模式相同，BitBlt 可靠）；曾因把无边框也
+/// 当全屏跳过，导致无边框下覆盖层完全不显示（游戏整个加载期只换帧 2-3 次，GL 覆盖
+/// 没机会画，又没有 BitBlt 兜底）。所以只有 options.ini 声明**真全屏**才跳过：
+///
+/// - 窗口没铺满显示器 → 不跳过（与旧逻辑一致）；
+/// - 铺满 + 无边框/窗口模式 → 不跳过（本次修复）；
+/// - 铺满 + 真全屏 → 跳过（保留 11-11 的修复）；
+/// - 铺满 + 读不到 options.ini → 跳过（保守沿用旧逻辑）。
+fn blit_skip_for_fullscreen(covers_monitor: bool, mode: Option<DisplayMode>) -> bool {
+    if !covers_monitor {
+        return false;
+    }
+    match mode {
+        Some(DisplayMode::Borderless) | Some(DisplayMode::Windowed) => false,
+        Some(DisplayMode::Fullscreen) | None => true,
+    }
+}
+
 fn progress_percent(progress: f32) -> i32 {
     (progress.clamp(0.0, 1.0) * 100.0).floor() as i32
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ink_for, parse_hex_color, progress_percent, status_is_fresh, track_for};
+    use super::{
+        blit_skip_for_fullscreen, ink_for, parse_hex_color, progress_percent, status_is_fresh,
+        track_for, DisplayMode,
+    };
     use std::time::{Duration, SystemTime};
+
+    /// BitBlt 跳过条件：只有「铺满显示器 + 真全屏」才跳过；无边框/窗口模式即使
+    /// 铺满也照画（否则无边框下覆盖层完全不显示——2026-11-14 用户反馈）。
+    #[test]
+    fn blit_skips_only_for_true_fullscreen() {
+        // 不铺满显示器：怎么都照画。
+        assert!(!blit_skip_for_fullscreen(false, None));
+        assert!(!blit_skip_for_fullscreen(false, Some(DisplayMode::Fullscreen)));
+        // 铺满 + 真全屏：跳过（保留 11-11「红屏 + 黑块」的修复）。
+        assert!(blit_skip_for_fullscreen(true, Some(DisplayMode::Fullscreen)));
+        // 铺满 + 无边框/窗口模式：照画（本次修复的主诉求）。
+        assert!(!blit_skip_for_fullscreen(true, Some(DisplayMode::Borderless)));
+        assert!(!blit_skip_for_fullscreen(true, Some(DisplayMode::Windowed)));
+        // 铺满 + 读不到 options.ini：保守沿用旧逻辑（跳过）。
+        assert!(blit_skip_for_fullscreen(true, None));
+    }
 
     #[test]
     fn loading_progress_does_not_round_up_to_one_hundred() {

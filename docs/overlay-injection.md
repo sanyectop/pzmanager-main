@@ -16,9 +16,12 @@
 | `overlay-dll/` | 覆盖层 DLL 的独立 Cargo 工程（cdylib，Rust + MinHook） |
 | `overlay-dll/src/lib.rs` | 全部 Hook 逻辑：`DllMain`、等待模块/导出、MinHook 安装、GL 绘制、停止事件与安全上限 |
 | `overlay-dll/src/console_reader.rs` | 启动器心跳失效后的 `console.txt` 自读器（阶段/进度/自停） |
+| `overlay-dll/src/ui.rs` | 游戏窗口内部的加载界面绘制：GDI DIB 渲染（换帧前 BitBlt 到游戏窗口 DC，换帧后上传 GL 纹理），状态来自 `%TEMP%\pz_overlay_status.txt` |
 | `overlay-core/src/lib.rs` | 启动器与 DLL 共用的纯解析：阶段、完成标记、advice、进度估算、控制台行规范化 |
 | `src-tauri/src/overlay.rs` | 注入实现：路径校验、进程轮询、重复注入检测、手动 `inject_overlay` 命令 |
 | `src-tauri/src/overlay_session.rs` | 自动会话：等窗口 → 注入 → 实时解析 `[ZB]` 加载进度 → 完成后发出停止信号 |
+| `src-tauri/src/fast_launch.rs` | 极速启动：预扫描缓存与启动配置备份 |
+| `src-tauri/src/jar_mods.rs` | JAR 模组的 Java class 注解解析（`class_annotations`，配合 `lib.rs` 的 `count_jar_advice_methods` 统计注入方法数，作为进度分母） |
 | `src-tauri/src/overlay_inject_win32.rs` | 默认注入后端（stable）：`CreateRemoteThread` + `LoadLibraryW` |
 | `src-tauri/src/overlay_inject_dll_syringe.rs` | 可选注入后端（nightly）：dll-syringe |
 | `src/overlayInjection.ts` | 前端调用封装 + React 按钮示例 |
@@ -132,10 +135,13 @@ cargo +nightly build --features dll-syringe-inject
    等到主菜单标记再停会把覆盖层压在过场上，表现为加载完成时闪屏；
 2. 控制台出现主菜单标记：`STATE: exit zombie.gameStates.TermsOfServiceState`、
    `added to the main menu`、`ZombieBuddy.getVersion()`（没有捕获到上一条时的兜底）；
-3. `[ZB]` 输出静默：收尾阶段（`注册 Lua 接口` / `初始化完成回调`）10 秒；其它阶段 60 秒兜底；
+3. `[ZB]` 输出静默：收尾阶段（`注册 Lua 接口` / `初始化完成回调`）10 秒（强信号，直接判定完成）；
+   其它阶段 60 秒兜底，且额外要求 `console.txt` 已停更 ≥ 30 秒（`CONSOLE_QUIET_GUARD`，
+   console 还在长 = 还在加载）；非里程碑阶段的兜底收尾 reason 明确写「不判定加载完成」；
 4. 完全没有 `[ZB]` 输出时，注入后 3 分钟兜底；
 5. **渲染看门狗**：DLL 每 500ms 把换帧速率回写到 `%TEMP%\pz_overlay_render.txt`。
-   游戏持续渲染 ≥20fps 满 10 秒、而 `console.txt` 仍不更新（读不到 `[ZB]` 进度）时立即结束覆盖。
+   游戏持续渲染 ≥40 次/秒（hook 命中率，`RENDER_READY_RATE`，约等于 20fps 呈现）满 10 秒
+   （`RENDER_READY_HOLD`）、而 `console.txt` 仍不更新（读不到 `[ZB]` 进度）时立即结束覆盖。
    有些机器游戏根本不写 `console.txt`，旧逻辑会一直盖到 3 分钟上限；
 6. 注入后 9 分钟会话上限；
 7. DLL 内部还有 10 分钟安全上限，避免启动器异常时一直保持红色。
@@ -210,9 +216,10 @@ async function handleInjectOverlay() {
 ## 5. 验证步骤
 
 1. 在启动器启动页点击「启动游戏」（会自动开始覆盖层会话；也可以先启动游戏再点「立即开始覆盖层会话」）。
-2. 观察游戏窗口：窗口一出现就变红，面板上实时显示 `[ZB]` 加载阶段、行数与最近一行日志。
+2. 观察游戏窗口：注入后加载界面在游戏窗口内部出现（背景色默认纯红，可由启动器设置自定义），
+   面板上实时显示 `[ZB]` 加载阶段、行数与最近一行日志。
 3. 预期结果：
-   - 游戏窗口整体变纯红（RGBA = 1,0,0,1），并**一直保持**到 ZombieBuddy 加载完成；
+   - 游戏窗口内出现加载界面，并**一直保持**到 ZombieBuddy 加载完成；
    - ZombieBuddy 加载完成后自动恢复正常画面，可继续操作；
    - 游戏不崩溃、无花屏、无残留红色。
 
@@ -236,7 +243,7 @@ async function handleInjectOverlay() {
   ```
   [pid=8644 t=0.001s] wglSwapBuffers Hook 已启用: target=0x... original=0x...
   [pid=8644 t=0.001s] 已监听停止事件 Local\PZManagerOverlayStop_8644
-  [pid=8644 t=0.043s] 首次进入 wglSwapBuffers Hook，注入链路已打通。
+  [pid=8644 t=0.043s] 首次进入 wglSwapBuffers Hook（opengl32 路径，hdc=0x... ctx=0x...），注入链路已打通。
   [pid=8644 t=10.971s] 收到启动器停止信号，覆盖绘制结束。
   ```
 
@@ -258,7 +265,7 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
 
 ```
 [pid=12345 t=  0.002s] wglSwapBuffers Hook 已启用: target=0x... original=0x...
-[pid=12345 t=  0.118s] 首次进入 wglSwapBuffers Hook，注入链路已打通。
+[pid=12345 t=  0.118s] 首次进入 wglSwapBuffers Hook（opengl32 路径，hdc=0x... ctx=0x...），注入链路已打通。
 ```
 
 * 只有第一条：Hook 装上了，但游戏没有调用 `wglSwapBuffers`（见排查表）。
@@ -280,28 +287,39 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
 | Hook `wglSwapBuffers` | `GetModuleHandleA("opengl32.dll")` 循环等待 → `GetProcAddress("wglSwapBuffers")` 循环等待 → `MinHook::create_hook` + `enable_hook`，原始指针存入 `AtomicU64` |
 | 不阻塞加载器 | `DllMain(DLL_PROCESS_ATTACH)` 只记录模块句柄、调用 `DisableThreadLibraryCalls`、然后起后台线程；所有等待都在线程里 |
 | 停止机制 | 启动器创建命名事件 `Local\PZManagerOverlayStop_<游戏PID>`；DLL 用一个后台线程 `WaitForSingleObject`，收到信号后把 `AtomicBool` 置 false，回调只剩一次原子读；另有 10 分钟安全上限兜底 |
-| 加载完成判定 | 启动器读取 `%USERPROFILE%\Zomboid\console.txt`：解析 `[ZB]` 行给出阶段与计数，命中 `onGameInitComplete` 立即结束；主菜单标记或 `[ZB]` 静默 10 秒作为兜底 |
+| 加载完成判定 | 启动器读取 `%USERPROFILE%\Zomboid\console.txt`：解析 `[ZB]` 行给出阶段与计数，命中 `onGameInitComplete` 立即结束；主菜单标记兜底；收尾阶段（`注册 Lua 接口` / `初始化完成回调`）静默 10 秒，其它阶段 60 秒兜底且要求 `console.txt` 停更 ≥30 秒（详见 §4 停止条件 3） |
 | GL 状态恢复 | `glPushAttrib(GL_ALL_ATTRIB_BITS)` → 关 scissor → 必要时切回默认 FBO → `glClearColor` + `glClear` → 还原 FBO → `glPopAttrib()`，clear color 等属性由 `glPopAttrib` 完整还原 |
 | 失败静默 | Hook 任何一步失败只写 `%TEMP%\overlay.log`，不弹窗、不打断游戏；加载失败不影响游戏运行 |
 | 不 panic | 回调里只用原子操作与时间比较，无分配、无 `unwrap`；DLL 的 release profile 显式使用 `panic = "unwind"`，即使初始化线程 panic 也只死一个线程，不会 abort 游戏进程 |
 | 不改动游戏数据 | 全程只调用 `glClearColor` / `glClear` / 属性栈，不触碰投影矩阵、纹理、着色器与游戏内存 |
-| 换帧前的红色 | GL 的 `glClear` 必须等到第一次 `wglSwapBuffers` 才有意义，而游戏窗口出现后常要 10~40 秒才第一次换帧。DLL 启动时会另起一个线程，用 GDI（`GetDC` + `FillRect`）每 200ms 把游戏窗口客户区刷成红色，直到首次换帧（`FIRST_CALL_LOGGED`）或收到停止信号；首次换帧后自动交给 OpenGL 覆盖层，颜色无缝衔接 |
+| 加载界面绘制 | 界面全部画在游戏窗口内部（`overlay-dll/src/ui.rs`）：UI 线程每 40ms（`REFRESH_INTERVAL`）画一幅完整 DIB。换帧前把 DIB `BitBlt` 到游戏窗口 DC——仅在最近 500ms 没换帧且非真全屏时；换帧后同一张 DIB 上传为 GL 纹理随每帧绘制。铁律（`overlay-dll/src/lib.rs`）：界面图没就绪就一帧都不绘制，宁可放行游戏自己的首帧。背景色由启动器 `bgcolor=#RRGGBB` 自定义（默认纯红） |
 
-### 6.1 换帧前的预填充与后续加载界面
+### 6.1 游戏窗口内部的加载界面
 
-#### 加载界面（已实现）
+加载界面**不再创建任何独立窗口**（早先 `src-tauri/src/overlay_ui.rs` 的独立分层窗口方案已废弃），
+全部画面都画在游戏窗口内部，由 `overlay-dll/src/ui.rs` 实现：
 
-`src-tauri/src/overlay_ui.rs` 会在游戏窗口上盖一个 **topmost + 点击穿透 + 不抢焦点** 的分层窗口，
-画三样东西（实测截图确认）：
+* UI 线程每 40ms（`REFRESH_INTERVAL`）把整幅界面画进一张 GDI DIB：
+  背景色（默认纯红，可由启动器经状态文件的 `bgcolor=#RRGGBB` 覆盖）+
+  **左下角最新 6 行控制台输出**（去掉 `LOG : General f:0>` 前缀、连续重复行去重）+
+  **底部居中的进度条与阶段文字/百分比**（例：`注入游戏类  55%`）；
+* **游戏还没开始换帧**：窗口内容归 GDI 管，把 DIB `BitBlt` 到游戏窗口 DC。
+  只在**最近 500ms 没有换帧**且非真全屏窗口时执行——游戏持续换帧时 GL 覆盖随每一帧出现，
+  BitBlt 退场；真全屏窗口（options.ini `fullScreen=true` 且未开无边框）走翻转模型，
+  GDI 写入不可靠，只让 GL 画（换帧前显示游戏自己的画面）；无边框窗口走 DWM 合成路径
+  （与窗口模式相同），BitBlt 照常兜底；
+* **游戏开始换帧后**：同一张 DIB 上传成 GL 纹理，在 `wglSwapBuffers` 回调里画满屏四边形；
+* **铁律（`overlay-dll/src/lib.rs`）**：界面图没就绪就**一帧都不绘制**——裸背景帧一旦呈现，
+  而游戏此后长时间不再换帧（实测有机器整个加载期只有 1 次换帧），屏幕上就是一块持续到主菜单的纯色，
+  宁可放行游戏自己的首帧。
 
-* 红色底：铺满游戏窗口客户区；
-* **左下角：最新 6 行控制台输出**（去掉 `LOG : General f:0>` 前缀、单行截断到 120 字、连续重复行去重）；
-* **底部居中：进度条 + 阶段文字/百分比**（例：`注入游戏类  55%`）。
+界面状态由启动器写入 `%TEMP%\pz_overlay_status.txt`（`overlay_session.rs` 的 `StatusFile`，
+带 1 秒心跳），DLL 的 UI 线程定期读取；启动器关闭/心跳超时后，DLL 会自己读 `console.txt`
+继续绘制并自停（见 §4.1）。进度来源就是控制台：`overlay_session` 实时 tail
+`%USERPROFILE%\Zomboid\console.txt`，并叠加两条曲线：
 
-进度来源就是控制台：`overlay_session` 实时 tail `%USERPROFILE%\Zomboid\console.txt`，
-并叠加两条曲线（`OverlayUi::set_progress` 只前进不回退）：
-
-1. **阶段估算（兜底）**：把 `[ZB]` 行映射成阶段里程碑（`扫描模组列表` → … → `初始化完成回调`），再按行数缓慢增长；
+1. **阶段估算（兜底）**：`set_phase_only` 把 `[ZB]` 行映射成阶段里程碑
+   （`扫描模组列表` → … → `初始化完成回调`），作为阶段文字显示（不给出真实百分比）；
 2. **真实注入进度（主）**：分母 = 运行期日志里 `[ZB] java mod list to load:` 列出的 jar
    （因此自动排除被禁用的模组）+ ZombieBuddy 自带 bundled patches，用启动器自己的 class 注解解析器
    （`count_jar_advice_methods`）统计声明的注入方法数；分子 = 日志里
@@ -312,42 +330,12 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
    分母在日志出现 jar 列表后由后台线程扫描得到，之后进度条直接显示
    `注入游戏类 · 注入 350/611` 这类真实计数，收尾前封顶 97%，加载完成时置 100%。
 
-控制台行通过 `OverlayUi::push_line` 实时进入界面队列。
+控制台行通过 `StatusFile::push_line` 实时进入界面队列。
 
-进度条以**真实计数**为准：分母就绪后只用 `已注入 advice / 总数` 直接驱动（`set_precise_progress`，
-允许回落），阶段估算只作为分母就绪前的兜底——否则会被偏高的阶段值顶住，看起来像卡在 82%/88% 这类固定数字。
+进度条以**真实计数**为准：分母就绪后用 `set_precise_progress` 直接驱动（**允许回落**，
+直接覆盖当前值），阶段估算只作为分母就绪前的兜底——否则会被偏高的阶段值顶住，
+看起来像卡在 82%/88% 这类固定数字。
 实测回放同一次启动：`1/360 → 101/360 → 202/360 → 302/360 → … → 345/360 ≈ 96%`，曲线连续。
-
-另外，覆盖层**只在游戏窗口处于前台且未最小化时显示**（`GetForegroundWindow` + `IsIconic` 判断，
-否则 `SW_HIDE`），切到其它窗口会自动隐藏，不会遮挡别的程序。
-
-用独立分层窗口而不是注入绘制的原因：GL 的 `glClear` 只能作用在游戏自己的帧缓冲上，
-而游戏"窗口已出现但还没换帧"阶段没有任何可绘制目标；分层窗口由 DWM 合成，**换帧前后都能显示**。
-窗口位置每 100ms 跟随游戏窗口，并已设置 per-monitor DPI 感知（125%/150% 缩放下也能精确贴合）。
-限制：游戏若使用**独占全屏**，分层窗口可能被挡住——此时 DLL 的 GL 红色仍然生效，只是不带文字/进度条。
-
-实测（测试宿主刻意延迟 12 秒才第一次换帧）：
-
-| 时刻 | 窗口采样 | GL 已换帧 | 说明 |
-| --- | --- | --- | --- |
-| 注入后 0.6s / 1.6s / 3.1s / 6s / 9.1s | 255,0,0 | false | **换帧前就是纯红**，GDI 每 200ms 刷新一次 |
-| 注入后 11.1s | 255,0,0 | true | 首次换帧后由 GL 覆盖层接管，无闪烁 |
-| 收到停止信号后 | 13,38,102 | — | 恢复游戏自身画面 |
-
-`%TEMP%\overlay.log` 对应输出：
-
-```
-[pid=27364 t=0.001s] 窗口已出现但尚未换帧，先用 GDI 填充为红色。
-[pid=27364 t=0.031s] wglSwapBuffers Hook 已启用: target=0x... original=0x...
-[pid=27364 t=10.667s] 首次进入 wglSwapBuffers Hook，注入链路已打通。
-```
-
-要做"加载界面"，可以直接在这条 GDI 线程里画更多东西（`CreateFontW` + `DrawTextW` 写字、`CreateSolidBrush` + `FillRect` 画进度条），
-不需要引入任何 UI 框架，也不会和游戏的 GL 渲染抢状态。进度数据可以由启动器传入（它已经在实时解析 `[ZB]` 输出），
-最简单的做法是启动器把进度写进一个命名共享内存或 `%TEMP%\pz_overlay_status.txt`，DLL 的这条线程定期读取并重绘。
-（现在启动器关闭/心跳超时后，DLL 会自己读 `console.txt` 继续绘制并自停，见 §4.1。）
-需要注意：一旦游戏开始换帧，窗口内容改由 GL 呈现，GDI 画的内容会被覆盖——所以"换帧前"是最容易做加载界面的窗口期；
-若要在 GL 阶段继续显示文字/进度，需要走 GL 绘制或顶层分层窗口（下一阶段再定）。
 
 关于 FBO：`glBindFramebuffer` 属于 GL 3.0，`opengl32.dll` 并不导出，因此代码在**首次回调时**（此刻一定有当前 GL 上下文）用 `wglGetProcAddress` 解析一次并缓存；解析不到就永久降级为「不动 FBO 绑定」，其余逻辑照常。
 
@@ -363,15 +351,15 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
 | 提示「打开游戏进程失败 / 拒绝访问」 | 游戏以管理员运行、启动器没有；或多用户/不同完整性级别 | 用相同权限级别运行两者（都普通身份或都管理员）；Steam 启动的游戏通常是普通身份 |
 | 提示「枚举 PID x 的模块列表失败」 | 目标进程是 32 位（WOW64），或进程刚退出 | 该错误不会中断注入（代码会继续尝试注入并给出更准确的报错）；确认使用 64 位游戏 |
 | 日志里没有「Hook 已启用」 | `opengl32.dll` 未加载（游戏还在 Java 启动阶段）或已在 60 秒超时 | 等到游戏主菜单/存档界面再注入；`WAIT_TIMEOUT` 可在 `overlay-dll/src/lib.rs` 调整 |
-| 有「Hook 已启用」但没有「首次进入」 | 游戏换帧没有走 `opengl32!wglSwapBuffers`（例如直接走其它 WGL/扩展路径） | 少见的兜底方案：把 Hook 目标改为 `gdi32!SwapBuffers`（GDI 的 `SwapBuffers` 在 Windows 上会转发到 `wglSwapBuffers`，两者通常等价）；若确需改动，改 `wait_for_swap_buffers_export` 里的模块与导出名即可 |
+| 有「Hook 已启用」但没有「首次进入」 | 两条换帧路径都没命中（例如走其它 WGL/扩展路径） | 现在默认就会**同时** Hook `gdi32!SwapBuffers`（`install_gdi_swap_hook`，在 wgl Hook 启用后无条件安装）：部分 LWJGL 胶水直接调 GDI 的 SwapBuffers，这类机器上 opengl32 侧换帧数为 0。先确认 overlay.log 里有没有「首次进入 SwapBuffers Hook（gdi32 路径，…）」；两条路径都没有才需要排查其它呈现方式 |
 | 进入回调但窗口没变红 | GL 状态挡住了 clear（scissor 已处理，剩余可能是多重采样/自定义 FBO），或换帧后画面被再次覆盖 | 看日志确认回调频率；确认游戏用的是默认帧缓冲；必要时在回调里临时 `glDisable(GL_MULTISAMPLE)` |
 | 红色一直不消失 | 启动器没发出停止信号（会话线程异常/被杀） | 正常流程最多 9 分钟会由会话上限结束，DLL 自身还有 10 分钟安全上限；检查 `%TEMP%\overlay.log` 是否出现「收到启动器停止信号」 |
-| 红色消失得太早 | 命中了主菜单标记或 `[ZB]` 静默 10 秒 | 见 `docs` 中 4 节的停止条件，可调整 `overlay_session.rs` 里的 `ZB_IDLE_TIMEOUT` / `COMPLETION_MARKERS` |
+| 加载界面消失得太早 | 命中了主菜单标记或收尾阶段 `[ZB]` 静默 10 秒 | 见 `docs` 中 4 节的停止条件；阈值常量在 `overlay-core/src/lib.rs`（`COMPLETION_MARKERS` / `ZB_IDLE_TIMEOUT` / `ZB_IDLE_TIMEOUT_ANY_PHASE`），`overlay_session.rs` 只是引用 |
 | 加载中段闪屏/左下角黑块（42.22 常见） | 加载屏开始连续换帧时帧间隔可能短到几毫秒。旧实现按「5ms 内同 HDC+上下文」去重，把**真正呈现到窗口**的独立帧当成重复帧跳过，游戏画面（含左下角黑块）漏出 | 现在**每一次 swap 都绘制**，只有「外层 wglSwapBuffers 调用的原始实现又走到 gdi32!SwapBuffers」这种同一次呈现的嵌套才跳过。心跳里的「换帧=」与「绘制=」应基本相等（差异只来自嵌套路径） |
-| 红屏 + 一侧黑块（全屏） | 全屏窗口通常走 DXGI 翻转模型，GDI 的 `BitBlt` 写入不可靠（会被丢弃或只贴上一部分，表现为红底 + 黑块）。2026-11-11 用户反馈：42.21 全屏、加载期 GL 只换帧 6 次/41 秒，UI 纹理到 31 秒才首次上传，期间全靠 BitBlt | 现在**全屏窗口跳过 GDI BitBlt**（`window_is_fullscreen`：客户区不小于所在显示器分辨率），只让 GL 覆盖绘制；换帧前显示游戏自己的加载画面，不再贴可能残缺的 GDI 图。overlay.log 会记一条「检测到游戏窗口为全屏：GDI BitBlt 在翻转模型下不可靠…」 |
-| 红色一直不消失（游戏已经能玩） | ① 游戏没有写 `console.txt`，所有 `[ZB]` 判定都失效；② `[ZB]` 静默兜底过长 | 新版有两条兜底：渲染看门狗（持续 ≥20fps 10 秒但 `console.txt` 不更新 → 结束）和静默 60 秒；启动器日志里新增「覆盖层会话详情：ZB 行数/阶段/advice 分母/渲染速率」，先看 ZB 行数是否为 0 |
+| 红屏 + 一侧黑块（全屏） | 全屏窗口通常走 DXGI 翻转模型，GDI 的 `BitBlt` 写入不可靠（会被丢弃或只贴上一部分，表现为红底 + 黑块）。2026-11-11 用户反馈：42.21 全屏、加载期 GL 只换帧 6 次/41 秒，UI 纹理到 31 秒才首次上传，期间全靠 BitBlt | 真全屏窗口（options.ini `fullScreen=true` 且 `borderless!=true`）跳过 GDI BitBlt，只让 GL 覆盖绘制；换帧前显示游戏自己的加载画面，不再贴可能残缺的 GDI 图。overlay.log 会记一条「检测到真全屏窗口…」。**无边框窗口不跳过**：它虽也铺满显示器，但走 DWM 合成路径（与窗口模式相同），BitBlt 可靠——曾把无边框一并跳过，导致无边框下 GL 整个加载期只换帧 2-3 次、覆盖层完全不显示（2026-11-14 用户反馈，`blit_skip_for_fullscreen` + 每会话读一次 options.ini 修复）。 |
+| 红色一直不消失（游戏已经能玩） | ① 游戏没有写 `console.txt`，所有 `[ZB]` 判定都失效；② `[ZB]` 静默兜底过长 | 新版有两条兜底：渲染看门狗（hook 命中持续 ≥40 次/秒满 10 秒但 `console.txt` 不更新 → 结束）和静默 60 秒兜底；启动器日志里有「覆盖层会话详情：ZB 行数/阶段/advice 分母/渲染速率」，先看 ZB 行数是否为 0 |
 | 变红后花屏/渲染异常 | GL 状态或 FBO 绑定未还原 | 本实现用 `glPushAttrib/glPopAttrib` + 还原 FBO 绑定；若仍有问题，把 `%TEMP%\overlay.log` 与复现步骤一起记录，并临时把 `paint_red_frame` 里的 FBO 段落注释掉做对照实验 |
-| 红屏且完全没有文字/界面 | 红色本身就是覆盖层底色（每帧 `glClear` 刷红），"无字"说明界面这一环断了。按可能性：① 进程里跑的是旧版"纯红探针"DLL（游戏目录残留 `-agentpath` 指向旧路径，宿主发现同名模块已加载就跳过注入）；② GL 残留状态把界面四边形整体丢弃（旧版未关深度测试/面剔除，或活动纹理单元非 0）；③ 游戏重建 WGL 上下文后旧纹理名失效；④ 界面线程 panic/锁中毒死亡、或找不到游戏窗口 | ① 问用户：红屏出现前有没有几秒能看到文字界面（有 = GL 环节问题，没有 = DLL/线程问题）；红屏是否超过 3 分钟不消失（是 = DLL 不响应停止事件，旧 DLL 嫌疑大）。② 收集：`%TEMP%\overlay.log`（新版会先写「pz_overlay v1.6.261108 已加载」，旧 DLL 没有这行）、`%USERPROFILE%\Zomboid\console.txt` 里 `[PZManager]` 行记录的 DLL 完整路径、游戏目录 `ProjectZomboid64.json` 的 `vmArgs[0]` 与启动 `.bat` 的 `_JAVA_OPTIONS` 里 `-agentpath` 指向。③ 校验安装目录 `pz_overlay.dll` 是否新版：`findstr /m "pz_overlay_status.txt" pz_overlay.dll` 有输出 = 新版；新版宿主注入旧 DLL 会直接报「覆盖层 DLL 版本过旧」，进程内预载路径不一致时界面会显示警告 |
+| 红屏且完全没有文字/界面 | 红色本身就是覆盖层底色（每帧 `glClear` 刷红），"无字"说明界面这一环断了。按可能性：① 进程里跑的是旧版"纯红探针"DLL（游戏目录残留 `-agentpath` 指向旧路径，宿主发现同名模块已加载就跳过注入）；② GL 残留状态把界面四边形整体丢弃（旧版未关深度测试/面剔除，或活动纹理单元非 0）；③ 游戏重建 WGL 上下文后旧纹理名失效；④ 界面线程 panic/锁中毒死亡、或找不到游戏窗口 | ① 问用户：红屏出现前有没有几秒能看到文字界面（有 = GL 环节问题，没有 = DLL/线程问题）；红屏是否超过 3 分钟不消失（是 = DLL 不响应停止事件，旧 DLL 嫌疑大）。② 收集：`%TEMP%\overlay.log`（新版会先写「pz_overlay v1.7.261114 已加载」，旧 DLL 没有这行）、`%USERPROFILE%\Zomboid\console.txt` 里 `[PZManager]` 行记录的 DLL 完整路径、游戏目录 `ProjectZomboid64.json` 的 `vmArgs[0]` 与启动 `.bat` 的 `_JAVA_OPTIONS` 里 `-agentpath` 指向。③ 校验安装目录 `pz_overlay.dll` 是否新版：`findstr /m "pz_overlay_status.txt" pz_overlay.dll` 有输出 = 新版；新版宿主注入旧 DLL 会直接报「覆盖层 DLL 版本过旧」，进程内预载路径不一致时界面会显示警告 |
 | `error[E0554]: #![feature] ... stable release channel` | 启用了 `dll-syringe-inject` feature 但用的是 stable | 用 `cargo +nightly build --features dll-syringe-inject`，或去掉该 feature 使用默认后端 |
 | `cargo build` 报找不到 C 编译器 | 缺少 MSVC C++ 工具链 | 安装 Visual Studio Build Tools 的「使用 C++ 的桌面开发」组件（提供 `cl.exe`） |
 
@@ -392,8 +380,8 @@ DLL 会把关键节点写进 `%TEMP%\overlay.log`（例如 `C:\Users\<你>\AppDa
 
 ## 9. 回滚
 
-本次改动前的代码已备份到 `backup/20261009-235243-overlay-inject/`（含 `src/`、`src-tauri/` 等，已排除 `target`、`node_modules`、`dist`）。
-需要回滚时，用该目录覆盖回对应文件即可；删除 `overlay-dll/`、`src/overlayInjection.ts` 与本文档即可回到改动前状态。
+覆盖层相关代码都在 git 历史里，需要回滚时用 `git log` 找到改动前的提交恢复对应文件；
+删除 `overlay-dll/`、`src/overlayInjection.ts` 与本文档即可回到改动前状态。
 
 ## 附：强制跳过 ZombieBuddy 的模组审批界面
 
@@ -406,13 +394,20 @@ ZombieBuddy 用 `-agentlib:zbNative=<参数>` 的第一个参数决定策略（`
 | `deny-new` | 静默跳过未批准的 JAR，不弹窗 |
 | `allow-all` | 全部加载，跳过审批弹窗与 ZBS 校验 |
 
-启动器现在会在**三个位置**都强制写 `-agentlib:zbNative=policy=allow-all`：
+启动器按「模组加载器方案」决定是否写 agent（`lib.rs` 的 `mod_loader_policy_agent(scheme)`）：
 
-1. Steam `LaunchOptions`（`launch_project_zomboid` / `save_memory_limit` 写入，带 `--` 结束符）；
-2. 游戏目录 `ProjectZomboid64.json` 的 `vmArgs`；
-3. 游戏目录 `ProjectZomboid64.bat` 的 `SET _JAVA_OPTIONS`。
+* **方案 = `zombieBuddy`**：启动路径（`launch_project_zomboid`）把
+  `-agentlib:zbNative=policy=allow-all` 写进**三个位置**：
+  1. Steam `LaunchOptions`（`patch_steam_launch_options_at_paths`，带 `--` 结束符）；
+  2. 游戏目录 `ProjectZomboid64.json` 的 `vmArgs`；
+  3. 游戏目录 `ProjectZomboid64.bat` 的 `SET _JAVA_OPTIONS`。
+* **方案 = `none`**：`mod_loader_policy_agent` 返回 `None`，启动路径**不写** agent，
+  且会把启动参数里残留的加载器 agent 摘掉（`strip_loader_agent_tokens`）。
 
-其中 2、3 由 `force_zombie_buddy_policy()` 在每次点击「启动游戏」时检查并改写（带 `.pzmanager-backups/<时间戳>/` 备份，内容已正确时不重复写）。
+另有 `force_zombie_buddy_policy()`（无条件往 JSON/BAT 写 ZB agent），只在**保存内存上限**
+（`settings.rs` 的 `save_memory_limit`）时调用——保证改内存时 JSON/BAT 里旧的 `-Xmx`
+被覆盖、不残留旧 agent。因此只有 `zombieBuddy` 方案下，三处才会同时写上 agent。
+
 之所以三处都要写：JVM 只会加载第一个 agent 并锁定策略，而游戏目录里的 JSON/BAT 往往先于 Steam 启动参数生效。
 
 > ⚠️ `policy=allow-all` 是 ZombieBuddy 官方标注为"不推荐"的模式：所有 Java 模组（含未签名/来源不明的）都会被直接加载，
