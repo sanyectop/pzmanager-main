@@ -215,15 +215,19 @@ import {
   classifyGameOptionValue,
   filterGameOptions,
   gameOptionBoolean,
+  gameOptionTabCounts,
   groupGameOptions,
+  groupsForTab,
   isValidGameOptionNumber,
 } from "./gameOptionsUi";
 import {
   GAME_OPTION_CATEGORIES,
   GAME_OPTION_CATEGORY_OF,
   GAME_OPTION_FALLBACK_CATEGORY,
+  GAME_OPTION_TABS,
   gameOptionDisplayName,
   hasGameOptionLabel,
+  type GameOptionTabId,
 } from "./gameOptionsLabels";
 import { CrashReportDialog, type CrashReport } from "./components/crashReport";
 import { ExternalArrowIcon } from "./components/icons";
@@ -502,6 +506,12 @@ function App() {
   const [gameOptionSaving, setGameOptionSaving] = useState<string | null>(null);
   /** 文本 / 数字框的未提交草稿：键 → 值。 */
   const [gameOptionDrafts, setGameOptionDrafts] = useState<Record<string, string>>({});
+  /** 游戏设置的顶部胶囊分页：App 级保持，切走再回来不停在第一页。 */
+  const [gameOptionsTab, setGameOptionsTab] = useState<GameOptionTabId>(
+    GAME_OPTION_TABS[0].id,
+  );
+  /** 设置正文（pz-resource-center-main）的滚动容器：切分页时滚回顶部。 */
+  const settingsMainScrollRef = useRef<HTMLDivElement | null>(null);
   // 设置内分页切换的滑入方向：按侧栏顺序判断前进/后退，与主页面切换的方向感一致。
   const [settingsTransitionDirection, setSettingsTransitionDirection] = useState<"forward" | "backward">("forward");
   // 「设置 › 版本」：版本隔离状态、后台操作进度与存储目录草稿。
@@ -1458,6 +1468,12 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
       }
       return nextTab;
     });
+  }
+
+  /** 「游戏设置」页切换顶部胶囊分页：正文滚回顶部，别停在上一页的滚动深度。 */
+  function switchGameOptionsTab(nextTab: GameOptionTabId) {
+    setGameOptionsTab(nextTab);
+    settingsMainScrollRef.current?.scrollTo({ top: 0 });
   }
 
   function navigateToPage(nextPage: ActivePage) {
@@ -8462,7 +8478,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
             </SettingsRow>
             <SettingsRow
               label="服务器密码（可选）"
-              hint="仅当收藏夹里没有保存该服务器密码时使用。密码只落在本机 Zomboid 目录的 pzm-autojoin.ini，游戏退出后自动删除，日志只记位数不记明文。"
+              hint="仅当收藏夹里没有保存该服务器密码时使用。密码保存在启动器设置里，启动时经游戏原生 +password 参数传入（不写进游戏目录），日志只记位数不记明文。"
             >
               <Input
                 aria-label="自动加入的服务器密码"
@@ -9929,6 +9945,29 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
     (key) => GAME_OPTION_CATEGORY_OF[key],
     GAME_OPTION_FALLBACK_CATEGORY,
   );
+  // 顶部胶囊分页（参考游戏内设置的横向分页）：全量条目按分页计数，空分页隐藏；
+  // 搜索时结果跨全部分页平铺（组标题即所属分组标注），清空搜索回到当前分页。
+  const gameOptionTabCountMap = gameOptionTabCounts(
+    gameOptions?.entries ?? [],
+    GAME_OPTION_TABS,
+    (key) => GAME_OPTION_CATEGORY_OF[key],
+  );
+  const visibleGameOptionTabs = GAME_OPTION_TABS.filter(
+    (tab) => (gameOptionTabCountMap.get(tab.id) ?? 0) > 0,
+  );
+  const activeGameOptionTab: GameOptionTabId | undefined = visibleGameOptionTabs.some(
+    (tab) => tab.id === gameOptionsTab,
+  )
+    ? gameOptionsTab
+    : visibleGameOptionTabs[0]?.id;
+  const activeGameOptionTabDef = GAME_OPTION_TABS.find(
+    (tab) => tab.id === activeGameOptionTab,
+  );
+  const searchingGameOptions = gameOptionsQuery.trim() !== "";
+  const renderedGameOptionGroups =
+    !searchingGameOptions && activeGameOptionTabDef
+      ? groupsForTab(gameOptionGroups, activeGameOptionTabDef)
+      : gameOptionGroups;
 
   /** 单个设置项的控件：布尔 → 开关；数字 → 数字输入；其余 → 文本输入。
    *  文本/数字在失焦或回车时提交，避免每敲一个字符写一次文件。 */
@@ -10018,6 +10057,32 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
           </Button>
         </HStack>
 
+        {gameOptions?.exists ? (
+          <Box px="4">
+            <HStack className="pz-version-tabs" gap="1" role="tablist" wrap="wrap">
+              {visibleGameOptionTabs.map((tab) => {
+                const active = tab.id === activeGameOptionTab;
+                return (
+                  <Button
+                    aria-selected={active}
+                    className={active ? "pz-version-tab pz-version-tab-active" : "pz-version-tab"}
+                    key={tab.id}
+                    onClick={() => switchGameOptionsTab(tab.id)}
+                    role="tab"
+                    size="xs"
+                    variant="ghost"
+                  >
+                    {tab.title}
+                    <Text as="span" color="gray.400" fontSize="xs" fontWeight="400" ms="1">
+                      {gameOptionTabCountMap.get(tab.id) ?? 0}
+                    </Text>
+                  </Button>
+                );
+              })}
+            </HStack>
+          </Box>
+        ) : null}
+
         <Box px="4">
           <Input
             mb="3"
@@ -10041,7 +10106,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
               {gameOptionsQuery.trim() ? `（已筛选，总计 ${gameOptions.entries.length} 项）` : ""}
             </Text>
             <Stack gap="4" pb="4">
-              {gameOptionGroups.map((group) => (
+              {renderedGameOptionGroups.map((group) => (
                 <Box key={group.id}>
                   <Text
                     borderBottomColor="gray.200"
@@ -10230,6 +10295,7 @@ const [preview, setPreview] = useState<PreviewState | null>(null);
         key={settingsPage}
         className="pz-resource-center-main"
         data-direction={settingsTransitionDirection}
+        ref={settingsMainScrollRef}
       >
         {settingsPage === "about"
           ? aboutSettingsContent

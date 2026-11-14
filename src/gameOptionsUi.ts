@@ -68,3 +68,39 @@ export function groupGameOptions<T extends { key: string }>(
   }
   return groups;
 }
+
+/** 顶部胶囊分页的定义（见 gameOptionsLabels.ts 的 GAME_OPTION_TABS）。 */
+export type GameOptionTabDef = { id: string; title: string; categoryIds: readonly string[] };
+
+/** 从分组结果里挑出属于某个分页的组：只留 `tab.categoryIds` 声明的组，并按声明的
+ *  顺序渲染；未声明的组（其它分页的）直接丢弃。兜底「其他」组就是普通组——
+ *  哪个分页的 categoryIds 里写了它的 id 就归哪个分页。 */
+export function groupsForTab<T>(
+  groups: GameOptionGroup<T>[],
+  tab: { categoryIds: readonly string[] },
+): GameOptionGroup<T>[] {
+  const byId = new Map(groups.map((group) => [group.id, group]));
+  return tab.categoryIds
+    .map((id) => byId.get(id))
+    .filter((group): group is GameOptionGroup<T> => group !== undefined);
+}
+
+/** 每个分页的设置项总数（全量 entries，不看搜索词）：tab 上的数量角标和
+ *  「空分页隐藏」都用它。未收录键按兜底组 id（"other"）归属。 */
+export function gameOptionTabCounts<T extends { key: string }>(
+  entries: T[],
+  tabs: readonly GameOptionTabDef[],
+  categoryOf: (key: string) => string | undefined,
+): Map<string, number> {
+  const counts = new Map<string, number>(tabs.map((tab) => [tab.id, 0]));
+  const tabOfCategory = new Map<string, string>(
+    tabs.flatMap((tab) => tab.categoryIds.map((id) => [id, tab.id] as const)),
+  );
+  for (const entry of entries) {
+    const tabId = tabOfCategory.get(categoryOf(entry.key) ?? "other");
+    if (tabId !== undefined) {
+      counts.set(tabId, (counts.get(tabId) ?? 0) + 1);
+    }
+  }
+  return counts;
+}

@@ -442,3 +442,37 @@ export const GAME_OPTION_CATEGORY_OF: Record<string, string> = Object.fromEntrie
 
 /** 未收录键的兜底分组。 */
 export const GAME_OPTION_FALLBACK_CATEGORY = { id: "other", title: "其他" } as const;
+
+/** 游戏设置页的顶部胶囊分页（参考游戏内设置的横向分页，docs/ui-style-guide.md 的
+ *  「设置子页再分类」钦点方案）。分组归拢到分页下：`categoryIds` 的顺序就是 tab 内
+ *  分组小标题的渲染顺序；兜底组 id（"other"）归最后一个 tab，其余 tab 收不到它。
+ *  tab 本身不含键清单——键仍只维护在 `GAME_OPTION_CATEGORIES` 一处。 */
+export const GAME_OPTION_TABS = [
+  {
+    id: "display",
+    title: "显示与画质",
+    categoryIds: ["display", "quality", "effects", "zoom_map"],
+  },
+  {
+    id: "ui",
+    title: "用户界面",
+    categoryIds: ["layout", "font_lang", "reticle"],
+  },
+  {
+    id: "audio",
+    title: "声音",
+    categoryIds: ["audio", "voice"],
+  },
+  {
+    id: "controls",
+    title: "按键与操作",
+    categoryIds: ["keys", "movement", "combat_camera"],
+  },
+  {
+    id: "chat_misc",
+    title: "聊天与其他",
+    categoryIds: ["chat", "info", "misc", "tutorial", "other"],
+  },
+] as const;
+
+export type GameOptionTabId = (typeof GAME_OPTION_TABS)[number]["id"];

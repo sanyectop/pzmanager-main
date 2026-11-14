@@ -4,7 +4,9 @@ import {
   classifyGameOptionValue,
   filterGameOptions,
   gameOptionBoolean,
+  gameOptionTabCounts,
   groupGameOptions,
+  groupsForTab,
   isValidGameOptionNumber,
 } from "../src/gameOptionsUi.ts";
 
@@ -83,6 +85,75 @@ test("labels cover the real options.ini keys with Chinese names", async () => {
   assert.ok(Object.keys(GAME_OPTION_LABELS).length >= 120);
 });
 
+
+test("tabs pick their own groups in tab order, fallback only where declared", () => {
+  const categories = [
+    { id: "graphics", title: "画面与显示", keys: ["fullScreen"] },
+    { id: "audio", title: "声音与音乐", keys: ["musicVolume", "soundVolume"] },
+    { id: "ui", title: "界面布局", keys: ["clock24Hour"] },
+  ];
+  const categoryOf = (key: string) =>
+    categories.find((category) => category.keys.includes(key))?.id;
+  const entries = [
+    { key: "fullScreen", value: "false" },
+    { key: "musicVolume", value: "10" },
+    { key: "soundVolume", value: "10" },
+    { key: "clock24Hour", value: "true" },
+    { key: "unknownModKey", value: "1" },
+  ];
+  const groups = groupGameOptions(entries, categories, categoryOf, {
+    id: "other",
+    title: "其他",
+  });
+  const tabs = [
+    { id: "display", title: "显示与画质", categoryIds: ["graphics", "audio"] },
+    { id: "chat_misc", title: "聊天与其他", categoryIds: ["ui", "other"] },
+  ] as const;
+
+  // 只留本分页的组，且按 tab 声明的顺序（这里故意和 categories 顺序相反）
+  assert.deepEqual(
+    groupsForTab(groups, tabs[1]).map((group) => group.id),
+    ["ui", "other"],
+  );
+  // 没声明 "other" 的分页收不到兜底组
+  assert.deepEqual(
+    groupsForTab(groups, tabs[0]).map((group) => group.id),
+    ["graphics", "audio"],
+  );
+  // tab 里没有的组不出现
+  assert.deepEqual(
+    groupsForTab(groups, { categoryIds: ["audio"] }).map((group) => group.id),
+    ["audio"],
+  );
+});
+
+test("tab counts cover all entries and route fallback to the other tab", () => {
+  const tabs = [
+    { id: "display", title: "显示与画质", categoryIds: ["graphics"] },
+    { id: "audio", title: "声音", categoryIds: ["audio", "voice"] },
+    { id: "chat_misc", title: "聊天与其他", categoryIds: ["chat", "other"] },
+  ] as const;
+  const categoryOf = (key: string) =>
+    ({
+      fullScreen: "graphics",
+      musicVolume: "audio",
+      voiceEnable: "voice",
+      showChatTitle: "chat",
+    })[key];
+  const entries = [
+    { key: "fullScreen", value: "false" },
+    { key: "musicVolume", value: "10" },
+    { key: "voiceEnable", value: "true" },
+    { key: "showChatTitle", value: "true" },
+    { key: "unknownModKey", value: "1" },
+    { key: "anotherUnknown", value: "2" },
+  ];
+  const counts = gameOptionTabCounts(entries, tabs, categoryOf);
+  assert.equal(counts.get("display"), 1);
+  assert.equal(counts.get("audio"), 2);
+  // 未收录键按兜底组 id（"other"）归到声明了它的分页
+  assert.equal(counts.get("chat_misc"), 3);
+});
 
 test("groups follow category order and drop empty groups", () => {
   const categories = [
