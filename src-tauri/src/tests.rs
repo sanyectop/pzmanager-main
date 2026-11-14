@@ -1,10 +1,8 @@
 use super::{
     adopt_jar_mod_state_from_roots, apply_file_transaction, apply_jar_mod_state_to_roots,
     apply_launch_loader_at_paths,
-    AUTO_JOIN_CONFIG_FILE, AUTO_JOIN_HOOK_FILE, AUTO_JOIN_HOOK_SOURCE,
-    auto_join_config_path, clear_auto_join_config_at, describe_auto_join_password,
-    install_auto_join_hook_at,
-    normalize_auto_join_target, remove_auto_join_hook_at, write_auto_join_config_at,
+    auto_join_program_args, auto_join_redact_password, describe_auto_join_password,
+    normalize_auto_join_target,
     build_fast_launch_cache, build_file_java_args, class_annotations, class_references,
     compose_title_background_at, default_bat_launch_command, is_memory_arg,
     parse_bat_launch_command,
@@ -4230,68 +4228,33 @@ fn auto_join_target_normalization() {
 }
 
 #[test]
-fn auto_join_config_lives_in_lua_subdirectory() {
-    // B42 的 cacheFileExists/getFileReader 把相对路径解析到 Zomboid\Lua\（不是
-    // Zomboid 根目录）——配置写错位置钩子永远读不到，只会静默不连。锁住这个路径。
-    let path = auto_join_config_path().unwrap();
+fn auto_join_program_args_native_connect() {
+    // 带密码：+connect / +password 成对追加，密码 trim 过。
     assert_eq!(
-        path.file_name().and_then(|value| value.to_str()),
-        Some(AUTO_JOIN_CONFIG_FILE)
+        auto_join_program_args("1.2.3.4:16261", Some(" s3cret ")),
+        ["+connect", "1.2.3.4:16261", "+password", "s3cret"]
+    );
+    // 无密码 / 空白密码：只带 +connect（收藏夹里存过密码时优先用收藏的）。
+    assert_eq!(
+        auto_join_program_args("1.2.3.4:16261", None),
+        ["+connect", "1.2.3.4:16261"]
     );
     assert_eq!(
-        path.parent().and_then(|value| value.file_name()).and_then(|value| value.to_str()),
-        Some("Lua")
+        auto_join_program_args("1.2.3.4:16261", Some("   ")),
+        ["+connect", "1.2.3.4:16261"]
     );
 }
 
 #[test]
-fn auto_join_config_roundtrip() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join(AUTO_JOIN_CONFIG_FILE);
-
-    // 带密码：target / password / requested 都在。
-    write_auto_join_config_at(&path, "1.2.3.4:16261", Some(" s3cret ")).unwrap();
-    let content = fs::read_to_string(&path).unwrap();
-    assert!(content.contains("target=1.2.3.4:16261"));
-    assert!(content.contains("password=s3cret"));
-    assert!(content.contains("requested="));
-
-    // 空密码不写 password 行（收藏夹里存过密码时优先用收藏的）。
-    write_auto_join_config_at(&path, "1.2.3.4:16261", Some("   ")).unwrap();
-    let content = fs::read_to_string(&path).unwrap();
-    assert!(content.contains("target=1.2.3.4:16261"));
-    assert!(!content.contains("password="));
-
-    // 清理：删一次返回 true，再删返回 false。
-    assert!(clear_auto_join_config_at(&path));
-    assert!(!path.exists());
-    assert!(!clear_auto_join_config_at(&path));
-}
-
-#[test]
-fn auto_join_hook_install_and_remove() {
-    let temp = tempfile::tempdir().unwrap();
-    let game = temp.path();
-
-    // 安装：文件内容与源一致；重复安装是 no-op（返回 false，不白写磁盘）。
-    assert!(install_auto_join_hook_at(game).unwrap());
-    let hook = game
-        .join("media")
-        .join("lua")
-        .join("client")
-        .join(AUTO_JOIN_HOOK_FILE);
-    assert_eq!(fs::read_to_string(&hook).unwrap(), AUTO_JOIN_HOOK_SOURCE);
-    assert!(!install_auto_join_hook_at(game).unwrap());
-
-    // 内容变化（模拟游戏更新留下的半截文件）会被覆盖自愈。
-    fs::write(&hook, "half-written").unwrap();
-    assert!(install_auto_join_hook_at(game).unwrap());
-    assert_eq!(fs::read_to_string(&hook).unwrap(), AUTO_JOIN_HOOK_SOURCE);
-
-    // 卸载：删一次 true，再删 false。
-    assert!(remove_auto_join_hook_at(game).unwrap());
-    assert!(!hook.exists());
-    assert!(!remove_auto_join_hook_at(game).unwrap());
+fn auto_join_log_masks_password() {
+    let args = auto_join_program_args("1.2.3.4:16261", Some("s3cret"));
+    let display = auto_join_redact_password(&args).join(" ");
+    assert!(display.contains("+connect 1.2.3.4:16261"));
+    assert!(display.contains("+password ***"));
+    assert!(!display.contains("s3cret"));
+    // 没有 +password 时原样展示。
+    let plain = auto_join_program_args("1.2.3.4:16261", None);
+    assert_eq!(auto_join_redact_password(&plain), plain);
 }
 
 #[test]

@@ -1,28 +1,34 @@
 //! 自动加入服务器（设置 › 实验性功能）。
 //!
-//! 原理：B42 主菜单本来就能「启动时直接连入服务器」（Steam 邀请走的那条
-//! `+connect` / `MainScreen.lua` 读 `getServerAddressFromArgs()` 的链路），最终都收束到
-//! `ConnectToServer:connect(...)`——与直连弹窗「连接」按钮是同一个调用。启动器把一个钩子
-//! Lua 装进 `<游戏>/media/lua/client/`（散装 Lua 游戏自动加载，无需启用模组），并在每次
-//! 启动游戏前把一次性配置写进 Zomboid 主目录；钩子在主菜单就绪后按配置发起连接。
+//! 架构（2026-11-14 重构，"原生链路 + 最小钩子辅助"）：
 //!
-//! 文件生命周期：
-//! - `media/lua/client/pzm_autojoin.lua`：功能开启时随每次启动重写（游戏大版本更新会清掉
-//!   media 里的改动，靠启动时重装自愈）；关闭时启动前删除。
-//! - `%USERPROFILE%\Zomboid\Lua\pzm-autojoin.ini`：启动前写入、游戏退出后由后台线程删除；
-//!   钩子读到后也会立刻把它改写成 `consumed=1`，启动器中途被杀也不会反复触发。
+//! 1. **启动器**把游戏原生 `+connect 主机:端口`（可选 `+password 密码`）程序参数追加到
+//!    java 命令末尾（Steam 方式则写进启动项）。`MainScreenState.enter` 解析成系统属性
+//!    `args.server.connect` / `args.server.password`，主菜单就绪时游戏触发
+//!    `OnMainMenuEnter` → `LoadMainScreenPanelInt` 读属性（读后即清，天然一次性）→
+//!    `BootstrapConnectPopup:connect` 查询服务器 → 弹出 `ServerConnectPopup`
+//!    （地址/密码已预填）。**这条链路是游戏自己的 Steam 邀请代码，时机与健壮性都有保证；
+//!    它只差"点一下连接"这一下。**
 //!
-//! 密码不进日志（`describe_auto_join_password` 只报有无和位数）；配置文件里的密码是
-//! 明文，但只落在本机 Zomboid 目录——与游戏自己在收藏夹里存密码同级。
+//! 2. **钩子 Lua**（`media/lua/client/pzm_autojoin.lua`，散装 game-dir Lua，无需启用模组）
+//!    只做一件事：给 `ServerConnectPopup.setServer` 包一层——弹窗预填完之后，若目标与
+//!    本次启动的 `Zomboid\Lua\pzm-autojoin.ini` 一致，补齐用户名（Steam 模式下用
+//!    `getCurrentUserProfileName()` 兜底）并自动点一次「连接」，把原生流程升级为零点击。
+//!    钩子失败（游戏版本改动等）只损失自动点击，弹窗仍会弹出，用户手点即可——优雅降级。
+//!
+//! 历史：更早的实现是钩子在 OnGameBoot 武装 + OnFETick 轮询主菜单直接调
+//! `ConnectToServer:connect`。实测 B42.22 上武装后轮询永远不推进（连接不发起、无任何
+//! 输出），且配置路径、菜单时机、Lua 环境处处是坑。改成上面的架构后，启动器不再依赖
+//! 钩子的时机，钩子失败也不阻断连接。
+//!
+//! 密码不进日志（`describe_auto_join_password` 只报有无和位数）：密码经 `+password`
+//! 程序参数传给游戏，**不再写进 ini**（旧方案会明文落盘）。
 
 use crate::*;
 
-/// 一次性连接配置文件名（钩子读这个文件）。
-///
-/// 必须放在 `Zomboid\Lua\` 子目录：B42 的 `cacheFileExists` / `getFileReader` /
-/// `getFileWriter` 把相对路径解析到 `ZomboidFileSystem.getCacheDir()` 下的 `Lua\`
-/// （字节码实锤 + 磁盘佐证：`Zomboid\Lua\ModOptions.ini`、`keysB42.ini`），写进
-/// `Zomboid\` 根目录钩子永远读不到，只会静默不连。B41 时代的语义才是 Zomboid 根目录。
+/// 一次性目标标记（钩子判断"这个弹窗是不是启动器发起的"），放 `Zomboid\Lua\`——
+/// B42 的 `cacheFileExists`/`getFileReader` 相对路径解析到该目录（字节码与磁盘双重验证：
+/// `ModOptions.ini`、`keysB42.ini` 都在 Lua\ 下）。只写 target=，不写密码。
 pub(crate) const AUTO_JOIN_CONFIG_FILE: &str = "pzm-autojoin.ini";
 /// 装进游戏目录 `media/lua/client/` 的钩子文件名。pzm 前缀是启动器自己的命名空间，
 /// 不要放进 pzopt/（那是 PZ_Optimization Workshop 工具的目录，卸载时会被一起清掉）。
@@ -31,7 +37,7 @@ pub(crate) const AUTO_JOIN_HOOK_FILE: &str = "pzm_autojoin.lua";
 pub(crate) const AUTO_JOIN_HOOK_SOURCE: &str = include_str!("../lua/pzm_autojoin.lua");
 
 /// 「实验性 › 自动加入服务器」的地址：`主机:端口`。
-/// 与钩子 Lua 的解析严格对齐：主机段不做 trim 且不允许任何空白字符，端口必须是
+/// 与游戏主菜单的直连解析严格对齐：主机段不做 trim 且不允许任何空白字符，端口必须是
 /// 1–65535 的纯数字（前导零可以）。这里多接受一个格式，游戏里就会多一次静默拒绝，
 /// 用户只会看到"没自动连入"。IPv6 与游戏主菜单直连一样不支持。
 pub(crate) fn normalize_auto_join_target(raw: &str) -> Option<String> {
@@ -47,6 +53,43 @@ pub(crate) fn normalize_auto_join_target(raw: &str) -> Option<String> {
     Some(format!("{host}:{port}"))
 }
 
+/// 日志里展示密码状态：只报有无和位数，绝不落明文。
+pub(crate) fn describe_auto_join_password(password: Option<&str>) -> String {
+    match password.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => format!("已配置（{} 位）", value.chars().count()),
+        None => "未配置（用收藏夹保存的密码或进服后手动输入）".to_string(),
+    }
+}
+
+/// `+connect` / `+password` 程序参数（追加到 java 命令的 `MainScreenState` 之后）。
+/// 密码为空 / None 时不生成 `+password` 段（收藏夹里保存过密码的服务器优先用收藏的，
+/// 见游戏内 ServerConnectPopup:setServer 的预填逻辑）。
+pub(crate) fn auto_join_program_args(target: &str, password: Option<&str>) -> Vec<String> {
+    let mut args = vec!["+connect".to_string(), target.to_string()];
+    if let Some(password) = password.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("+password".to_string());
+        args.push(password.to_string());
+    }
+    args
+}
+
+/// 日志展示用的参数掩码：`+password` 的下一个 token（密码本身）替换成 `***`。
+/// 其余参数原样保留——java 命令日志不能因此泄明文。
+pub(crate) fn auto_join_redact_password(args: &[String]) -> Vec<String> {
+    let mut display = Vec::with_capacity(args.len());
+    let mut mask_next = false;
+    for token in args {
+        if mask_next {
+            display.push("***".to_string());
+            mask_next = false;
+            continue;
+        }
+        mask_next = token == "+password";
+        display.push(token.clone());
+    }
+    display
+}
+
 fn auto_join_hook_path(game_path: &Path) -> PathBuf {
     game_path
         .join("media")
@@ -55,7 +98,7 @@ fn auto_join_hook_path(game_path: &Path) -> PathBuf {
         .join(AUTO_JOIN_HOOK_FILE)
 }
 
-pub(crate) fn auto_join_config_path() -> Result<PathBuf, String> {
+fn auto_join_config_path() -> Result<PathBuf, String> {
     Ok(user_zomboid_directory()?
         .join("Lua")
         .join(AUTO_JOIN_CONFIG_FILE))
@@ -88,36 +131,18 @@ pub(crate) fn remove_auto_join_hook_at(game_path: &Path) -> Result<bool, String>
     Ok(true)
 }
 
-/// 写一次性连接配置到指定路径。密码为空 / None 时不写 password 行
-/// （收藏夹里保存过密码的服务器优先用收藏的，见钩子 Lua）。
-/// 父目录（`Zomboid\Lua`）缺失时顺手创建——全新用户首次启动前该目录可能还不存在。
-pub(crate) fn write_auto_join_config_at(
-    path: &Path,
-    target: &str,
-    password: Option<&str>,
-) -> Result<(), String> {
+/// 写一次性目标标记（只写 target=，密码经 `+password` 参数传给游戏，不落盘）。
+pub(crate) fn write_auto_join_config_at(path: &Path, target: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建自动加入配置目录失败：{error}"))?;
     }
-    let mut content = format!("target={target}\r\n");
-    if let Some(password) = password.map(str::trim).filter(|value| !value.is_empty()) {
-        content.push_str(&format!("password={password}\r\n"));
-    }
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis())
-        .unwrap_or(0);
-    content.push_str(&format!("requested={stamp}\r\n"));
-    fs::write(path, content).map_err(|error| format!("写入自动加入配置失败：{error}"))
+    fs::write(path, format!("target={target}\r\n"))
+        .map_err(|error| format!("写入自动加入配置失败：{error}"))
 }
 
-/// 写一次性连接配置到当前用户的 Zomboid 主目录。
-pub(crate) fn write_auto_join_config(
-    target: &str,
-    password: Option<&str>,
-) -> Result<(), String> {
+pub(crate) fn write_auto_join_config(target: &str) -> Result<(), String> {
     let path = auto_join_config_path()?;
-    write_auto_join_config_at(&path, target, password)
+    write_auto_join_config_at(&path, target)
 }
 
 /// 删除一次性配置；返回是否真的删了文件。
@@ -134,19 +159,11 @@ pub(crate) fn clear_auto_join_config() -> bool {
         .unwrap_or(false)
 }
 
-/// 日志里展示密码状态：只报有无和位数，绝不落明文。
-pub(crate) fn describe_auto_join_password(password: Option<&str>) -> String {
-    match password.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => format!("已配置（{} 位）", value.chars().count()),
-        None => "未配置（用收藏夹保存的密码或进服后手动输入）".to_string(),
-    }
-}
-
 /// 游戏退出后清理一次性配置的后台线程。
 ///
 /// 先等游戏起来（最多 5 分钟——超时说明启动失败，把配置清掉，避免用户之后手动开
 /// 游戏被抢连一次），再等游戏退出。线程随启动器退出而消亡；残留配置由钩子的
-/// `consumed=1` 自消费兜底，最坏情况是下次手动启动游戏多触发一次自动连接。
+/// `consumed=1` 自消费兜底，最坏情况是下次手动启动游戏多触发一次自动点击。
 /// 游戏检测只用 game_running_quick（纯进程快照，有界）——不碰枚举窗口的
 /// `project_zomboid_running()`，无响应窗口会把它拖住。
 #[cfg(windows)]

@@ -35,9 +35,13 @@ test("passes editable launch arguments from the details menu to the launcher", (
     /fn launch_project_zomboid\(\s*memory_mb: u64,\s*launch_args: Vec<String>,\s*fast_launch_dll_path: Option<String>,\s*launch_source: Option<String>,?\s*\)/,
   );
   assert.match(rustSource, /steam:\/\/rungameid\/\{PROJECT_ZOMBOID_APP_ID\}/);
+  // 自动加入（实验性）的 +connect/+password 程序参数与用户启动参数一起写进 Steam
+  // 启动项（steam_extra_args = effective_launch_args + auto_join_args）。
+  assert.match(rustSource, /steam_extra_args = effective_launch_args\.clone\(\)/);
+  assert.match(rustSource, /steam_extra_args\.extend\(auto_join_args\.iter\(\)\.cloned\(\)\)/);
   assert.match(
     rustSource,
-    /patch_steam_launch_options_at_paths\(\s*&steam_configs,\s*Some\(memory_mb\),\s*&effective_launch_args,\s*policy_agent,?\s*\)/,
+    /patch_steam_launch_options_at_paths\(\s*&steam_configs,\s*Some\(memory_mb\),\s*&steam_extra_args,\s*policy_agent,?\s*\)/,
   );
   // 「从游戏文件启动」：不走 ProjectZomboid64.exe（其原生 Steam 初始化在无
   // Steam 环境时直接 fatal error），改为按游戏目录 bat 的 java 命令行启动。

@@ -3120,6 +3120,19 @@ fn launch_project_zomboid(
             .filter(|settings| settings.auto_join_enabled)
             .and_then(|settings| settings.auto_join_target.as_deref())
             .and_then(normalize_auto_join_target);
+        // 原生 `+connect` 链路：java 命令末尾追加程序参数，游戏在主菜单就绪时
+        // 自己读属性发起连接（见 auto_join.rs 模块注释）。密码绝不进日志。
+        let auto_join_args = auto_join_target
+            .as_deref()
+            .map(|target| {
+                auto_join_program_args(
+                    target,
+                    settings
+                        .as_ref()
+                        .and_then(|settings| settings.auto_join_password.as_deref()),
+                )
+            })
+            .unwrap_or_default();
 
         // 极速启动（`-agentpath`）的三个前提：设置开关打开、方案是 ZombieBuddy、DLL 真的存在。
         // 任一不满足都传 None —— 那会**摘掉**已经写在启动文件里的 `-agentpath:`，
@@ -3155,10 +3168,14 @@ fn launch_project_zomboid(
         ));
         // 从游戏文件启动时不写 Steam LaunchOptions（没有 Steam 配置可写）。
         if !from_files {
+            // Steam 路径：+connect / +password 也是命令行程序参数，和用户参数一起写进
+            // 启动项（Steam 拉起游戏时一并带上）。
+            let mut steam_extra_args = effective_launch_args.clone();
+            steam_extra_args.extend(auto_join_args.iter().cloned());
             patch_steam_launch_options_at_paths(
                 &steam_configs,
                 Some(memory_mb),
-                &effective_launch_args,
+                &steam_extra_args,
                 policy_agent,
             )?;
         }
@@ -3209,17 +3226,20 @@ fn launch_project_zomboid(
                     command.classpath = classpath;
                 }
             }
-            let args = build_file_java_args(
+            let mut args = build_file_java_args(
                 &command,
                 memory_mb,
                 &effective_launch_args,
                 policy_agent,
                 fast_launch_agent.as_deref(),
             );
+            // 自动加入的 +connect / +password 属于程序参数（主类之后）；
+            // 日志对 +password 的值做掩码——密码绝不进日志。
+            args.extend(auto_join_args.iter().cloned());
             launcher_log::info(&format!(
                 "从游戏文件启动：{} {}",
                 java.display(),
-                args.join(" ")
+                auto_join_redact_password(&args).join(" ")
             ));
             Some((game_path, java, args))
         } else {
@@ -3233,13 +3253,12 @@ fn launch_project_zomboid(
             false
         });
 
-        // 自动加入服务器（设置 › 实验性功能）：钩子装进游戏目录 + 一次性配置写进 Zomboid
-        // 主目录，游戏退出后由后台线程清理（auto_join::spawn_auto_join_cleanup）。
-        // 失败都只记日志不阻断启动——大不了这次不自动连入。密码绝不进日志。
+        // 自动加入服务器（设置 › 实验性功能）：+connect / +password 参数已在上面拼进
+        // java 命令 / Steam 启动项（游戏主菜单就绪后由游戏原生链路弹连接弹窗）。
+        // 这里补三件事：① 装钩子 Lua（只负责把原生弹窗的「连接」自动点掉，失败可手点）；
+        // ② 写一次性目标标记（钩子识别本次弹窗用，只含 target，无密码）；③ 日志。
+        // 失败都只记日志不阻断启动——最坏情况是弹窗等用户手点。密码绝不进日志。
         let auto_join_armed = if let Some(target) = auto_join_target.as_deref() {
-            let auto_join_password = settings
-                .as_ref()
-                .and_then(|settings| settings.auto_join_password.as_deref());
             match project_zomboid_install_path() {
                 Some(game_path) => match install_auto_join_hook_at(&game_path) {
                     Ok(true) => {
@@ -3247,23 +3266,29 @@ fn launch_project_zomboid(
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        launcher_log::warn(&format!("自动加入：{error}（本次不会自动连入）"))
+                        launcher_log::warn(&format!("自动加入：{error}（弹窗会保留，请手动点连接）"))
                     }
                 },
                 None => launcher_log::warn(
-                    "自动加入：找不到游戏安装目录，钩子未安装（本次不会自动连入）。",
+                    "自动加入：找不到游戏安装目录，钩子未安装（弹窗会保留，请手动点连接）。",
                 ),
             }
-            match write_auto_join_config(target, auto_join_password) {
+            match write_auto_join_config(target) {
                 Ok(()) => {
                     launcher_log::info(&format!(
-                        "自动加入：本次启动将连入 {target}（密码：{}）。",
-                        describe_auto_join_password(auto_join_password)
+                        "自动加入：本次启动将连入 {target}（密码：{}），走游戏原生 +connect 直连。",
+                        describe_auto_join_password(
+                            settings
+                                .as_ref()
+                                .and_then(|settings| settings.auto_join_password.as_deref())
+                        )
                     ));
                     true
                 }
                 Err(error) => {
-                    launcher_log::warn(&format!("自动加入：{error}（本次不会自动连入）"));
+                    launcher_log::warn(&format!(
+                        "自动加入：{error}（弹窗会保留，请手动点连接）"
+                    ));
                     false
                 }
             }

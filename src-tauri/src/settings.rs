@@ -318,8 +318,16 @@ pub(crate) fn save_auto_join_settings(
         settings.auto_join_target = normalized_target;
         settings.auto_join_password = normalized_password;
     })?;
-    if !enabled && clear_auto_join_config() {
-        launcher_log::info("自动加入：已关闭并清理残留的一次性配置。");
+    if !enabled {
+        // 旧钩子机制的一次性配置已随机制退役（见 auto_join.rs）；关闭时顺手清掉残留。
+        let ini = user_zomboid_directory()
+            .ok()
+            .map(|dir| dir.join("Lua").join("pzm-autojoin.ini"));
+        if ini.as_deref().is_some_and(|path| path.is_file())
+            && fs::remove_file(ini.unwrap()).is_ok()
+        {
+            launcher_log::info("自动加入：已关闭并清理残留的一次性配置。");
+        }
     }
     Ok(())
 }
