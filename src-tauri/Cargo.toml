@@ -1,6 +1,6 @@
 [package]
 name = "pzmanager"
-version = "1.7.261114-devbuild.1794501007"
+version = "1.7.261114"
 description = "Project Zomboid launcher + mod manager"
 authors = ["叁葉 (sanyectop)"]
 license = "GPL-3.0-or-later"
